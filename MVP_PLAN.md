@@ -121,7 +121,7 @@ results = await memory.search(
     limit=10,
     decay_weight=0.25,      # How much to weight recency
     include_deleted=False,  # Default
-)
+) 
 # Returns: [{"id", "content", "score", "created_at", "metadata", ...}]
 
 # === GRAPH ===
@@ -781,4 +781,3 @@ asyncio.run(main())
 **Total: 3 weeks to usable library**
 
 After that, iterate based on user feedback before adding Phase 2 features.
-
