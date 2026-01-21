@@ -79,8 +79,8 @@ All with ACID guarantees in a single database.
 
 ## Documentation
 
-- **[Implementation Plan](./IMPLEMENTATION_PLAN.md)** - Complete implementation guide
-- **[Memory Theory](./MEMORY_THEORY.md)** - Deep dive into how each component works
+- **[Implementation Plan](./Research/IMPLEMENTATION_PLAN.md)** - Complete implementation guide
+- **[Memory Theory](./Research/MEMORY_THEORY.md)** - Deep dive into how each component works
 - **[Examples](./examples/)** - Integration examples for OpenAI, Anthropic, Ollama
 
 ## Requirements
@@ -96,4 +96,3 @@ MIT
 ---
 
 **Built with ❤️ for the AI community**
-
