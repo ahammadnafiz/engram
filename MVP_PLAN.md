@@ -257,20 +257,23 @@ engram/
 │   ├── db/
 │   │   ├── __init__.py
 │   │   ├── connection.py       # Connection pool (~100 lines)
-│   │   ├── models.py           # SQLAlchemy models (~150 lines)
+│   │   ├── models.py           # SQLAlchemy models (~100 lines)
 │   │   └── migrations/
 │   │       └── 001_initial.sql
 │   ├── memory/
 │   │   ├── __init__.py
-│   │   ├── store.py            # CRUD operations (~200 lines)
-│   │   ├── search.py           # Hybrid search (~150 lines)
-│   │   └── decay.py            # Decay scoring (~50 lines)
+│   │   ├── store.py            # CRUD operations (~150 lines)
+│   │   └── search.py           # SQL executor (~80 lines)
+│   ├── sql/                    # SQL queries (the real logic)
+│   │   ├── hybrid_search.sql   # Hybrid search CTE
+│   │   ├── semantic_search.sql # Fallback query
+│   │   └── graph_traverse.sql  # Recursive CTE
 │   ├── embedding/
 │   │   ├── __init__.py
 │   │   └── service.py          # Batching + cache (~150 lines)
 │   ├── graph/
 │   │   ├── __init__.py
-│   │   └── traversal.py        # Graph queries (~100 lines)
+│   │   └── traversal.py        # SQL executor (~60 lines)
 │   ├── session/
 │   │   ├── __init__.py
 │   │   └── manager.py          # Session context (~100 lines)
@@ -288,7 +291,20 @@ engram/
     └── openai_chatbot.py       # Full example
 ```
 
-**Estimated Total**: ~1,300 lines of code (excluding tests)
+**Estimated Total**: ~1,100 lines of Python + ~150 lines of SQL
+
+### Key Point: SQL Files Contain the Logic
+
+| File | Purpose | Lines |
+|------|---------|-------|
+| `hybrid_search.sql` | Vector + Keyword + RRF + Decay | ~50 |
+| `semantic_search.sql` | Fallback (timeout) | ~15 |
+| `graph_traverse.sql` | Recursive CTE traversal | ~40 |
+
+Python modules are **thin wrappers** that:
+1. Build parameters
+2. Execute SQL
+3. Return results as dicts
 
 ---
 
@@ -320,22 +336,23 @@ Day 5: Embedding Service
 ### Week 2: Search & Features
 
 ```
-Day 1-2: Hybrid Search
-├── Vector similarity search
-├── Keyword (tsvector) search  
-├── RRF fusion
-├── Decay weighting
-└── Combined scoring
+Day 1-2: Hybrid Search (SQL-Based)
+├── Write hybrid_search.sql (CTE query)
+├── Write semantic_only.sql (fallback)
+├── search.py - thin wrapper (~80 lines)
+├── Query timeout + fallback logic
+└── Test with sample data
 
-Day 3: Graph Traversal
-├── relate() - create relation
-├── traverse() - BFS/recursive CTE
-└── get_related() - direct neighbors
+Day 3: Graph Traversal (SQL-Based)
+├── Write traverse.sql (recursive CTE)
+├── relate() - INSERT relation
+├── traverse() - execute CTE
+└── get_related() - simple JOIN
 
 Day 4: Sessions
 ├── Session context manager
 ├── session.add()
-├── session.search()
+├── session.search() - reuse hybrid search
 ├── session.get_all()
 
 Day 5: Health & Polish
@@ -366,84 +383,259 @@ Day 5: Release
 
 ---
 
-## MVP Search Implementation
+## MVP Search Implementation (SQL-Based)
 
-The hybrid search is the core value - here's the algorithm:
+**Key Design Decision**: All search logic happens in a **single SQL query** - no Python-level fusion.
+
+### Why SQL-Only?
+
+| Approach | Round-trips | Latency | Complexity |
+|----------|-------------|---------|------------|
+| **SQL-based** ✅ | 1 | ~50ms | Query only |
+| Python fusion ❌ | 2+ | ~150ms | Cache + merge |
+
+### The Hybrid Search SQL Query
+
+```sql
+-- engram/memory/queries/hybrid_search.sql
+-- Single query: Vector + Keyword + RRF + Decay - all in SQL
+
+WITH semantic AS (
+    -- Vector similarity search
+    SELECT 
+        id, content, metadata, created_at, last_accessed_at,
+        memory_strength, access_count, importance_score,
+        1.0 - (embedding <=> :query_embedding) as semantic_score,
+        RANK() OVER (ORDER BY embedding <=> :query_embedding) as rank_semantic
+    FROM agent_memory
+    WHERE user_id = :user_id
+      AND agent_id = :agent_id
+      AND deleted_at IS NULL
+    ORDER BY embedding <=> :query_embedding
+    LIMIT :candidate_limit
+),
+keyword AS (
+    -- Full-text keyword search
+    SELECT 
+        id, content, metadata, created_at, last_accessed_at,
+        memory_strength, access_count, importance_score,
+        ts_rank_cd(text_search, plainto_tsquery('english', :query_text)) as keyword_score,
+        RANK() OVER (ORDER BY ts_rank_cd(text_search, plainto_tsquery('english', :query_text)) DESC) as rank_keyword
+    FROM agent_memory
+    WHERE user_id = :user_id
+      AND agent_id = :agent_id
+      AND deleted_at IS NULL
+      AND text_search @@ plainto_tsquery('english', :query_text)
+    LIMIT :candidate_limit
+),
+combined AS (
+    -- Combine with FULL OUTER JOIN
+    SELECT 
+        COALESCE(s.id, k.id) as id,
+        COALESCE(s.content, k.content) as content,
+        COALESCE(s.metadata, k.metadata) as metadata,
+        COALESCE(s.created_at, k.created_at) as created_at,
+        COALESCE(s.last_accessed_at, k.last_accessed_at) as last_accessed_at,
+        COALESCE(s.memory_strength, k.memory_strength) as memory_strength,
+        COALESCE(s.access_count, k.access_count) as access_count,
+        COALESCE(s.importance_score, k.importance_score) as importance_score,
+        
+        -- Semantic score (normalized 0-1)
+        COALESCE(s.semantic_score, 0) as semantic_score,
+        
+        -- Keyword score (normalized)
+        COALESCE(k.keyword_score, 0) as keyword_score,
+        
+        -- RRF scores (k=60 constant)
+        COALESCE(1.0 / (60 + s.rank_semantic), 0) as rrf_semantic,
+        COALESCE(1.0 / (60 + k.rank_keyword), 0) as rrf_keyword,
+        
+        -- Decay score: 0.995^hours_elapsed
+        POWER(0.995, EXTRACT(EPOCH FROM (NOW() - COALESCE(s.last_accessed_at, k.last_accessed_at))) / 3600) as decay_score
+        
+    FROM semantic s
+    FULL OUTER JOIN keyword k ON s.id = k.id
+)
+SELECT 
+    id, content, metadata, created_at, last_accessed_at,
+    memory_strength, access_count, importance_score,
+    semantic_score, keyword_score, decay_score,
+    
+    -- Final combined score
+    (
+        :weight_semantic * semantic_score +
+        :weight_keyword * (rrf_semantic + rrf_keyword) +
+        :weight_decay * decay_score +
+        :weight_importance * importance_score
+    ) as final_score
+    
+FROM combined
+ORDER BY final_score DESC
+LIMIT :limit;
+```
+
+### Python Wrapper (Thin Layer)
 
 ```python
-async def search(
-    self,
-    query: str,
-    user_id: str,
-    limit: int = 10,
-    decay_weight: float = 0.25,
-) -> List[Dict]:
+# engram/memory/search.py
+from sqlalchemy import text
+
+class HybridSearch:
+    """SQL-based hybrid search - Python just executes the query."""
+    
+    # Load SQL from file or define inline
+    HYBRID_SEARCH_SQL = """..."""  # The SQL above
+    
+    SEMANTIC_ONLY_SQL = """
+        -- Fallback: semantic search only (faster, for timeouts)
+        SELECT id, content, metadata, created_at,
+               1.0 - (embedding <=> :query_embedding) as score
+        FROM agent_memory
+        WHERE user_id = :user_id AND agent_id = :agent_id AND deleted_at IS NULL
+        ORDER BY embedding <=> :query_embedding
+        LIMIT :limit
     """
-    Hybrid search: Vector + Keyword + Decay
     
-    Final score = (vector_score * 0.5) + (keyword_score * 0.25) + (decay_score * 0.25)
-    """
-    
-    # 1. Get query embedding
-    query_embedding = await self.embedding_service.embed(query)
-    
-    # 2. Vector search (top 3x limit for RRF)
-    vector_results = await self._vector_search(
-        embedding=query_embedding,
-        user_id=user_id,
-        limit=limit * 3
-    )
-    
-    # 3. Keyword search (top 3x limit for RRF)
-    keyword_results = await self._keyword_search(
-        query=query,
-        user_id=user_id,
-        limit=limit * 3
-    )
-    
-    # 4. RRF Fusion
-    fused = self._rrf_fusion(vector_results, keyword_results, k=60)
-    
-    # 5. Apply decay scoring
-    scored = []
-    for memory_id, rrf_score in fused.items():
-        memory = self._memory_cache[memory_id]
-        decay_score = self._calculate_decay(memory)
+    async def search(
+        self,
+        query_text: str,
+        user_id: str,
+        limit: int = 10,
+        weight_semantic: float = 0.4,
+        weight_keyword: float = 0.2,
+        weight_decay: float = 0.25,
+        weight_importance: float = 0.15,
+        timeout_ms: int = 5000,
+    ) -> list[dict]:
+        """
+        Execute hybrid search - single SQL query.
+        Falls back to semantic-only on timeout.
+        """
+        # Get query embedding
+        query_embedding = await self.embedding_service.embed(query_text)
         
-        final_score = (
-            rrf_score * (1 - decay_weight) +
-            decay_score * decay_weight
-        )
-        scored.append((memory, final_score))
-    
-    # 6. Sort and return top limit
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [self._format_result(m, s) for m, s in scored[:limit]]
+        params = {
+            "query_text": query_text,
+            "query_embedding": str(query_embedding),  # pgvector format
+            "user_id": user_id,
+            "agent_id": self.agent_id,
+            "limit": limit,
+            "candidate_limit": limit * 3,  # Over-fetch for RRF
+            "weight_semantic": weight_semantic,
+            "weight_keyword": weight_keyword,
+            "weight_decay": weight_decay,
+            "weight_importance": weight_importance,
+        }
+        
+        async with self.db.session() as session:
+            # Set query timeout
+            await session.execute(text(f"SET LOCAL statement_timeout = '{timeout_ms}ms'"))
+            
+            try:
+                # Execute hybrid search
+                result = await session.execute(text(self.HYBRID_SEARCH_SQL), params)
+                rows = result.fetchall()
+            except Exception as e:
+                # Timeout or error - fallback to semantic only
+                logger.warning(f"Hybrid search failed, falling back: {e}")
+                result = await session.execute(text(self.SEMANTIC_ONLY_SQL), params)
+                rows = result.fetchall()
+        
+        # Convert to dicts (minimal Python processing)
+        return [dict(row._mapping) for row in rows]
+```
 
+### Default Score Weights
 
-def _rrf_fusion(self, vector_results, keyword_results, k=60):
-    """Reciprocal Rank Fusion"""
-    scores = {}
-    
-    for rank, (memory_id, _) in enumerate(vector_results):
-        scores[memory_id] = scores.get(memory_id, 0) + 1 / (k + rank + 1)
-    
-    for rank, (memory_id, _) in enumerate(keyword_results):
-        scores[memory_id] = scores.get(memory_id, 0) + 1 / (k + rank + 1)
-    
-    return scores
+| Weight | Default | Purpose |
+|--------|---------|---------|
+| `weight_semantic` | 0.40 | Vector similarity relevance |
+| `weight_keyword` | 0.20 | Exact term matches (RRF combined) |
+| `weight_decay` | 0.25 | Recency preference |
+| `weight_importance` | 0.15 | User-set importance |
 
+**Total = 1.0** (normalized scoring)
 
-def _calculate_decay(self, memory) -> float:
-    """MemoryBank decay formula"""
-    hours_elapsed = (now() - memory.last_accessed_at).total_seconds() / 3600
-    base_decay = 0.995 ** hours_elapsed
+---
+
+## MVP Graph Traversal (SQL-Based)
+
+Graph traversal also uses a **single SQL query** with recursive CTE:
+
+```sql
+-- engram/sql/graph_traverse.sql
+-- Multi-hop graph traversal using recursive CTE
+
+WITH RECURSIVE traversal AS (
+    -- Base case: start node
+    SELECT 
+        m.id,
+        m.content,
+        m.metadata,
+        0 as hop_depth,
+        ARRAY[m.id] as path,
+        1.0 as path_weight
+    FROM agent_memory m
+    WHERE m.id = :start_id
+      AND m.deleted_at IS NULL
     
-    # Boost for strength and access count
-    strength_boost = min(memory.memory_strength / 10, 1.0)
-    access_boost = min(memory.access_count / 100, 0.5)
+    UNION ALL
     
-    return base_decay * (1 + strength_boost + access_boost)
+    -- Recursive case: follow relations
+    SELECT 
+        m.id,
+        m.content,
+        m.metadata,
+        t.hop_depth + 1,
+        t.path || m.id,
+        t.path_weight * r.weight
+    FROM traversal t
+    JOIN memory_relations r ON r.source_id = t.id
+    JOIN agent_memory m ON m.id = r.target_id
+    WHERE t.hop_depth < :max_hops
+      AND r.weight >= :min_weight
+      AND m.deleted_at IS NULL
+      AND NOT (m.id = ANY(t.path))  -- Prevent cycles
+      AND (:relation_types IS NULL OR r.relation_type = ANY(:relation_types))
+)
+SELECT DISTINCT ON (id)
+    id, content, metadata, hop_depth, path, path_weight
+FROM traversal
+WHERE hop_depth > 0  -- Exclude start node
+ORDER BY id, path_weight DESC
+LIMIT :limit;
+```
+
+### Python Wrapper
+
+```python
+# engram/graph/traversal.py
+class GraphTraversal:
+    """SQL-based graph traversal."""
+    
+    TRAVERSE_SQL = """..."""  # The SQL above
+    
+    async def traverse(
+        self,
+        start_id: str,
+        relation_types: list[str] | None = None,
+        max_hops: int = 2,
+        min_weight: float = 0.5,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Execute graph traversal - single SQL query."""
+        
+        params = {
+            "start_id": start_id,
+            "relation_types": relation_types,
+            "max_hops": max_hops,
+            "min_weight": min_weight,
+            "limit": limit,
+        }
+        
+        async with self.db.session() as session:
+            result = await session.execute(text(self.TRAVERSE_SQL), params)
+            return [dict(row._mapping) for row in result]
 ```
 
 ---
