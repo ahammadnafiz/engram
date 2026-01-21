@@ -113,25 +113,72 @@ Based on Graphiti's P95 300ms latency achievement:
 ```python
 from engram import Engram
 
-# Initialize with user's embedding function
-async def my_embed(text: str) -> list[float]:
-    return await openai.embeddings.create(input=text, model="text-embedding-3-small")
+# Initialize with user's embedding function (supports batch)
+async def my_embed(texts: list[str]) -> list[list[float]]:
+    return await openai.embeddings.create(input=texts, model="text-embedding-3-small")
 
 memory = Engram(
     database_url="postgresql+asyncpg://user:pass@localhost/engram",
     embedding_fn=my_embed,
-    embedding_dim=1536,
-    agent_name="my-assistant"
+    embedding_dim=1536,  # Required: 1024, 1536, or 3072
+    agent_name="my-assistant",
+    
+    # Production configuration
+    pool_size=20,
+    max_overflow=10,
+    query_timeout_ms=5000,
+    enable_fallback=True,
+    batch_size=100,
+    cache_size=10000
 )
 
-# === BASIC MEMORY OPERATIONS ===
-await memory.add("User prefers dark mode", user_id="user_123", metadata={"type": "preference"})
+# === BASIC MEMORY OPERATIONS (CRUD) ===
+
+# Create
+memory_id = await memory.add("User prefers dark mode", user_id="user_123", metadata={"type": "preference"})
+
+# Read
 results = await memory.search("user preferences", user_id="user_123", limit=5)
+specific = await memory.get(memory_id)  # Get by ID
+recent = await memory.list_recent(user_id="user_123", limit=20)  # Recent memories
+count = await memory.count(user_id="user_123", filters={"type": "preference"})
+
+# Update
+await memory.update(memory_id, content="User strongly prefers dark mode")
+await memory.reinforce(memory_id)  # Boost memory strength manually
+await memory.tag(memory_id, tags=["ui", "preference", "important"])
+
+# Delete
+await memory.forget(memory_id)  # Soft delete
+await memory.forget_all(user_id="user_123", filters={"type": "temporary"})  # Bulk soft delete
+await memory.purge(memory_id)  # Hard delete (permanent)
+
+# === HUMAN-MEMORY-STYLE OPERATIONS ===
+
+# Consolidation (merge similar memories)
+await memory.merge(
+    memory_ids=["mem_abc", "mem_def"],
+    strategy="latest"  # or "strongest", "combined"
+)
+
+# Deduplication (find and merge duplicates)
+duplicates = await memory.find_duplicates(user_id="user_123", similarity_threshold=0.95)
+await memory.deduplicate(user_id="user_123", auto_merge=True)
+
+# Association (find related without graph)
+related = await memory.get_related(memory_id, user_id="user_123", limit=10)
+
+# Bulk operations
+memory_ids = await memory.add_batch([
+    {"content": "Memory 1", "user_id": "user_123"},
+    {"content": "Memory 2", "user_id": "user_123"}
+])
 
 # === SESSION CONTEXT ===
 async with memory.session(user_id="user_123") as session:
     await session.add("User asked about Python")
     context = await session.get_context("What did they ask about?", limit=10)
+    all_session_memories = await session.get_all()  # All memories in this session
 
 # === MEMORY DECAY (automatic, configurable) ===
 # Decay is applied automatically during search
@@ -201,9 +248,14 @@ engram/
 │   │       └── 001_initial.sql # Schema from architecture docs
 │   ├── memory/
 │   │   ├── __init__.py
-│   │   ├── store.py            # Memory CRUD operations
+│   │   ├── store.py            # Core CRUD operations (add, get, update, delete)
+│   │   ├── operations.py       # Human-memory operations (merge, deduplicate)
 │   │   ├── decay.py            # Memory decay scoring (MemoryBank)
-│   │   └── search.py           # Hybrid search (RRF + decay)
+│   │   └── search.py           # Hybrid search (RRF + decay + timeouts)
+│   ├── embedding/
+│   │   ├── __init__.py
+│   │   ├── batch_service.py    # Batched embedding generation + cache
+│   │   └── cache.py            # LRU cache for embeddings
 │   ├── graph/
 │   │   ├── __init__.py
 │   │   └── traversal.py        # Graph traversal queries
@@ -211,19 +263,37 @@ engram/
 │   │   ├── __init__.py
 │   │   ├── manager.py          # Session lifecycle
 │   │   └── summarizer.py       # Optional summarization pipeline
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   └── retry.py            # Retry logic with exponential backoff
+│   ├── health/
+│   │   ├── __init__.py
+│   │   └── checker.py          # Health check endpoints
+│   ├── maintenance/
+│   │   ├── __init__.py
+│   │   └── cleanup.py          # Background maintenance jobs
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   └── migrate_embeddings.py # Embedding model migration tool
 │   └── types.py                # Type definitions
 ├── tests/
 │   ├── conftest.py             # Pytest fixtures
-│   ├── test_memory.py
+│   ├── test_memory.py          # CRUD operations
+│   ├── test_operations.py      # merge, deduplicate, consolidate
 │   ├── test_decay.py
 │   ├── test_search.py
 │   ├── test_graph.py
-│   └── test_session.py
+│   ├── test_session.py
+│   ├── test_batching.py
+│   ├── test_retry.py
+│   └── test_health.py
 └── examples/
     ├── openai_chatbot.py       # OpenAI integration example
     ├── anthropic_chatbot.py    # Anthropic integration example
     ├── ollama_local.py         # Local model example
-    └── graph_reasoning.py      # Multi-hop graph example
+    ├── graph_reasoning.py      # Multi-hop graph example
+    ├── memory_operations.py    # CRUD and human-memory operations
+    └── production_deployment.py # Production configuration example
 ```
 
 ---
@@ -285,9 +355,17 @@ CREATE TABLE agent_memory (
     
     -- Multi-model embedding support
     embedding_model TEXT NOT NULL DEFAULT 'custom',
+    embedding_dim INT NOT NULL CHECK (embedding_dim IN (1024, 1536, 3072)),
     embedding_1024 VECTOR(1024),
     embedding_1536 VECTOR(1536),
     embedding_3072 VECTOR(3072),
+    
+    -- Constraint: exactly one embedding must be set
+    CONSTRAINT check_single_embedding CHECK (
+        (embedding_1024 IS NOT NULL)::int +
+        (embedding_1536 IS NOT NULL)::int +
+        (embedding_3072 IS NOT NULL)::int = 1
+    ),
     
     -- Metadata and search
     metadata JSONB DEFAULT '{}'::jsonb,
@@ -325,9 +403,18 @@ CREATE TABLE memory_relations (
 CREATE INDEX idx_sessions_active ON agent_sessions(agent_id, user_id, last_active_at) 
     WHERE status = 'active';
 
+-- Indices for each embedding dimension
+CREATE INDEX idx_memory_embedding_1024 ON agent_memory 
+    USING hnsw (embedding_1024 vector_cosine_ops) 
+    WHERE embedding_1024 IS NOT NULL;
+
 CREATE INDEX idx_memory_embedding_1536 ON agent_memory 
     USING hnsw (embedding_1536 vector_cosine_ops) 
-    WITH (m = 16, ef_construction = 64);
+    WHERE embedding_1536 IS NOT NULL;
+
+CREATE INDEX idx_memory_embedding_3072 ON agent_memory 
+    USING hnsw (embedding_3072 vector_cosine_ops) 
+    WHERE embedding_3072 IS NOT NULL;
 
 CREATE INDEX idx_memory_text ON agent_memory USING GIN (text_search);
 CREATE INDEX idx_memory_user ON agent_memory (agent_id, user_id, created_at DESC);
@@ -613,6 +700,363 @@ class Summarizer:
         return summary_memory
 ```
 
+### 6. Production Enhancements
+
+#### Multi-Embedding Support
+
+Support for multiple embedding dimensions (1024, 1536, 3072) with automatic column selection:
+
+```python
+# engram/client.py
+from typing import Literal
+
+EmbeddingDim = Literal[1024, 1536, 3072]
+
+class Engram:
+    def __init__(
+        self,
+        database_url: str,
+        embedding_fn: Callable[[list[str]], list[list[float]]],
+        embedding_dim: EmbeddingDim,  # Required!
+        **kwargs
+    ):
+        self.embedding_dim = embedding_dim
+        self.embedding_column = f"embedding_{embedding_dim}"
+        
+        # Validate embedding dimension
+        if embedding_dim not in [1024, 1536, 3072]:
+            raise ValueError(f"Unsupported embedding_dim: {embedding_dim}")
+```
+
+#### Query Timeouts & Fallback
+
+Prevent long-running queries from blocking the system:
+
+```python
+# engram/memory/search.py
+class HybridSearch:
+    async def search(
+        self,
+        query_text: str,
+        query_vector: list[float],
+        timeout_ms: int = 5000,
+        **kwargs
+    ):
+        """Hybrid search with timeout and fallback."""
+        async with self.session.begin():
+            # Set statement timeout
+            await self.session.execute(
+                text(f"SET LOCAL statement_timeout = '{timeout_ms}ms'")
+            )
+            
+            try:
+                # Attempt hybrid search
+                return await self._hybrid_search_query(
+                    query_text, query_vector, **kwargs
+                )
+            except asyncpg.QueryCanceledError:
+                # Fallback to semantic-only (faster)
+                logger.warning(f"Hybrid search timeout, falling back to semantic-only")
+                return await self._semantic_only_search(query_vector, **kwargs)
+```
+
+#### Embedding Batching & Caching
+
+Batch embedding API calls for 100x performance improvement:
+
+```python
+# engram/embedding/batch_service.py
+class EmbeddingService:
+    """Batched embedding generation with LRU caching."""
+    
+    def __init__(
+        self,
+        embedding_fn: Callable,
+        batch_size: int = 100,
+        batch_timeout_ms: int = 100,
+        cache_size: int = 10000
+    ):
+        self.embedding_fn = embedding_fn
+        self.batch_size = batch_size
+        self.batch_timeout_ms = batch_timeout_ms
+        self._cache = lru_cache(maxsize=cache_size)(self._hash_and_cache)
+        self.queue = asyncio.Queue()
+        self.batch_task = asyncio.create_task(self._batch_worker())
+    
+    async def embed(self, text: str) -> list[float]:
+        """Embed single text with automatic batching and caching."""
+        # Check cache
+        cache_key = self._hash_and_cache(text)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        
+        # Queue for batching
+        future = asyncio.Future()
+        await self.queue.put((text, cache_key, future))
+        return await future
+    
+    async def _batch_worker(self):
+        """Background worker that batches requests."""
+        while True:
+            batch = []
+            try:
+                # Collect batch (up to batch_size or timeout)
+                for _ in range(self.batch_size):
+                    item = await asyncio.wait_for(
+                        self.queue.get(),
+                        timeout=self.batch_timeout_ms / 1000
+                    )
+                    batch.append(item)
+            except asyncio.TimeoutError:
+                pass
+            
+            if not batch:
+                continue
+            
+            # Generate embeddings (single API call!)
+            texts = [item[0] for item in batch]
+            try:
+                embeddings = await self.embedding_fn(texts)
+                
+                # Resolve futures and cache
+                for (text, cache_key, future), embedding in zip(batch, embeddings):
+                    self._cache[cache_key] = embedding
+                    future.set_result(embedding)
+            except Exception as e:
+                # Fail all futures in batch
+                for _, _, future in batch:
+                    future.set_exception(e)
+```
+
+#### Connection Pool Monitoring
+
+Track connection pool health and prevent exhaustion:
+
+```python
+# engram/db/connection.py
+class MonitoredEngine:
+    """SQLAlchemy engine with monitoring."""
+    
+    def __init__(self, database_url: str, **kwargs):
+        self.engine = create_async_engine(
+            database_url,
+            poolclass=QueuePool,
+            pool_size=20,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+            **kwargs
+        )
+        
+        # Start monitoring
+        asyncio.create_task(self._monitor_pool())
+    
+    async def _monitor_pool(self):
+        """Background task to update metrics."""
+        while True:
+            pool = self.engine.pool
+            
+            # Alert if pool exhausted
+            if pool.checked_out() >= pool.size() + pool.overflow():
+                logger.warning("Database pool exhausted!")
+            
+            await asyncio.sleep(10)
+```
+
+#### Error Recovery with Retry
+
+Handle transient database failures automatically:
+
+```python
+# engram/utils/retry.py
+def with_retry(
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    exponential: bool = True
+):
+    """Decorator for retrying async functions with exponential backoff."""
+    
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        async def wrapper(*args, **kwargs) -> T:
+            last_exception = None
+            
+            for attempt in range(max_attempts):
+                try:
+                    return await func(*args, **kwargs)
+                except (asyncpg.ConnectionDoesNotExistError,
+                        asyncpg.ConnectionFailureError) as e:
+                    # Retryable errors
+                    last_exception = e
+                    
+                    if attempt < max_attempts - 1:
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        logger.warning(
+                            f"{func.__name__} failed (attempt {attempt + 1}/"
+                            f"{max_attempts}), retrying in {delay}s: {e}"
+                        )
+                        await asyncio.sleep(delay)
+                except Exception as e:
+                    # Non-retryable, raise immediately
+                    logger.error(f"{func.__name__} failed: {e}")
+                    raise
+            
+            raise last_exception
+        
+        return wrapper
+    return decorator
+```
+
+#### Health Checks
+
+Monitor system health for production deployments:
+
+```python
+# engram/health/checker.py
+class HealthChecker:
+    """Health check endpoints for monitoring."""
+    
+    def __init__(self, engram: Engram):
+        self.engram = engram
+    
+    async def check_database(self) -> dict:
+        """Check database connectivity and latency."""
+        start = time.time()
+        try:
+            async with self.engram.db.session() as session:
+                result = await session.execute(text("SELECT 1"))
+                assert result.scalar() == 1
+            
+            latency_ms = (time.time() - start) * 1000
+            return {
+                "status": "healthy",
+                "latency_ms": latency_ms,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+    
+    async def full_health_check(self) -> dict:
+        """Complete health assessment."""
+        return {
+            "database": await self.check_database(),
+            "pool": await self.check_pool(),
+            "search": await self.check_search_performance(),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+```
+
+#### Background Maintenance
+
+Keep memory store healthy and performant:
+
+```python
+# engram/maintenance/cleanup.py
+class MemoryMaintenance:
+    """Background maintenance for memory health."""
+    
+    def __init__(
+        self,
+        engram: Engram,
+        decay_threshold: float = 0.1,
+        cleanup_interval_hours: int = 24
+    ):
+        self.engram = engram
+        self.decay_threshold = decay_threshold
+        self.cleanup_interval_hours = cleanup_interval_hours
+        self.task = asyncio.create_task(self._maintenance_loop())
+    
+    async def _run_maintenance(self):
+        """Execute all maintenance tasks."""
+        async with self.engram.db.session() as session:
+            # 1. Decay low-importance memories
+            await session.execute(text("""
+                UPDATE agent_memory
+                SET importance_score = importance_score * 0.95
+                WHERE access_count = 0
+                  AND created_at < NOW() - INTERVAL '30 days'
+                  AND deleted_at IS NULL
+            """))
+            
+            # 2. Soft delete stale memories
+            deleted = await session.execute(text("""
+                UPDATE agent_memory
+                SET deleted_at = NOW()
+                WHERE importance_score < :threshold
+                  AND access_count = 0
+                  AND created_at < NOW() - INTERVAL '180 days'
+                  AND deleted_at IS NULL
+                RETURNING id
+            """), {"threshold": self.decay_threshold})
+            
+            # 3. Hard delete old soft-deleted records
+            await session.execute(text("""
+                DELETE FROM agent_memory
+                WHERE deleted_at < NOW() - INTERVAL '90 days'
+            """))
+            
+            await session.commit()
+```
+
+#### Embedding Model Migration Tool
+
+Zero-downtime migration between embedding models:
+
+```python
+# engram/tools/migrate_embeddings.py
+class EmbeddingMigrator:
+    """Zero-downtime embedding model migration."""
+    
+    async def migrate(
+        self,
+        old_dim: int,
+        new_dim: int,
+        new_embedding_fn: Callable,
+        batch_size: int = 100
+    ):
+        """
+        Migrate embeddings from old to new model.
+        
+        Strategy:
+        1. Add new embeddings alongside old
+        2. Update indices to use new column
+        3. Remove old embeddings after verification
+        """
+        old_col = f"embedding_{old_dim}"
+        new_col = f"embedding_{new_dim}"
+        
+        # Count memories to migrate
+        total = await self._count_memories_with_column(old_col)
+        
+        print(f"Migrating {total} memories from {old_col} to {new_col}")
+        
+        migrated = 0
+        while migrated < total:
+            # Fetch batch
+            memories = await self._fetch_batch(old_col, batch_size)
+            
+            # Generate new embeddings (batched!)
+            texts = [m["content"] for m in memories]
+            new_embeddings = await self._batch_embed(texts, new_embedding_fn)
+            
+            # Store new embeddings
+            for memory, embedding in zip(memories, new_embeddings):
+                await self._store_embedding(
+                    memory["id"], new_col, embedding, new_dim
+                )
+            
+            migrated += len(memories)
+            print(f"Progress: {migrated}/{total} ({migrated/total*100:.1f}%)")
+        
+        print("Migration complete!")
+```
+
 ---
 
 ## Dependencies
@@ -652,6 +1096,9 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "ruff>=0.1.0",
     "mypy>=1.8.0",
+]
+monitoring = [
+    "prometheus-client>=0.19.0",  # Optional metrics
 ]
 
 [build-system]
@@ -700,32 +1147,151 @@ volumes:
 
 ## Implementation Checklist
 
-| # | Task | Description | Status |
-|---|------|-------------|--------|
-| 1 | **setup-project** | Create project structure with pyproject.toml, README, and package scaffolding | ⬜ |
-| 2 | **docker-setup** | Create docker-compose.yml with pgvector/pgvector:pg16 image | ⬜ |
-| 3 | **db-schema** | Implement SQL migrations (agents, users, sessions, memory, relations) | ⬜ |
-| 4 | **db-connection** | Build async connection pool with asyncpg and monitoring hooks | ⬜ |
-| 5 | **memory-store** | Implement Memory CRUD operations (add, get, update, soft-delete) | ⬜ |
-| 6 | **memory-decay** | Implement memory decay scoring with MemoryBank formula (0.995^hours) | ⬜ |
-| 7 | **hybrid-search** | Implement hybrid search with weighted RRF + decay scoring | ⬜ |
-| 8 | **graph-traversal** | Implement graph traversal queries using memory_relations (1-3 hops) | ⬜ |
-| 9 | **session-manager** | Build session lifecycle management with auto-creation and expiry | ⬜ |
-| 10 | **summarization** | Implement optional summarization pipeline for conversation consolidation | ⬜ |
-| 11 | **client-api** | Create main Engram client class with simple public API | ⬜ |
-| 12 | **tests** | Write tests for all modules (memory, search, decay, graph, session) | ⬜ |
-| 13 | **examples** | Create integration examples for OpenAI, Anthropic, and Ollama | ⬜ |
+### Core Features
+
+| # | Task | Description | Priority | Status |
+|---|------|-------------|----------|--------|
+| 1 | **setup-project** | Create project structure with pyproject.toml, README, and package scaffolding | P0 | ⬜ |
+| 2 | **docker-setup** | Create docker-compose.yml with pgvector/pgvector:pg16 image | P0 | ⬜ |
+| 3 | **db-schema** | Implement SQL migrations (agents, users, sessions, memory, relations) | P0 | ⬜ |
+| 4 | **db-connection** | Build async connection pool with asyncpg and monitoring hooks | P0 | ⬜ |
+| 5 | **memory-store** | Implement Memory CRUD operations (add, get, update, delete, restore) | P0 | ⬜ |
+| 6 | **memory-operations** | Implement human-memory operations (merge, deduplicate, reinforce, tag) | P0 | ⬜ |
+| 7 | **memory-decay** | Implement memory decay scoring with MemoryBank formula (0.995^hours) | P0 | ⬜ |
+| 8 | **hybrid-search** | Implement hybrid search with weighted RRF + decay scoring | P0 | ⬜ |
+| 9 | **graph-traversal** | Implement graph traversal queries using memory_relations (1-3 hops) | P0 | ⬜ |
+| 10 | **session-manager** | Build session lifecycle management with auto-creation and expiry | P0 | ⬜ |
+| 11 | **summarization** | Implement optional summarization pipeline for conversation consolidation | P1 | ⬜ |
+| 12 | **client-api** | Create main Engram client class with simple public API | P0 | ⬜ |
+
+### Production Enhancements
+
+| # | Task | Description | Priority | Status |
+|---|------|-------------|----------|--------|
+| 14 | **multi-embedding-support** | Support multiple embedding dimensions (1024, 1536, 3072) with auto-detection | P0 | ⬜ |
+| 15 | **query-timeouts** | Add statement timeouts and fallback strategies for long-running queries | P0 | ⬜ |
+| 16 | **embedding-batching** | Implement batched embedding generation with caching layer | P0 | ⬜ |
+| 17 | **connection-monitoring** | Add connection pool monitoring with metrics and alerts | P1 | ⬜ |
+| 18 | **error-recovery** | Implement retry logic with exponential backoff for transient failures | P1 | ⬜ |
+| 19 | **health-checks** | Database health endpoints and connectivity validation | P1 | ⬜ |
+| 20 | **memory-cleanup** | Background job for memory decay, soft-delete cleanup, and archival | P2 | ⬜ |
+| 21 | **migration-tooling** | Build embedding model migration tool with zero-downtime strategy | P1 | ⬜ |
+| 22 | **performance-monitoring** | Add search latency tracking and slow query logging | P1 | ⬜ |
+
+### Testing & Documentation
+
+| # | Task | Description | Priority | Status |
+|---|------|-------------|----------|--------|
+| 23 | **tests** | Write tests for all modules (memory, search, decay, graph, session, batching, retry, health) | P0 | ⬜ |
+| 24 | **examples** | Create integration examples for OpenAI, Anthropic, Ollama, and production deployment | P0 | ⬜ |
+| 25 | **documentation** | Complete README with quickstart, API reference, and production guide | P0 | ⬜ |
 
 ---
 
 ## Success Criteria
 
+### Functionality
 1. **Quick Start**: User can `pip install engram` and have working memory in under 5 minutes
-2. **Search Performance**: Hybrid search with decay returns relevant results within 200ms for 100k memories
-3. **Graph Performance**: Graph traversal completes 2-hop queries in under 300ms (Graphiti benchmark)
+2. **Full CRUD**: All memory operations (create, read, update, delete, restore) work intuitively
+3. **Human-Memory Operations**: Merge, deduplicate, reinforce, and tag operations work naturally
 4. **Decay Accuracy**: Memory decay correctly prioritizes recent + frequently accessed memories
 5. **Persistence**: Sessions persist across restarts with optional summarization
-6. **Examples**: Clear integration examples for OpenAI, Anthropic, and local models
+
+### Performance
+6. **Search Performance**: Hybrid search with decay returns relevant results within 200ms for 100k memories
+7. **Graph Performance**: Graph traversal completes 2-hop queries in under 300ms (Graphiti benchmark)
+8. **Batching Efficiency**: Batched embeddings improve throughput by 100x for concurrent operations
+9. **Bulk Operations**: add_batch and update_batch handle 1000+ memories efficiently
+
+### Production Readiness
+10. **Query Timeouts**: Timeouts prevent long-running queries from blocking system
+11. **Error Recovery**: Transient failures are automatically retried with exponential backoff
+12. **Health Monitoring**: Health checks provide visibility into system status
+13. **Background Maintenance**: Automatic cleanup keeps memory store healthy
+14. **Multi-Embedding Support**: Seamless support for 1024, 1536, and 3072 dimension embeddings
+
+### Documentation
+15. **Examples**: Clear integration examples for OpenAI, Anthropic, and local models
+16. **Production Guide**: Comprehensive guide for production deployment and configuration
+
+---
+
+## Production Configuration
+
+### Recommended Settings
+
+**Connection Pool**:
+- `pool_size`: 20 (base connections)
+- `max_overflow`: 10 (burst capacity)
+- `pool_timeout`: 30s (wait for connection)
+- `pool_recycle`: 3600s (recycle connections)
+
+**Search**:
+- `query_timeout_ms`: 5000 (5 second timeout)
+- `enable_fallback`: True (fallback to semantic-only)
+- `default_limit`: 10 (results per query)
+
+**Embedding**:
+- `batch_size`: 100 (batch API calls)
+- `batch_timeout_ms`: 100 (max wait for batch)
+- `cache_size`: 10000 (LRU cache entries)
+
+**Maintenance**:
+- `cleanup_interval_hours`: 24 (daily cleanup)
+- `decay_threshold`: 0.1 (delete below this score)
+- `soft_delete_grace_days`: 90 (keep soft-deleted for 90 days)
+
+### Production Example
+
+```python
+from engram import Engram
+from engram.health import HealthChecker
+from engram.maintenance import MemoryMaintenance
+
+async def openai_embed_batch(texts: list[str]) -> list[list[float]]:
+    """Batched embedding for performance."""
+    import openai
+    response = await openai.embeddings.create(
+        model="text-embedding-3-small",
+        input=texts
+    )
+    return [e.embedding for e in response.data]
+
+# Initialize with production settings
+memory = Engram(
+    database_url="postgresql+asyncpg://user:pass@localhost/engram",
+    embedding_fn=openai_embed_batch,
+    embedding_dim=1536,
+    agent_name="production-chatbot",
+    
+    # Production configuration
+    pool_size=20,
+    max_overflow=10,
+    query_timeout_ms=5000,
+    enable_fallback=True,
+    batch_size=100,
+    cache_size=10000
+)
+
+# Start background maintenance
+maintenance = MemoryMaintenance(memory, cleanup_interval_hours=24)
+
+# Set up health checks
+health = HealthChecker(memory)
+health_status = await health.full_health_check()
+
+if not health_status["database"]["status"] == "healthy":
+    raise RuntimeError("Database unhealthy!")
+
+# Normal operations
+async with memory.session(user_id="user_123") as session:
+    await session.add("User prefers dark mode")
+    context = await session.get_context(
+        "What are user's preferences?",
+        limit=5,
+        timeout_ms=3000
+    )
+```
 
 ---
 
@@ -739,6 +1305,10 @@ These features are planned for future releases:
 - **Multi-tenancy**: Schema-per-agent for isolation
 - **Streaming Updates**: Real-time memory synchronization
 - **Cross-agent Sharing**: Shared memory between multiple agents
+- **Prometheus Metrics**: Full Prometheus integration (optional dependency available)
+- **Distributed Tracing**: OpenTelemetry integration for tracing
+- **Read Replicas**: Support for read-only replicas for scaling reads
+- **Sharding**: Horizontal scaling for massive memory stores
 
 ---
 
