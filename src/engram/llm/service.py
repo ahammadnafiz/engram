@@ -321,12 +321,14 @@ Rules:
 4. Use "User" as the subject (e.g., "User's birthday is October 24")
 5. Be precise - "User's friend Sarah" not just "User has a friend"
 6. Extract implicit facts (e.g., "I'm late for my CS class" → "User studies Computer Science")
+7. CRITICAL: Preserve relationships - when user mentions "my X's name" or "my X is Y", the fact is about USER'S X, not about USER directly. Always maintain the possessive chain accurately.
 
 Return one fact per line. Return "NONE" only if there are truly no facts.
 Do NOT include:
 - Generic statements without specific information
 - Assistant's opinions or suggestions
-- Hypotheticals or maybes"""
+- Hypotheticals or maybes
+- Misattributed facts (e.g., attributing someone else's name/property to the user)"""
 
         try:
             response = await self._provider.complete_text(

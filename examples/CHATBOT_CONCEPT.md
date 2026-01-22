@@ -296,6 +296,112 @@ Memory extraction is non-critical:
 - Facts are stored asynchronously
 - Graceful shutdown waits for pending tasks
 
+## Database Commands
+
+Useful commands to inspect the memory database directly.
+
+### View All Memories
+
+```bash
+docker exec engram-postgres psql -U engram -d engram -c "
+SELECT 
+    LEFT(content, 60) as content,
+    ROUND(importance::numeric, 2) as importance,
+    metadata->>'type' as type,
+    to_char(created_at, 'MM-DD HH24:MI') as created
+FROM agent_memory 
+ORDER BY created_at DESC 
+LIMIT 20;
+"
+```
+
+### View with Icons (Pretty Output)
+
+```bash
+docker exec engram-postgres psql -U engram -d engram -c "
+SELECT 
+    CASE 
+        WHEN metadata->>'type' = 'user_fact' THEN '👤'
+        WHEN metadata->>'type' = 'conversation_topic' THEN '💬'
+        ELSE '📌'
+    END as icon,
+    LEFT(content, 55) as content,
+    ROUND(importance::numeric, 2) as imp,
+    to_char(created_at, 'MM-DD HH24:MI') as created
+FROM agent_memory 
+ORDER BY created_at DESC;
+"
+```
+
+### Filter by Memory Type
+
+```bash
+# Only user facts
+docker exec engram-postgres psql -U engram -d engram -c "
+SELECT LEFT(content, 70), importance 
+FROM agent_memory 
+WHERE metadata->>'type' = 'user_fact'
+ORDER BY importance DESC;
+"
+
+# Only conversation topics
+docker exec engram-postgres psql -U engram -d engram -c "
+SELECT LEFT(content, 70), created_at 
+FROM agent_memory 
+WHERE metadata->>'type' = 'conversation_topic'
+ORDER BY created_at DESC;
+"
+```
+
+### Memory Statistics
+
+```bash
+docker exec engram-postgres psql -U engram -d engram -c "
+SELECT 
+    metadata->>'type' as type,
+    COUNT(*) as count,
+    ROUND(AVG(importance)::numeric, 3) as avg_importance
+FROM agent_memory 
+GROUP BY metadata->>'type';
+"
+```
+
+### Interactive Shell
+
+```bash
+# Enter psql shell
+docker exec -it engram-postgres psql -U engram -d engram
+
+# Useful commands inside psql:
+\d agent_memory                    -- Show table schema
+\dt                                -- List all tables
+SELECT COUNT(*) FROM agent_memory; -- Count memories
+\q                                 -- Quit
+```
+
+### Clear All Memories (Danger!)
+
+```bash
+docker exec engram-postgres psql -U engram -d engram -c "
+DELETE FROM agent_memory WHERE agent_id = 'assistant';
+"
+```
+
+### Table Schema Reference
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `memory_id` | TEXT | Unique ID (`mem_abc123`) |
+| `agent_id` | TEXT | Agent identifier |
+| `user_id` | TEXT | User identifier |
+| `content` | TEXT | The memory text |
+| `embedding` | VECTOR(1536) | Vector embedding |
+| `importance` | FLOAT | 0.0 to 1.0 |
+| `access_count` | INT | Times retrieved |
+| `metadata` | JSONB | `{"type": "user_fact"}` |
+| `created_at` | TIMESTAMP | Creation time |
+| `last_accessed_at` | TIMESTAMP | Last retrieval |
+
 ## Future Enhancements
 
 1. **Memory graphs**: Link related memories (e.g., "Luna" → "User's cat")
