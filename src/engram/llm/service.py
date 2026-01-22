@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryOperationType(str, Enum):
-    """Types of memory operations (Mem0-style)."""
+    """Types of memory operations."""
     ADD = "ADD"        # Create new memory
     UPDATE = "UPDATE"  # Augment existing memory with new info
     DELETE = "DELETE"  # Remove contradicted memory
@@ -250,7 +250,6 @@ class LLMService:
         """Extract atomic facts from a conversation exchange.
         
         Uses a comprehensive prompt with conversation context for better extraction.
-        Based on the Mem0 research paper's incremental extraction approach.
         
         Args:
             user_message: Current user message.
@@ -364,7 +363,7 @@ Do NOT include:
         new_fact: str,
         existing_memories: list[tuple[str, str]],  # List of (memory_id, content)
     ) -> MemoryOperation:
-        """Evaluate what operation to perform for a new fact (Mem0-style update phase).
+        """Evaluate what operation to perform for a new fact.
         
         Determines whether to ADD, UPDATE, DELETE, or NOOP based on existing memories.
         
@@ -496,7 +495,7 @@ REASON: <brief explanation>"""
         similarity_threshold: float = 0.35,
         duplicate_threshold: float = 0.85,  # Lowered to catch semantic duplicates
     ) -> ExtractionResult:
-        """Complete intelligent fact extraction and memory operation pipeline (Mem0-style).
+        """Complete intelligent fact extraction and memory operation pipeline.
         
         This is the main entry point for memory processing. It:
         1. Extracts atomic facts from the conversation exchange

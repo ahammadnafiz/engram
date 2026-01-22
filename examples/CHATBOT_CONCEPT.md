@@ -136,7 +136,7 @@ What was discussed/explained, extracted via summarization:
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Memory Operations (Mem0-Style)
+## Memory Operations
 
 When storing user facts, the chatbot uses intelligent deduplication:
 

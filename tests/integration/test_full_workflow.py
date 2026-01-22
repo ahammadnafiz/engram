@@ -6,8 +6,8 @@ Run with: pytest tests/integration -v --run-integration
 
 from __future__ import annotations
 
-import asyncio
 import os
+import uuid
 
 import pytest
 
@@ -15,21 +15,24 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-@pytest.fixture(scope="module")
-def event_loop():
-    """Create event loop for module-scoped fixtures."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def engram_client():
     """Create Engram client for integration tests."""
+    from pathlib import Path
+    from dotenv import load_dotenv
+    
+    # Load .env file to get actual database credentials (override existing)
+    env_path = Path(__file__).parent.parent.parent / ".env"
+    load_dotenv(env_path, override=True)
+    
     # Use sentence-transformers for local testing (no API key needed)
-    os.environ.setdefault("ENGRAM_EMBEDDING_PROVIDER", "sentence-transformers")
-    os.environ.setdefault("ENGRAM_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-    os.environ.setdefault("ENGRAM_EMBEDDING_DIMENSION", "384")
+    os.environ["ENGRAM_EMBEDDING_PROVIDER"] = "sentence-transformers"
+    os.environ["ENGRAM_EMBEDDING_MODEL"] = "all-MiniLM-L6-v2"
+    os.environ["ENGRAM_EMBEDDING_DIMENSION"] = "384"
+    
+    # Clear cached settings to pick up new env vars
+    from engram.core.config import clear_settings_cache
+    clear_settings_cache()
     
     from engram import Engram
 
@@ -42,7 +45,6 @@ async def engram_client():
 @pytest.fixture
 async def clean_agent(engram_client):
     """Create a unique agent and clean up after test."""
-    import uuid
     agent_id = f"test_agent_{uuid.uuid4().hex[:8]}"
     
     yield agent_id
@@ -110,6 +112,8 @@ class TestMemoryLifecycle:
     @pytest.mark.asyncio
     async def test_forget_memory(self, engram_client, clean_agent) -> None:
         """Test forgetting a memory."""
+        from engram.core.exceptions import MemoryNotFoundError
+        
         memory = await engram_client.add(
             content="Temporary fact",
             agent_id=clean_agent,
@@ -119,9 +123,9 @@ class TestMemoryLifecycle:
 
         assert deleted is True
 
-        # Should be gone
-        retrieved = await engram_client.get(memory.memory_id)
-        assert retrieved is None
+        # Should raise MemoryNotFoundError
+        with pytest.raises(MemoryNotFoundError):
+            await engram_client.get(memory.memory_id)
 
 
 class TestSearchFunctionality:
@@ -207,15 +211,22 @@ class TestGraphOperations:
             agent_id=clean_agent,
         )
 
-        relation = await engram_client.relate(
+        # relate() returns None but creates the relation
+        await engram_client.relate(
             source_id=mem1.memory_id,
             target_id=mem2.memory_id,
-            relation_type="leads_to",
+            relation_type="causes",  # Valid relation type
         )
 
-        assert relation.source_memory_id == mem1.memory_id
-        assert relation.target_memory_id == mem2.memory_id
-        assert relation.relation_type == "leads_to"
+        # Verify relation was created by traversing
+        results = await engram_client.traverse(
+            start_memory_id=mem1.memory_id,
+            max_depth=1,
+        )
+        
+        # Should find mem2 through the relation
+        found_ids = [r.memory_id for r in results]
+        assert mem2.memory_id in found_ids
 
     @pytest.mark.asyncio
     async def test_traverse_graph(self, engram_client, clean_agent) -> None:
@@ -228,9 +239,9 @@ class TestGraphOperations:
         await engram_client.relate(mem1.memory_id, mem2.memory_id)
         await engram_client.relate(mem2.memory_id, mem3.memory_id)
 
-        # Traverse from start
+        # Traverse from start (correct param name is start_memory_id)
         results = await engram_client.traverse(
-            memory_id=mem1.memory_id,
+            start_memory_id=mem1.memory_id,
             max_depth=3,
         )
 
@@ -245,6 +256,12 @@ class TestSessionManagement:
     @pytest.mark.asyncio
     async def test_session_context_manager(self, engram_client, clean_agent) -> None:
         """Test session as context manager."""
+        # First add a memory to ensure agent exists in DB
+        await engram_client.add(
+            content="Pre-session memory to create agent",
+            agent_id=clean_agent,
+        )
+        
         async with engram_client.session(agent_id=clean_agent) as session:
             assert session.is_active
             assert session.agent_id == clean_agent
@@ -265,10 +282,9 @@ class TestBatchOperations:
     @pytest.mark.asyncio
     async def test_add_batch(self, engram_client, clean_agent) -> None:
         """Test adding multiple memories in batch."""
-        from engram.memory.models import MemoryCreate
-
+        # add_batch expects list of dicts, not MemoryCreate objects
         creates = [
-            MemoryCreate(content=f"Batch memory {i}", agent_id=clean_agent)
+            {"content": f"Batch memory {i}", "agent_id": clean_agent}
             for i in range(5)
         ]
 
@@ -311,13 +327,14 @@ class TestHealthCheck:
         assert "database" in health["components"]
 
     @pytest.mark.asyncio
-    async def test_health_check_skip_embedding(self, engram_client) -> None:
-        """Test health check with skipped embedding test."""
-        health = await engram_client.health_check(skip_embedding_test=True)
+    async def test_health_check_components(self, engram_client) -> None:
+        """Test health check returns expected components."""
+        health = await engram_client.health_check()
 
         assert health["status"] == "healthy"
-        if health["components"]["embedding"]:
-            assert health["components"]["embedding"].get("test_skipped", False)
+        assert "components" in health
+        # Check embedding component is present
+        assert "embedding" in health["components"]
 
 
 class TestEdgeCases:
@@ -325,9 +342,11 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_get_nonexistent_memory(self, engram_client) -> None:
-        """Test getting non-existent memory returns None."""
-        result = await engram_client.get("nonexistent_memory_id")
-        assert result is None
+        """Test getting non-existent memory raises MemoryNotFoundError."""
+        from engram.core.exceptions import MemoryNotFoundError
+        
+        with pytest.raises(MemoryNotFoundError):
+            await engram_client.get("nonexistent_memory_id")
 
     @pytest.mark.asyncio
     async def test_forget_nonexistent_memory(self, engram_client) -> None:
