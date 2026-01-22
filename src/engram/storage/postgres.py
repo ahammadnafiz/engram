@@ -1,0 +1,386 @@
+"""PostgreSQL storage backend for Engram.
+
+This module provides the async PostgreSQL connection pool and storage
+interface using asyncpg for high-performance database operations.
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, AsyncIterator
+
+import asyncpg
+
+from engram.core.config import EngramSettings, get_settings
+from engram.core.exceptions import ConnectionError, ConnectionPoolExhaustedError
+
+if TYPE_CHECKING:
+    from asyncpg import Connection, Pool
+
+logger = logging.getLogger(__name__)
+
+# SQL directory path
+SQL_DIR = Path(__file__).parent.parent / "sql"
+
+
+class PostgresStorage:
+    """Async PostgreSQL storage backend using asyncpg.
+
+    This class manages the connection pool and provides low-level
+    database operations. It uses asyncpg for optimal performance
+    with PostgreSQL.
+
+    Example:
+        async with PostgresStorage() as storage:
+            result = await storage.fetchone("SELECT 1")
+
+        # Or explicit lifecycle management
+        storage = PostgresStorage()
+        await storage.connect()
+        try:
+            result = await storage.fetchone("SELECT 1")
+        finally:
+            await storage.close()
+    """
+
+    def __init__(self, settings: EngramSettings | None = None) -> None:
+        """Initialize storage with settings.
+
+        Args:
+            settings: Engram settings instance. If None, loads from environment.
+        """
+        self._settings = settings or get_settings()
+        self._pool: Pool | None = None
+        self._connected = False
+
+    @property
+    def pool(self) -> Pool:
+        """Get the connection pool.
+
+        Raises:
+            ConnectionError: If not connected.
+        """
+        if self._pool is None:
+            raise ConnectionError("Not connected. Call connect() first.")
+        return self._pool
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if storage is connected."""
+        return self._connected and self._pool is not None
+
+    async def connect(self) -> None:
+        """Establish database connection pool.
+
+        This method creates the asyncpg connection pool with the
+        configured settings. It should be called before any database
+        operations.
+
+        Raises:
+            ConnectionError: If connection fails.
+        """
+        if self._connected:
+            logger.warning("Already connected, skipping connect()")
+            return
+
+        try:
+            logger.info(
+                "Connecting to PostgreSQL",
+                extra={"url": self._settings.database_url[:50] + "..."},
+            )
+
+            self._pool = await asyncpg.create_pool(
+                dsn=self._settings.database_url,
+                min_size=self._settings.min_pool_size,
+                max_size=self._settings.max_pool_size,
+                timeout=self._settings.connection_timeout,
+                command_timeout=self._settings.command_timeout,
+            )
+            self._connected = True
+            logger.info("Connected to PostgreSQL successfully")
+
+        except asyncpg.PostgresError as e:
+            raise ConnectionError(
+                f"Failed to connect to PostgreSQL: {e}",
+                dsn=self._settings.database_url,
+            ) from e
+        except TimeoutError as e:
+            raise ConnectionError(
+                "Connection timeout",
+                timeout=self._settings.connection_timeout,
+            ) from e
+
+    async def close(self) -> None:
+        """Close the connection pool.
+
+        This method gracefully closes all connections in the pool.
+        It should be called when shutting down the application.
+        """
+        if self._pool is not None:
+            logger.info("Closing PostgreSQL connection pool")
+            await self._pool.close()
+            self._pool = None
+            self._connected = False
+            logger.info("PostgreSQL connection pool closed")
+
+    async def __aenter__(self) -> PostgresStorage:
+        """Async context manager entry."""
+        await self.connect()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
+        """Async context manager exit."""
+        await self.close()
+
+    @asynccontextmanager
+    async def acquire(self) -> AsyncIterator[Connection]:
+        """Acquire a connection from the pool.
+
+        This context manager ensures connections are properly returned
+        to the pool after use.
+
+        Yields:
+            A database connection.
+
+        Raises:
+            ConnectionError: If not connected.
+            ConnectionPoolExhaustedError: If pool is exhausted.
+
+        Example:
+            async with storage.acquire() as conn:
+                await conn.execute("SELECT 1")
+        """
+        if not self.is_connected:
+            raise ConnectionError("Not connected. Call connect() first.")
+
+        try:
+            async with self.pool.acquire() as conn:
+                yield conn
+        except TimeoutError as e:
+            raise ConnectionPoolExhaustedError(
+                "Connection pool exhausted",
+                pool_size=self._settings.max_pool_size,
+                timeout=self._settings.connection_timeout,
+            ) from e
+
+    async def execute(self, query: str, *args: Any) -> str:
+        """Execute a query without returning results.
+
+        Args:
+            query: SQL query to execute.
+            *args: Query parameters.
+
+        Returns:
+            Status string from the command.
+        """
+        async with self.acquire() as conn:
+            result: str = await conn.execute(query, *args)
+            return result
+
+    async def executemany(self, query: str, args: list[tuple[Any, ...]]) -> None:
+        """Execute a query with multiple parameter sets.
+
+        Args:
+            query: SQL query to execute.
+            args: List of parameter tuples.
+        """
+        async with self.acquire() as conn:
+            await conn.executemany(query, args)
+
+    async def fetchone(
+        self, query: str, *args: Any
+    ) -> asyncpg.Record | None:
+        """Fetch a single row.
+
+        Args:
+            query: SQL query to execute.
+            *args: Query parameters.
+
+        Returns:
+            A single record or None if no results.
+        """
+        async with self.acquire() as conn:
+            return await conn.fetchrow(query, *args)
+
+    async def fetchall(
+        self, query: str, *args: Any
+    ) -> list[asyncpg.Record]:
+        """Fetch all rows.
+
+        Args:
+            query: SQL query to execute.
+            *args: Query parameters.
+
+        Returns:
+            List of records.
+        """
+        async with self.acquire() as conn:
+            return await conn.fetch(query, *args)
+
+    async def fetchval(
+        self, query: str, *args: Any, column: int = 0
+    ) -> Any:
+        """Fetch a single value.
+
+        Args:
+            query: SQL query to execute.
+            *args: Query parameters.
+            column: Column index to return.
+
+        Returns:
+            The value from the specified column.
+        """
+        async with self.acquire() as conn:
+            return await conn.fetchval(query, *args, column=column)
+
+    def load_sql(self, filename: str) -> str:
+        """Load SQL from a file in the sql directory.
+
+        Args:
+            filename: Name of the SQL file (without path).
+
+        Returns:
+            Contents of the SQL file.
+
+        Raises:
+            FileNotFoundError: If the SQL file doesn't exist.
+        """
+        sql_path = SQL_DIR / filename
+        if not sql_path.exists():
+            raise FileNotFoundError(f"SQL file not found: {sql_path}")
+        return sql_path.read_text()
+
+    async def init_schema(self, embedding_dimension: int | None = None) -> None:
+        """Initialize the database schema.
+
+        This method creates all required tables and indices if they
+        don't exist. It's safe to call multiple times.
+        
+        If embedding_dimension is provided, the schema will be adjusted
+        to use that dimension for the vector column.
+
+        Args:
+            embedding_dimension: The embedding dimension to use. If None,
+                uses the default from schema.sql (1536).
+        """
+        logger.info("Initializing database schema")
+        schema_sql = self.load_sql("schema.sql")
+        await self.execute(schema_sql)
+        logger.info("Database schema initialized")
+        
+        # Adjust vector dimension if specified
+        if embedding_dimension is not None:
+            await self._ensure_vector_dimension(embedding_dimension)
+    
+    async def _get_current_vector_dimension(self) -> int | None:
+        """Get the current vector column dimension from the database.
+        
+        Returns:
+            The current dimension, or None if the column doesn't exist.
+        """
+        query = """
+        SELECT atttypmod 
+        FROM pg_attribute 
+        WHERE attrelid = 'agent_memory'::regclass 
+        AND attname = 'embedding';
+        """
+        try:
+            result = await self.fetchval(query)
+            if result is not None and result > 0:
+                return result
+            return None
+        except Exception as e:
+            # Log the error but return None since this is a probing query
+            # that may fail on first run before schema exists
+            logger.debug(f"Could not get current vector dimension: {e}")
+            return None
+    
+    async def _ensure_vector_dimension(self, target_dimension: int) -> None:
+        """Ensure the vector column has the correct dimension.
+        
+        This method checks the current dimension and adjusts it if needed.
+        It handles the case where dimensions don't match by dropping and
+        recreating the index, then altering the column type.
+        
+        Args:
+            target_dimension: The desired embedding dimension.
+        """
+        current_dimension = await self._get_current_vector_dimension()
+        
+        if current_dimension == target_dimension:
+            logger.debug(f"Vector dimension already set to {target_dimension}")
+            return
+        
+        logger.info(
+            f"Adjusting vector dimension from {current_dimension} to {target_dimension}"
+        )
+        
+        # Check if there's existing data that would be lost
+        row_count = await self.fetchval(
+            "SELECT COUNT(*) FROM agent_memory WHERE embedding IS NOT NULL"
+        )
+        
+        if row_count and row_count > 0:
+            logger.warning(
+                f"Changing vector dimension will clear {row_count} existing embeddings! "
+                "They will need to be re-embedded."
+            )
+        
+        # Drop the HNSW index first (required before altering column type)
+        logger.info("Dropping existing vector index")
+        await self.execute("DROP INDEX IF EXISTS idx_memory_embedding;")
+        
+        # Clear existing embeddings (they're incompatible with new dimension)
+        if row_count and row_count > 0:
+            logger.info("Clearing incompatible embeddings")
+            await self.execute("UPDATE agent_memory SET embedding = NULL;")
+        
+        # Alter the column to the new dimension
+        logger.info(f"Altering embedding column to VECTOR({target_dimension})")
+        await self.execute(
+            f"ALTER TABLE agent_memory ALTER COLUMN embedding TYPE VECTOR({target_dimension});"
+        )
+        
+        # Recreate the HNSW index
+        logger.info("Recreating vector index")
+        await self.execute(
+            f"""CREATE INDEX IF NOT EXISTS idx_memory_embedding ON agent_memory 
+            USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 64);"""
+        )
+        
+        logger.info(f"Vector dimension successfully set to {target_dimension}")
+
+    async def health_check(self) -> dict[str, Any]:
+        """Perform a health check on the database connection.
+
+        Returns:
+            Dictionary with health status and metrics.
+        """
+        try:
+            result = await self.fetchone("SELECT 1 as check, NOW() as timestamp")
+            pool_info = {
+                "min_size": self._settings.min_pool_size,
+                "max_size": self._settings.max_pool_size,
+                "size": self.pool.get_size() if self._pool else 0,
+                "free_size": self.pool.get_idle_size() if self._pool else 0,
+            }
+            return {
+                "status": "healthy",
+                "database": "connected",
+                "timestamp": result["timestamp"] if result else None,
+                "pool": pool_info,
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "database": "disconnected",
+                "error": str(e),
+            }

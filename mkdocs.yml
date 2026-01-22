@@ -1,0 +1,83 @@
+site_name: Engram
+site_description: AI Memory Library for LLM Applications
+site_author: Ahammad Nafiz
+site_url: https://ahammadnafiz.github.io/engram
+
+repo_name: ahammadnafiz/engram
+repo_url: https://github.com/ahammadnafiz/engram
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - content.code.annotate
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Core Concepts: concepts.md
+  - Configuration: configuration.md
+  - User Guide:
+      - Memory Operations: guide/memory.md
+      - Search: guide/search.md
+      - Graph Relations: guide/graph.md
+      - Sessions: guide/sessions.md
+  - API Reference:
+      - Client: api/client.md
+      - Memory: api/memory.md
+      - Embedding: api/embedding.md
+      - Graph: api/graph.md
+  - Examples:
+      - Overview: examples/index.md
+      - OpenAI Integration: examples/openai.md
+      - LangChain Integration: examples/langchain.md
+  - Development:
+      - Contributing: development/contributing.md
+      - Changelog: development/changelog.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            members_order: source
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ahammadnafiz/engram

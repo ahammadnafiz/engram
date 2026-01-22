@@ -1,0 +1,121 @@
+# =============================================================================
+# Engram Docker Compose
+# One-command setup for PostgreSQL + pgvector + Engram
+# =============================================================================
+#
+# Usage:
+#   ./scripts/docker-setup.sh      # Auto-detect port and start
+#   docker compose up -d           # Start with default port 5432
+#   docker compose down -v         # Stop and remove volumes
+#
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL with pgvector extension
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: engram-postgres
+    restart: unless-stopped
+    
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-engram}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-engram_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-engram}
+      # Performance tuning
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    
+    volumes:
+      # Persistent data storage
+      - engram-postgres-data:/var/lib/postgresql/data
+      # Initialization scripts (run once on first start)
+      - ./docker/init-db:/docker-entrypoint-initdb.d:ro
+    
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-engram} -d ${POSTGRES_DB:-engram}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  # Engram application (optional - for testing)
+  # ---------------------------------------------------------------------------
+  engram:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: engram-app
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+    
+    environment:
+      ENGRAM_DATABASE_URL: postgresql://${POSTGRES_USER:-engram}:${POSTGRES_PASSWORD:-engram_secret}@postgres:5432/${POSTGRES_DB:-engram}
+      ENGRAM_OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ENGRAM_EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      ENGRAM_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    
+    volumes:
+      # Mount source for development hot-reload
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ./examples:/app/examples:ro
+    
+    # Keep container running for exec commands
+    stdin_open: true
+    tty: true
+    
+    profiles:
+      - dev  # Only start with: docker compose --profile dev up
+
+  # ---------------------------------------------------------------------------
+  # pgAdmin (optional - database management UI)
+  # ---------------------------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: engram-pgadmin
+    restart: unless-stopped
+    
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@admin.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    
+    volumes:
+      - engram-pgadmin-data:/var/lib/pgadmin
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+    
+    profiles:
+      - admin  # Only start with: docker compose --profile admin up
+
+volumes:
+  engram-postgres-data:
+    name: engram-postgres-data
+  engram-pgadmin-data:
+    name: engram-pgadmin-data
+
+networks:
+  default:
+    name: engram-network
