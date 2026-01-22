@@ -407,8 +407,17 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
             raise EmbeddingProviderError(f"Failed to embed: {e}", model=self._model) from e
     
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        # Ollama doesn't support batch embedding, so we do sequential calls
-        return [await self.embed(text) for text in texts]
+        if not texts:
+            return []
+        
+        # Ollama doesn't support batch embedding natively
+        # Use asyncio.gather for parallel execution
+        import asyncio
+        return list(await asyncio.gather(*[self.embed(text) for text in texts]))
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self._client.aclose()
 
 
 # =============================================================================
@@ -557,4 +566,8 @@ class HuggingFaceEmbeddingProvider(EmbeddingProvider):
             raise
         except Exception as e:
             raise EmbeddingProviderError(f"Failed to embed batch: {e}", model=self._model) from e
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self._client.aclose()
 

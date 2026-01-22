@@ -264,3 +264,27 @@ class RelationNotFoundError(GraphError):
     """Raised when a relation does not exist."""
 
     pass
+
+
+# ============================================================================
+# LLM Errors
+# ============================================================================
+
+
+class LLMError(EngramError):
+    """Base class for LLM-related errors."""
+
+    pass
+
+
+class LLMProviderError(LLMError):
+    """Raised when LLM provider fails.
+
+    This error is raised when:
+    - OpenAI API call fails
+    - Anthropic API call fails
+    - Ollama server is unreachable
+    - Rate limiting or quota exceeded
+    """
+
+    pass

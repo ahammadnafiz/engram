@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from engram.providers.llm.protocol import LLMProvider, LLMMessage, LLMResponse
 from engram.providers.llm.registry import llm_registry
-from engram.core.exceptions import ConfigurationError
+from engram.core.exceptions import ConfigurationError, LLMProviderError
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
@@ -124,9 +124,9 @@ class OpenAILLMProvider(LLMProvider):
                 raw=response,
             )
         except self._openai.APIError as e:
-            raise RuntimeError(f"OpenAI API error: {e}") from e
+            raise LLMProviderError(f"OpenAI API error: {e}", model=self._model) from e
         except Exception as e:
-            raise RuntimeError(f"Failed to complete: {e}") from e
+            raise LLMProviderError(f"Failed to complete: {e}", model=self._model) from e
 
 
 # =============================================================================
@@ -225,9 +225,9 @@ class AnthropicLLMProvider(LLMProvider):
                 raw=response,
             )
         except self._anthropic.APIError as e:
-            raise RuntimeError(f"Anthropic API error: {e}") from e
+            raise LLMProviderError(f"Anthropic API error: {e}", model=self._model) from e
         except Exception as e:
-            raise RuntimeError(f"Failed to complete: {e}") from e
+            raise LLMProviderError(f"Failed to complete: {e}", model=self._model) from e
 
 
 # =============================================================================
@@ -311,9 +311,13 @@ class OllamaLLMProvider(LLMProvider):
                 raw=data,
             )
         except self._httpx.HTTPError as e:
-            raise RuntimeError(f"Ollama API error: {e}") from e
+            raise LLMProviderError(f"Ollama API error: {e}", model=self._model) from e
         except Exception as e:
-            raise RuntimeError(f"Failed to complete: {e}") from e
+            raise LLMProviderError(f"Failed to complete: {e}", model=self._model) from e
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self._client.aclose()
 
 
 # =============================================================================
@@ -405,9 +409,13 @@ class GroqLLMProvider(LLMProvider):
                 raw=data,
             )
         except self._httpx.HTTPError as e:
-            raise RuntimeError(f"Groq API error: {e}") from e
+            raise LLMProviderError(f"Groq API error: {e}", model=self._model) from e
         except Exception as e:
-            raise RuntimeError(f"Failed to complete: {e}") from e
+            raise LLMProviderError(f"Failed to complete: {e}", model=self._model) from e
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self._client.aclose()
 
 
 # =============================================================================
@@ -501,5 +509,5 @@ class LiteLLMLLMProvider(LLMProvider):
                 raw=response,
             )
         except Exception as e:
-            raise RuntimeError(f"LiteLLM error: {e}") from e
+            raise LLMProviderError(f"LiteLLM error: {e}", model=self._model) from e
 

@@ -32,6 +32,7 @@ Example:
 
 from engram.providers.llm.protocol import LLMProvider, LLMMessage, LLMResponse
 from engram.providers.llm.registry import llm_registry, get_llm_provider
+from engram.core.exceptions import LLMProviderError
 
 # Import built-in providers to register them
 from engram.providers.llm import builtin  # noqa: F401
@@ -40,6 +41,7 @@ __all__ = [
     "LLMProvider",
     "LLMMessage",
     "LLMResponse",
+    "LLMProviderError",
     "llm_registry",
     "get_llm_provider",
 ]
