@@ -107,7 +107,7 @@ asyncio.run(main())
   
     All configuration options explained.
 
-- :material-api: **[API Reference](api/client.md)**
+- :material-api: **[API Reference](api.md)**
   
     Complete API documentation.
 
