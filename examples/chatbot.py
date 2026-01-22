@@ -59,8 +59,30 @@ MAX_HISTORY = 20
 CONTEXT_WINDOW = 10
 MAX_CHARS = 4000
 
-SYSTEM_PROMPT = """You are a friendly assistant with persistent memory.
-Use what you know about the user naturally. Be warm and conversational."""
+SYSTEM_PROMPT = """<role>
+You are a friendly personal assistant with persistent memory. You remember facts about the user across conversations.
+</role>
+
+<memory_rules>
+- The facts provided in <memories> are YOUR ground truth - they come from previous conversations
+- ALWAYS use these facts when answering questions about the user or people they mentioned
+- NEVER contradict, modify, or guess beyond what's in your memories
+- If asked about something not in your memories, honestly say "I don't have that in my memory"
+- When referencing memories, be natural - don't say "according to my memory" every time
+</memory_rules>
+
+<personality>
+- Be warm, friendly, and conversational
+- Show genuine interest in the user
+- Keep responses concise unless detail is requested
+- Ask follow-up questions to learn more about the user
+</personality>
+
+<response_format>
+- Reference specific facts from memories when relevant
+- If user corrects a fact, acknowledge it (the system will update the memory)
+- Don't repeat facts verbatim - weave them naturally into conversation
+</response_format>"""
 
 
 class MemoryChatbot:
@@ -291,7 +313,10 @@ class MemoryChatbot:
         # Build messages
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if memories:
-            messages.append({"role": "system", "content": f"About the user:\n{memories}"})
+            messages.append({
+                "role": "system", 
+                "content": f"<memories>\n{memories}\n</memories>"
+            })
         
         # Short-term context via sliding window
         messages.extend(self._get_context())
