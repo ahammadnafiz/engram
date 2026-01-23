@@ -260,12 +260,14 @@ class MemoryChatbot:
             limit=3,
         )
         
-        # Skip duplicates
+        # Skip exact duplicates (very high similarity)
         for r in similar:
-            if r.score > 0.85:
+            if r.score > 0.90:  # Raised threshold - was 0.85
                 return
         
-        existing = [(r.memory.memory_id, r.memory.content) for r in similar if r.score > 0.4]
+        # Only consider memories with high relevance for dedup decisions
+        # Lower threshold means more false positives (NOOP when should ADD)
+        existing = [(r.memory.memory_id, r.memory.content) for r in similar if r.score > 0.55]  # Raised from 0.4
         
         # Build main_content: preserve conversation context (not embedded)
         ai_summary = await self._summarize_response(bot_msg)
