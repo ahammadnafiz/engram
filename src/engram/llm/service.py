@@ -301,33 +301,46 @@ Assistant: {assistant_response}
 Extract ALL atomic facts about the user from this exchange. An atomic fact is a single, 
 self-contained piece of information that can stand alone.
 
-Categories to extract:
-- Identity: name, age, birthday, gender, nationality, location
-- Professional: job title, company, university, field of study, skills, projects
-- Relationships: family members, friends, colleagues, pets (include names)
-- Preferences: likes, dislikes, favorites (food, music, colors, hobbies)
+Categories to extract (EXTRACT ALL that apply):
+- Identity: name, age, birthday, gender, nationality, location, where they live
+- Work: job title, company name, role, what they work on, technologies used
+- Projects: SPECIFIC project names, what they're building, project status (v1, done, in progress)
+- Education: university, degree, field of study, courses
+- Relationships: family members, friends, colleagues, pets (INCLUDE NAMES)
+- Preferences: likes, dislikes, favorites (food, music, hobbies)
 - Schedule: appointments, meetings, plans, events (include times/dates/locations)
-- Goals: aspirations, things they want to do, projects planned
+- Goals: aspirations, things they want to do, future plans
 - Possessions: devices, vehicles, items they own
-- Health: conditions, allergies, dietary restrictions
-- Contact: email, phone, social media handles
-- Any other specific personal information
+- Any other SPECIFIC personal information
 
-Rules:
-1. Extract EVERY distinct fact - don't combine multiple facts into one
-2. Each fact must be self-contained and understandable without context
-3. Include specific details: names, times, dates, places, numbers
-4. Use "User" as the subject (e.g., "User's birthday is October 24")
-5. Be precise - "User's friend Sarah" not just "User has a friend"
-6. Extract implicit facts (e.g., "I'm late for my CS class" → "User studies Computer Science")
-7. CRITICAL: Preserve relationships - when user mentions "my X's name" or "my X is Y", the fact is about USER'S X, not about USER directly. Always maintain the possessive chain accurately.
+CRITICAL RULES:
+1. BE SPECIFIC - Extract exact names, project names, company names, technologies
+   BAD: "User has a favorite project" ❌
+   GOOD: "User is building AI memory layer for GenAI apps" ✓
+   
+2. Extract EVERY distinct fact separately - don't combine
+   BAD: "User works at X and is building Y" ❌
+   GOOD: Two facts: "User works at X" AND "User is building Y" ✓
 
-Return one fact per line. Return "NONE" only if there are truly no facts.
+3. Include current status when mentioned
+   "I already done the v1" → "User completed version 1 of their AI memory layer project"
+   
+4. Use "User" as subject: "User's birthday is October 24"
+
+5. Be precise with names: "User's friend Sarah" not "User has a friend"
+
+6. Extract implicit facts: "I'm late for CS class" → "User studies Computer Science"
+
+7. Preserve possessive chains: "my girlfriend's name is X" → "User's girlfriend's name is X"
+
+8. NEVER return vague facts like "User has a project (not mentioned)" - either extract the specific name or don't include it
+
+Return one fact per line. Return "NONE" ONLY if truly no extractable facts.
 Do NOT include:
-- Generic statements without specific information
-- Assistant's opinions or suggestions
-- Hypotheticals or maybes
-- Misattributed facts (e.g., attributing someone else's name/property to the user)"""
+- Vague facts with "(not mentioned)" or "(unknown)" - these are useless
+- Generic statements without specifics
+- Assistant's opinions
+- Hypotheticals"""
 
         try:
             response = await self._provider.complete_text(
@@ -393,23 +406,31 @@ New Fact: {new_fact}
 Existing Memories:
 {memories_text}
 
-DECISION RULES:
-1. NOOP - Use when new fact says THE SAME THING as an existing memory (even if worded differently)
-   Example: "User's LinkedIn is X" and "User's LinkedIn profile is X" = NOOP
-   
-2. DELETE - Use when new fact CONTRADICTS/REPLACES an existing memory
-   Example: "User switched to Bank B" contradicts "User banks at Bank A" = DELETE #n
-   Example: "User now studies Y" contradicts "User studies X" = DELETE #n
-   
-3. UPDATE - Use when new fact ADDS DETAIL to an existing memory (merge them)
-   Example: "User's sister Nadia" + "Nadia is in Toronto" = UPDATE with merged info
-   
-4. ADD - Use ONLY when the fact is completely new information
+DECISION RULES (in order of priority):
 
-CRITICAL: Look for semantic equivalence, not just word matching!
-- "LinkedIn is X" ≈ "LinkedIn profile is X" = SAME (NOOP)
-- "has 2 cats Luna and Milo" ≈ "has cats named Luna and Milo" = SAME (NOOP)
-- "switched to Y" means old X is WRONG = DELETE old, the new fact replaces it
+1. ADD - Use when fact contains NEW INFORMATION not in any existing memory
+   - Different topic/category = ADD (e.g., job vs project vs location)
+   - Same person but different attribute = ADD
+   - "User is building AI memory layer" vs "User works at AskTuring" = ADD (different info!)
+   
+2. NOOP - Use ONLY when new fact is SEMANTICALLY IDENTICAL to an existing memory
+   - "User's LinkedIn is X" ≈ "User's LinkedIn profile is X" = NOOP
+   - "User has cats Luna and Milo" ≈ "User has 2 cats named Luna and Milo" = NOOP
+   - Must be SAME topic AND SAME information
+   
+3. DELETE - Use when new fact CONTRADICTS/REPLACES an existing memory
+   - "User switched to Bank B" contradicts "User banks at Bank A" = DELETE
+   - "User now lives in NYC" contradicts "User lives in Dhaka" = DELETE
+   
+4. UPDATE - Use when new fact ADDS DETAIL to existing (merge them)
+   - "User's sister Nadia" + "Nadia lives in Toronto" = UPDATE with merged
+
+CRITICAL - Common mistakes to avoid:
+- ❌ NOOP for loosely related facts (job vs project) - these should be ADD
+- ❌ NOOP when topic is same but info is different - should be ADD or UPDATE
+- ✅ NOOP only for truly duplicate information
+
+Default to ADD if unsure - it's better to store extra than lose information.
 
 Respond in this EXACT format (4 lines):
 OPERATION: <ADD|UPDATE|DELETE|NOOP>
@@ -492,8 +513,8 @@ REASON: <brief explanation>"""
         *,
         conversation_history: list[dict[str, str]] | None = None,
         conversation_summary: str | None = None,
-        similarity_threshold: float = 0.35,
-        duplicate_threshold: float = 0.85,  # Lowered to catch semantic duplicates
+        similarity_threshold: float = 0.50,  # Only consider highly related memories
+        duplicate_threshold: float = 0.92,  # Only skip truly identical facts
     ) -> ExtractionResult:
         """Complete intelligent fact extraction and memory operation pipeline.
         
@@ -635,7 +656,7 @@ REASON: <brief explanation>"""
             if a_topics & b_topics:
                 return True
         
-        # Jaccard similarity with lower threshold for longer texts
+        # Jaccard similarity - be conservative to avoid false positives
         intersection = len(a_words & b_words)
         union = len(a_words | b_words)
         
@@ -644,8 +665,9 @@ REASON: <brief explanation>"""
         
         jaccard = intersection / union
         
-        # More lenient for shorter facts
-        threshold = 0.5 if len(a_words) < 5 or len(b_words) < 5 else 0.4
+        # Higher threshold = fewer false positives (better to ADD than skip)
+        # 0.7 means 70% of words must overlap to be considered "similar"
+        threshold = 0.7
         
         return jaccard > threshold
     

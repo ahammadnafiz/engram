@@ -36,8 +36,11 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 # Config
-EMBEDDING_PROVIDER = "openai"
-EMBEDDING_MODEL = "text-embedding-3-small"
+# EMBEDDING_PROVIDER = "openai"
+# EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_PROVIDER = "sentence-transformers"  # Local, FREE!
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # 384 dimensions, fast
+
 LLM_PROVIDER = "openai"
 LLM_MODEL = "gpt-4o-mini"
 
@@ -65,23 +68,23 @@ You are a friendly personal assistant with persistent memory. You remember facts
 
 <memory_rules>
 - The facts provided in <memories> are YOUR ground truth - they come from previous conversations
-- ALWAYS use these facts when answering questions about the user or people they mentioned
-- NEVER contradict, modify, or guess beyond what's in your memories
-- If asked about something not in your memories, honestly say "I don't have that in my memory"
-- When referencing memories, be natural - don't say "according to my memory" every time
+- ALWAYS use these facts when answering questions about the user
+- Pay special attention to: name, job, company, projects, interests, preferences
+- If asked about projects/work, check memories for specific project names
+- NEVER contradict or guess beyond what's in your memories
+- If asked about something not in your memories, say "I don't have that in my memory"
 </memory_rules>
 
 <personality>
 - Be warm, friendly, and conversational
 - Show genuine interest in the user
 - Keep responses concise unless detail is requested
-- Ask follow-up questions to learn more about the user
+- Ask follow-up questions to learn more
 </personality>
 
 <response_format>
-- Reference specific facts from memories when relevant
-- If user corrects a fact, acknowledge it (the system will update the memory)
-- Don't repeat facts verbatim - weave them naturally into conversation
+- Reference specific facts naturally (don't say "according to my memory")
+- If user corrects a fact, acknowledge it
 </response_format>"""
 
 
@@ -107,11 +110,18 @@ class MemoryChatbot:
         api_key = os.environ.get("OPENAI_API_KEY")
         
         # EmbeddingService - for vector embeddings
-        self.embedding = EmbeddingService.from_provider(
-            EMBEDDING_PROVIDER,
-            model=EMBEDDING_MODEL,
-            api_key=api_key,
-        )
+        # sentence-transformers is local (no API key needed)
+        if EMBEDDING_PROVIDER == "sentence-transformers":
+            self.embedding = EmbeddingService.from_provider(
+                EMBEDDING_PROVIDER,
+                model=EMBEDDING_MODEL,
+            )
+        else:
+            self.embedding = EmbeddingService.from_provider(
+                EMBEDDING_PROVIDER,
+                model=EMBEDDING_MODEL,
+                api_key=api_key,
+            )
         
         # LLMService - for chat and fact extraction
         self.llm = LLMService.from_provider(LLM_PROVIDER, model=LLM_MODEL, api_key=api_key)
@@ -232,6 +242,10 @@ class MemoryChatbot:
                 user_msg, bot_msg,
                 conversation_history=self.history[-6:],
             )
+            
+            # Debug: show extracted facts (comment out in production)
+            if facts and os.environ.get("DEBUG_FACTS"):
+                print(f"  📝 Extracted: {facts}")
             
             for fact in facts:
                 # Pass conversation context for main_content
