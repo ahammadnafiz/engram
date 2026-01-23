@@ -2,6 +2,7 @@
 -- Hybrid Search Query
 -- Combines vector similarity, keyword matching (via RRF), time decay, and importance
 -- Uses RRF (Reciprocal Rank Fusion) for combining semantic and keyword rankings
+-- Two-column system: searches on fact column, returns both fact and main_content
 -- ============================================================================
 
 -- Parameters:
@@ -17,15 +18,17 @@
 -- $10: decay_rate (FLOAT) - Decay rate per hour
 
 WITH 
--- Vector similarity search with ranking
+-- Vector similarity search with ranking (searches fact embeddings)
 semantic_search AS (
     SELECT 
         memory_id,
-        content,
+        fact,
+        main_content,
         importance,
         metadata,
         created_at,
         last_accessed_at,
+        access_count,
         -- Cosine similarity: 1 - cosine_distance (range roughly -1 to 1, usually 0 to 1 for similar content)
         GREATEST(0, 1 - (embedding <=> $1::vector)) AS semantic_score,
         -- Rank for RRF
@@ -38,18 +41,18 @@ semantic_search AS (
     LIMIT $5 * 3  -- Overfetch for RRF fusion
 ),
 
--- Keyword/BM25 search with ranking
+-- Keyword/BM25 search with ranking (searches fact_tsv)
 keyword_search AS (
     SELECT 
         memory_id,
-        ts_rank_cd(content_tsv, plainto_tsquery('english', $2)) AS keyword_score_raw,
+        ts_rank_cd(fact_tsv, plainto_tsquery('english', $2)) AS keyword_score_raw,
         ROW_NUMBER() OVER (
-            ORDER BY ts_rank_cd(content_tsv, plainto_tsquery('english', $2)) DESC
+            ORDER BY ts_rank_cd(fact_tsv, plainto_tsquery('english', $2)) DESC
         ) AS keyword_rank
     FROM agent_memory
     WHERE agent_id = $3
         AND ($4::text IS NULL OR user_id = $4)
-        AND content_tsv @@ plainto_tsquery('english', $2)
+        AND fact_tsv @@ plainto_tsquery('english', $2)
     ORDER BY keyword_score_raw DESC
     LIMIT $5 * 3  -- Overfetch for RRF fusion
 ),
@@ -59,11 +62,13 @@ keyword_search AS (
 combined AS (
     SELECT 
         COALESCE(s.memory_id, k.memory_id) AS memory_id,
-        COALESCE(s.content, k_mem.content) AS content,
+        COALESCE(s.fact, k_mem.fact) AS fact,
+        COALESCE(s.main_content, k_mem.main_content) AS main_content,
         COALESCE(s.importance, k_mem.importance) AS importance,
         COALESCE(s.metadata, k_mem.metadata) AS metadata,
         COALESCE(s.created_at, k_mem.created_at) AS created_at,
         COALESCE(s.last_accessed_at, k_mem.last_accessed_at) AS last_accessed_at,
+        COALESCE(s.access_count, k_mem.access_count) AS access_count,
         
         -- Direct semantic similarity score (0-1 range)
         COALESCE(s.semantic_score, 0) AS semantic_score,
@@ -76,7 +81,7 @@ combined AS (
             
     FROM semantic_search s
     FULL OUTER JOIN keyword_search k ON s.memory_id = k.memory_id
-    -- Join to get content/metadata for keyword-only results
+    -- Join to get fact/metadata for keyword-only results
     LEFT JOIN agent_memory k_mem ON k.memory_id = k_mem.memory_id AND s.memory_id IS NULL
 ),
 
@@ -84,11 +89,13 @@ combined AS (
 scored AS (
     SELECT 
         memory_id,
-        content,
+        fact,
+        main_content,
         importance,
         metadata,
         created_at,
         last_accessed_at,
+        access_count,
         semantic_score,
         -- Combined RRF score (sum of both rankings, scaled to ~0-1)
         -- Max RRF sum ≈ 2 * 1/61 ≈ 0.033, so multiply by 30 to normalize
@@ -105,11 +112,13 @@ scored AS (
 final_scored AS (
     SELECT 
         memory_id,
-        content,
+        fact,
+        main_content,
         importance,
         metadata,
         created_at,
         last_accessed_at,
+        access_count,
         semantic_score,
         rrf_combined AS keyword_score,  -- The normalized RRF fusion score
         decay_score,
@@ -125,11 +134,14 @@ final_scored AS (
 
 SELECT 
     memory_id,
-    content,
+    fact AS content,  -- Return fact as content for backward API compatibility
+    fact,
+    main_content,
     importance,
     metadata,
     created_at,
     last_accessed_at,
+    access_count,
     semantic_score,
     keyword_score,
     decay_score,

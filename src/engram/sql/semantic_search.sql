@@ -1,6 +1,7 @@
 -- ============================================================================
 -- Semantic Search Query
 -- Pure vector similarity search without keyword matching
+-- Two-column system: searches on fact embeddings, returns both fact and main_content
 -- ============================================================================
 
 -- Parameters:
@@ -15,7 +16,9 @@
 
 SELECT 
     memory_id,
-    content,
+    fact AS content,  -- Return fact as content for backward API compatibility
+    fact,
+    main_content,
     importance,
     metadata,
     created_at,

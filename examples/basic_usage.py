@@ -6,6 +6,13 @@ Engram Comprehensive Demo
 Advanced demo showcasing Engram's full capabilities with realistic content,
 complex relationships, and thorough testing of all API operations.
 
+Two-Column Memory System:
+    Engram uses a cost-effective two-column approach:
+    - `content` (fact): The extracted fact - EMBEDDED for hybrid search
+    - `main_content`: Full conversation context - NOT embedded (free storage)
+    
+    This preserves full context without increasing embedding API costs.
+
 This demo uses sentence-transformers (local, free embeddings) by default,
 but works with ANY provider thanks to Engram's pluggable architecture.
 
@@ -30,14 +37,14 @@ Provider Options:
 
 Usage:
     # Default (sentence-transformers)
-    python examples/demo_sentence_transformers.py
+    python examples/basic_usage.py
     
     # With OpenAI
-    ENGRAM_EMBEDDING_PROVIDER=openai python examples/demo_sentence_transformers.py
+    ENGRAM_EMBEDDING_PROVIDER=openai python examples/basic_usage.py
 
 Operations Demonstrated:
     - health_check()  - System health verification
-    - add()           - Individual memory storage
+    - add()           - Individual memory storage (with main_content)
     - add_batch()     - Bulk memory insertion
     - search()        - Hybrid semantic + keyword search
     - get()           - Retrieve by ID
@@ -122,32 +129,38 @@ async def main():
         print_header("Building User Profile", "👤")
         
         # Personal Information
-        print_subheader("Personal Details")
+        # Demonstrating the TWO-COLUMN MEMORY SYSTEM:
+        #   - content: The fact (EMBEDDED for search)
+        #   - main_content: Full conversation context (NOT embedded, preserved for context)
+        print_subheader("Personal Details (Two-Column System)")
         personal_memories = []
         
         personal_memories.append(await memory.add(
-            content="Sarah Chen is a 32-year-old software architect living in Seattle, Washington. She moved there from San Francisco in 2022 for a job at a cloud computing startup.",
+            content="Sarah Chen is a 32-year-old software architect living in Seattle",
+            main_content="[USER]: I'm Sarah Chen, 32, and I work as a software architect. I moved to Seattle from San Francisco in 2022.\n[AI]: Welcome to Seattle! That's an exciting career move.",
             agent_id=agent_id,
             user_id=user_id,
             metadata={"category": "personal", "confidence": 0.95}
         ))
-        print(f"  ✓ Added: Personal background")
+        print(f"  ✓ Added: Personal background (with context)")
         
         personal_memories.append(await memory.add(
-            content="Sarah has a golden retriever named Apollo who is 4 years old. She adopted him from a rescue shelter and he's her favorite hiking companion.",
+            content="Sarah has a golden retriever named Apollo who is 4 years old",
+            main_content="[USER]: I have a golden retriever named Apollo, he's 4. Adopted him from a shelter!\n[AI]: Apollo sounds wonderful! Rescue dogs are the best.",
             agent_id=agent_id,
             user_id=user_id,
             metadata={"category": "personal", "subcategory": "pets"}
         ))
-        print(f"  ✓ Added: Pet information")
+        print(f"  ✓ Added: Pet information (with context)")
         
         personal_memories.append(await memory.add(
-            content="Sarah is allergic to shellfish and avoids restaurants that primarily serve seafood. She discovered this allergy during a trip to Maine when she was 25.",
+            content="Sarah is allergic to shellfish - discovered during Maine trip at age 25",
+            main_content="[USER]: I'm allergic to shellfish. Found out the hard way in Maine when I was 25.\n[AI]: That's important to know. I'll remember to avoid seafood recommendations.",
             agent_id=agent_id,
             user_id=user_id,
             metadata={"category": "health", "severity": "high"}
         ))
-        print(f"  ✓ Added: Health/allergy info")
+        print(f"  ✓ Added: Health/allergy info (with context)")
         
         # Professional Information
         print_subheader("Professional Details")
@@ -234,39 +247,43 @@ async def main():
         # ================================================================
         print_header("Batch Insert - Recent Conversations", "📦")
         
+        # Batch insert also supports main_content for two-column system
         conversation_batch = [
             {
-                "content": "Sarah asked about implementing circuit breakers in their microservices to prevent cascade failures. She wants to use the Hystrix pattern but in Go.",
+                "content": "Sarah wants to implement circuit breakers in microservices using Hystrix pattern in Go",
+                "main_content": "[USER]: How do I implement circuit breakers in Go?\n[AI]: The Hystrix pattern is great for preventing cascade failures.",
                 "agent_id": agent_id,
                 "user_id": user_id,
                 "metadata": {"category": "technical", "topic": "resilience"}
             },
             {
-                "content": "Sarah mentioned her team is adopting OpenTelemetry for distributed tracing. They previously used Jaeger but want vendor-neutral instrumentation.",
+                "content": "Sarah's team is adopting OpenTelemetry for distributed tracing, migrating from Jaeger",
+                "main_content": "[USER]: We're moving to OpenTelemetry from Jaeger.\n[AI]: Good choice for vendor-neutral instrumentation!",
                 "agent_id": agent_id,
                 "user_id": user_id,
                 "metadata": {"category": "technical", "topic": "observability"}
             },
             {
-                "content": "Sarah expressed interest in attending KubeCon in Chicago this November. She submitted a talk proposal about their migration from Kubernetes to Nomad for edge computing.",
+                "content": "Sarah submitted a KubeCon talk proposal about Kubernetes to Nomad migration",
                 "agent_id": agent_id,
                 "user_id": user_id,
                 "metadata": {"category": "events", "event": "KubeCon"}
             },
             {
-                "content": "Sarah's birthday is March 15th. She mentioned she doesn't like surprise parties but enjoys small gatherings with close friends.",
+                "content": "Sarah's birthday is March 15th - prefers small gatherings over surprise parties",
+                "main_content": "[USER]: My birthday is March 15th. I don't like surprises.\n[AI]: Noted! Small gatherings it is.",
                 "agent_id": agent_id,
                 "user_id": user_id,
                 "metadata": {"category": "personal", "type": "birthday"}
             },
             {
-                "content": "Sarah is reading 'Designing Data-Intensive Applications' by Martin Kleppmann for the second time. She considers it the best technical book she's ever read.",
+                "content": "Sarah is re-reading 'Designing Data-Intensive Applications' - considers it the best technical book",
                 "agent_id": agent_id,
                 "user_id": user_id,
                 "metadata": {"category": "books", "genre": "technical"}
             },
             {
-                "content": "Sarah has a standing 1:1 with her manager every Tuesday at 2 PM. She finds these meetings valuable for career discussions.",
+                "content": "Sarah has 1:1 with manager every Tuesday at 2 PM for career discussions",
                 "agent_id": agent_id,
                 "user_id": user_id,
                 "metadata": {"category": "work", "type": "meeting", "recurring": True}
@@ -292,7 +309,12 @@ async def main():
             limit=3
         )
         for r in results:
-            print(f"  [{r.score:.3f}] {r.memory.content[:70]}...")
+            fact = r.memory.fact or r.memory.content
+            print(f"  [{r.score:.3f}] {fact[:70]}...")
+            # Show main_content if available (two-column system)
+            if r.memory.main_content:
+                ctx = r.memory.main_content[:60].replace("\n", " ")
+                print(f"           └─ Context: {ctx}...")
         
         # Test 2: Search for work-related context
         print_subheader("Test 2: Work Context - 'current project challenges'")
@@ -305,7 +327,7 @@ async def main():
         for r in results:
             print(f"  [{r.score:.3f}] {r.memory.content[:70]}...")
         
-        # Test 3: Food and dietary restrictions
+        # Test 3: Food and dietary restrictions (shows main_content)
         print_subheader("Test 3: Dietary - 'food allergies restrictions'")
         results = await memory.search(
             query="Does she have any food allergies or dietary restrictions?",
@@ -314,7 +336,12 @@ async def main():
             limit=3
         )
         for r in results:
-            print(f"  [{r.score:.3f}] {r.memory.content[:70]}...")
+            fact = r.memory.fact or r.memory.content
+            print(f"  [{r.score:.3f}] {fact[:70]}...")
+            # Display main_content to show conversation context is preserved
+            if r.memory.main_content:
+                ctx = r.memory.main_content[:80].replace("\n", " | ")
+                print(f"           └─ {ctx}...")
         
         # Test 4: Hobbies and interests
         print_subheader("Test 4: Hobbies - 'weekend activities interests'")
@@ -674,8 +701,8 @@ async def main():
   Operations Demonstrated:
   ━━━━━━━━━━━━━━━━━━━━━━━━
   ✓ health_check()   - System health verification
-  ✓ add()            - Individual memory storage
-  ✓ add_batch()      - Bulk memory insertion
+  ✓ add()            - Individual memory storage (with main_content)
+  ✓ add_batch()      - Bulk memory insertion (with main_content)
   ✓ search()         - Hybrid semantic + keyword search
   ✓ get()            - Retrieve by ID
   ✓ list_recent()    - Chronological listing
@@ -686,6 +713,13 @@ async def main():
   ✓ session()        - Scoped conversation context
   ✓ forget()         - Delete single memory
   ✓ purge()          - Bulk delete by agent
+  
+  Two-Column Memory System:
+  ━━━━━━━━━━━━━━━━━━━━━━━━━
+  • content (fact)  - Embedded for hybrid search ($)
+  • main_content    - Full context preserved (free)
+  
+  Cost-effective: Only facts are embedded!
   
   Provider-Agnostic Architecture:
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

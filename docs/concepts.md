@@ -9,17 +9,38 @@ A **Memory** in Engram represents a piece of information that your AI should rem
 ```python
 @dataclass
 class Memory:
-    id: UUID                    # Unique identifier
+    memory_id: str              # Unique identifier (mem_...)
     agent_id: str               # Which agent owns this memory
-    content: str                # The actual content
-    embedding: list[float]      # Vector representation
+    user_id: str | None         # Optional user scope
+    session_id: str | None      # Optional session scope
+    
+    # Two-Column System (v2)
+    content: str                # Alias for fact (backward compatible)
+    fact: str                   # Extracted user fact (EMBEDDED)
+    main_content: str | None    # [USER]: msg\n[AI]: summary (NOT embedded)
+    
+    embedding: list[float]      # Vector representation of fact
     importance: float           # 0.0-1.0, how important
     access_count: int           # Times accessed
     created_at: datetime        # When created
     last_accessed_at: datetime  # Last access time
     metadata: dict              # Flexible JSON metadata
-    is_deleted: bool            # Soft delete flag
 ```
+
+### Two-Column Memory System
+
+Engram v2 introduces a **two-column strategy** for cost-effective memory storage:
+
+| Column | Embedded? | Purpose |
+|--------|-----------|---------|
+| `fact` | ✅ Yes | Extracted user facts for semantic search |
+| `main_content` | ❌ No | Full conversation context `[USER]: ...\n[AI]: ...` |
+
+**Benefits:**
+- **Cost-effective**: Only embed concise facts, not full conversations
+- **No context loss**: Full messages preserved in `main_content`
+- **Efficient retrieval**: One query returns both fact and context
+- **Backward compatible**: `content` field still works (maps to `fact`)
 
 ## Hybrid Search
 
@@ -33,29 +54,35 @@ final_score = w₁·semantic + w₂·keyword + w₃·decay + w₄·importance
 
 | Component | Weight | Description |
 |-----------|--------|-------------|
-| **Semantic** | 0.40 | Vector similarity (cosine distance) |
-| **Keyword** | 0.20 | Full-text search (BM25-like) |
+| **Semantic** | 0.40 | Vector similarity on `fact` column (cosine distance) |
+| **Keyword** | 0.20 | Full-text search on `fact_tsv` (BM25-like) |
 | **Decay** | 0.25 | Recency + access frequency |
 | **Importance** | 0.15 | Explicit importance score |
 
 ### How It Works
 
-1. **Semantic Search**: Find memories with similar meaning using vector embeddings
-2. **Keyword Search**: Find exact term matches using PostgreSQL full-text search
+1. **Semantic Search**: Find facts with similar meaning using vector embeddings
+2. **Keyword Search**: Find exact term matches in facts using PostgreSQL full-text search
 3. **Decay Scoring**: Recent and frequently accessed memories rank higher
 4. **RRF Fusion**: Combine all signals with weighted reciprocal rank fusion
+5. **Context Return**: Return both `fact` (what matched) and `main_content` (full context)
 
 ```sql
--- Simplified hybrid search
+-- Simplified hybrid search (searches fact column)
 WITH semantic AS (
-    SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> query_vec) as rank
+    SELECT memory_id, fact, main_content,
+           ROW_NUMBER() OVER (ORDER BY embedding <=> query_vec) as rank
     FROM agent_memory
 ),
 keyword AS (
-    SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank(search_vector, query)) as rank
+    SELECT memory_id,
+           ROW_NUMBER() OVER (ORDER BY ts_rank(fact_tsv, query)) as rank
     FROM agent_memory
+    WHERE fact_tsv @@ plainto_tsquery(query)
 )
-SELECT id,
+SELECT memory_id,
+    fact AS content,      -- What matched
+    main_content,         -- Full context
     (0.4 / (60 + semantic.rank)) +
     (0.2 / (60 + keyword.rank)) +
     (0.25 * decay_score) +

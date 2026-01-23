@@ -267,19 +267,32 @@ Low-level database operations with connection pooling.
 ### Tables
 
 ```sql
--- Core memory storage
+-- Core memory storage (Two-Column System v2)
 CREATE TABLE agent_memory (
     memory_id TEXT PRIMARY KEY,           -- mem_uuid
     agent_id TEXT NOT NULL,               -- Foreign key to agents
     user_id TEXT,                         -- Optional user scope
     session_id TEXT,                      -- Optional session scope
     
-    content TEXT NOT NULL,                -- The memory text
-    embedding VECTOR(1536),               -- pgvector column (auto-adjusted)
+    -- LEGACY: Kept for backward compatibility (maps to fact)
+    content TEXT NOT NULL,
     
-    content_tsv TSVECTOR GENERATED ALWAYS -- Full-text search
-        AS (to_tsvector('english', content)) STORED,
+    -- NEW: Two-column system
+    fact TEXT NOT NULL,                   -- Extracted user fact (EMBEDDED)
+    main_content TEXT,                    -- [USER]: msg\n[AI]: summary (NOT embedded)
     
+    -- Embedding for fact column only
+    embedding VECTOR(1536),               -- Auto-adjusted to match provider
+    
+    -- Full-text search vectors
+    fact_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', fact)) STORED,
+    main_content_tsv TSVECTOR GENERATED ALWAYS AS (
+        CASE WHEN main_content IS NOT NULL 
+        THEN to_tsvector('english', main_content) 
+        ELSE NULL END
+    ) STORED,
+    
+    -- Scoring factors
     importance FLOAT DEFAULT 0.5,         -- 0.0 to 1.0
     access_count INTEGER DEFAULT 0,       -- Usage tracking
     
@@ -313,23 +326,27 @@ CREATE TABLE agent_sessions (
 ### Indexes
 
 ```sql
--- Vector similarity (HNSW for fast approximate search)
+-- Vector similarity (HNSW for fast approximate search on fact embeddings)
 CREATE INDEX idx_memory_embedding ON agent_memory 
     USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
--- Full-text search
-CREATE INDEX idx_memory_content_tsv ON agent_memory USING GIN (content_tsv);
+-- Full-text search on fact
+CREATE INDEX idx_memory_fact_tsv ON agent_memory USING GIN (fact_tsv);
 
--- Trigram for fuzzy matching
-CREATE INDEX idx_memory_content_trgm ON agent_memory USING GIN (content gin_trgm_ops);
+-- Full-text search on main_content (for fallback search)
+CREATE INDEX idx_memory_main_content_tsv ON agent_memory USING GIN (main_content_tsv) 
+    WHERE main_content IS NOT NULL;
+
+-- Trigram for fuzzy matching on fact
+CREATE INDEX idx_memory_fact_trgm ON agent_memory USING GIN (fact gin_trgm_ops);
 
 -- Compound indexes for filtering
 CREATE INDEX idx_memory_agent_user ON agent_memory(agent_id, user_id);
 
--- Prevent duplicate content
-CREATE UNIQUE INDEX idx_unique_memory_content 
-    ON agent_memory(agent_id, COALESCE(user_id, ''), content);
+-- Prevent duplicate facts per agent+user
+CREATE UNIQUE INDEX idx_unique_memory_fact 
+    ON agent_memory(agent_id, COALESCE(user_id, ''), fact);
 ```
 
 ## Hybrid Search Algorithm
@@ -380,24 +397,26 @@ The core differentiator of Engram is its hybrid search combining multiple signal
 ### SQL Implementation (`sql/hybrid_search.sql`)
 
 ```sql
+-- Two-column hybrid search: searches fact, returns both fact and main_content
 WITH semantic_search AS (
-    SELECT memory_id, content, importance, last_accessed_at,
+    SELECT memory_id, fact, main_content, importance, last_accessed_at,
            1 - (embedding <=> $1) as semantic_score,
            ROW_NUMBER() OVER (ORDER BY embedding <=> $1) as semantic_rank
     FROM agent_memory
-    WHERE agent_id = $2
+    WHERE agent_id = $2 AND embedding IS NOT NULL
 ),
 keyword_search AS (
     SELECT memory_id,
-           ts_rank(content_tsv, plainto_tsquery($3)) as keyword_score,
-           ROW_NUMBER() OVER (ORDER BY ts_rank(...) DESC) as keyword_rank
+           ts_rank(fact_tsv, plainto_tsquery($3)) as keyword_score,
+           ROW_NUMBER() OVER (ORDER BY ts_rank(fact_tsv, plainto_tsquery($3)) DESC) as keyword_rank
     FROM agent_memory
-    WHERE content_tsv @@ plainto_tsquery($3) AND agent_id = $2
+    WHERE fact_tsv @@ plainto_tsquery($3) AND agent_id = $2
 ),
 combined AS (
     SELECT 
         s.memory_id,
-        s.content,
+        s.fact AS content,      -- Return fact as content for API compatibility
+        s.main_content,         -- Full conversation context
         -- RRF fusion
         (COALESCE(1.0 / (60 + s.semantic_rank), 0) * $4 +
          COALESCE(1.0 / (60 + k.keyword_rank), 0) * $5) 
@@ -408,6 +427,15 @@ combined AS (
 )
 SELECT * FROM combined ORDER BY score DESC LIMIT $6;
 ```
+
+### Two-Column Design Benefits
+
+| Aspect | Before (v1) | After (v2) |
+|--------|-------------|------------|
+| **Embedded** | Full content | Only facts |
+| **Cost** | High (long texts) | Low (concise facts) |
+| **Context** | Lost after extraction | Preserved in `main_content` |
+| **Search** | Content only | Fact + context returned |
 
 ## Memory Decay System
 

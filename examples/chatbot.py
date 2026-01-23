@@ -158,16 +158,19 @@ class MemoryChatbot:
     # ENGRAM API: Search & Reinforce
     # =========================================================================
     
-    async def recall(self, query: str, limit: int = 5) -> str:
+    async def recall(self, query: str, limit: int = 5, max_chars: int = 3000) -> str:
         """
         engram.search() - Hybrid search with semantic + keyword matching
         engram.reinforce() - Boost importance of used memories
+        
+        Returns both fact and main_content for richer LLM context.
+        Context budget management: truncates main_content if too large.
         """
         if not self.engram:
             return ""
         
         # Hybrid search: combines vector similarity + BM25 keyword matching
-        # (Engram uses hybrid mode by default)
+        # (Engram uses hybrid mode by default, searches on fact column)
         results = await self.engram.search(
             query=query,
             agent_id=AGENT_ID,
@@ -186,7 +189,30 @@ class MemoryChatbot:
                 self.engram.reinforce(r.memory.memory_id, boost)
             ))
         
-        return "\n".join(f"- {r.memory.content}" for r in relevant)
+        # Build context with both fact and main_content
+        # Context budget management to avoid overflowing LLM context window
+        lines = []
+        chars_used = 0
+        max_main_content_len = 150  # Truncate long main_content
+        
+        for r in relevant:
+            # Always include the fact (this is what matched)
+            fact = r.memory.fact or r.memory.content
+            line = f"- {fact}"
+            
+            # Include main_content only if budget allows
+            main_content = r.memory.main_content
+            if main_content and chars_used + len(main_content) < max_chars:
+                # Truncate if too long
+                if len(main_content) > max_main_content_len:
+                    main_content = main_content[:max_main_content_len] + "..."
+                line += f"\n  ({main_content})"
+                chars_used += len(main_content)
+            
+            lines.append(line)
+            chars_used += len(fact)
+        
+        return "\n".join(lines)
     
     # =========================================================================
     # ENGRAM API: Fact Extraction & Memory Operations
@@ -195,6 +221,7 @@ class MemoryChatbot:
     async def learn(self, user_msg: str, bot_msg: str):
         """
         Extract facts and use engram.add(), engram.update(), engram.forget()
+        Two-column system: fact (embedded) + main_content (context, not embedded)
         """
         if not self.llm or not self.engram:
             return
@@ -207,15 +234,21 @@ class MemoryChatbot:
             )
             
             for fact in facts:
-                await self._process_fact(fact)
+                # Pass conversation context for main_content
+                await self._process_fact(fact, user_msg, bot_msg)
                 
         except asyncio.CancelledError:
             raise
         except Exception:
             pass
     
-    async def _process_fact(self, fact: str):
-        """Process a fact using full Engram memory operations."""
+    async def _process_fact(self, fact: str, user_msg: str, bot_msg: str):
+        """Process a fact using full Engram memory operations.
+        
+        Two-column system:
+        - fact: The extracted user fact (embedded for hybrid search)
+        - main_content: "[USER]: {msg}\n[AI]: {summary}" (not embedded, preserved for context)
+        """
         if not self.engram or not self.llm:
             return
         
@@ -234,10 +267,17 @@ class MemoryChatbot:
         
         existing = [(r.memory.memory_id, r.memory.content) for r in similar if r.score > 0.4]
         
+        # Build main_content: preserve conversation context (not embedded)
+        ai_summary = await self._summarize_response(bot_msg)
+        main_content = f"[USER]: {user_msg}\n[AI]: {ai_summary}"
+        
         if not existing:
-            # engram.add() - Store new memory
+            # engram.add() - Store new memory with two-column system
+            # - content (fact): embedded for search
+            # - main_content: preserved context (not embedded)
             new_mem = await self.engram.add(
-                content=fact,
+                content=fact,  # This is the fact - gets embedded
+                main_content=main_content,  # Context - NOT embedded
                 agent_id=AGENT_ID,
                 user_id=USER_ID,
                 metadata={"type": "user_fact"},
@@ -252,6 +292,7 @@ class MemoryChatbot:
         if op.operation.value == "ADD":
             new_mem = await self.engram.add(
                 content=op.content,
+                main_content=main_content,
                 agent_id=AGENT_ID,
                 user_id=USER_ID,
                 metadata={"type": "user_fact"},
@@ -259,7 +300,7 @@ class MemoryChatbot:
             await self._link_to_recent(new_mem.memory_id)
             
         elif op.operation.value == "UPDATE" and op.target_id:
-            # engram.update() - Modify existing memory
+            # engram.update() - Modify existing memory (fact only)
             await self.engram.update(op.target_id, content=op.content)
             
         elif op.operation.value == "DELETE" and op.target_id:
@@ -267,11 +308,47 @@ class MemoryChatbot:
             await self.engram.forget(op.target_id)
             new_mem = await self.engram.add(
                 content=op.content,
+                main_content=main_content,
                 agent_id=AGENT_ID,
                 user_id=USER_ID,
                 metadata={"type": "user_fact"},
             )
             await self._link_to_recent(new_mem.memory_id)
+    
+    async def _summarize_response(self, response: str, max_length: int = 15) -> str:
+        """Summarize AI response for main_content storage.
+        
+        Uses LLMService.summarize(text, max_length, style) from engram.llm.service.
+        Falls back to simple truncation if LLM unavailable.
+        
+        Args:
+            response: The AI response text to summarize.
+            max_length: Approximate max length in words (passed to LLMService.summarize).
+            
+        Returns:
+            Concise summary of the response.
+        """
+        if not self.llm:
+            # Fallback: simple truncation
+            words = response.split()
+            if len(words) <= max_length:
+                return response
+            return " ".join(words[:max_length]) + "..."
+        
+        try:
+            # LLMService.summarize(text, max_length, style) - from engram/llm/service.py
+            summary = await self.llm.summarize(
+                response,
+                max_length=max_length,
+                style="concise",
+            )
+            return summary
+        except Exception:
+            # Fallback on error
+            words = response.split()
+            if len(words) <= max_length:
+                return response
+            return " ".join(words[:max_length]) + "..."
     
     async def _link_to_recent(self, memory_id: str):
         """
@@ -353,11 +430,16 @@ class MemoryChatbot:
         
         print(f"\n📝 Memories ({len(memories)})")
         for m in memories:
-            print(f"  [{m.importance:.0%}] {m.content[:55]}...")
+            fact = m.fact or m.content
+            print(f"  [{m.importance:.0%}] {fact[:55]}...")
+            if m.main_content:
+                # Show truncated main_content
+                ctx = m.main_content[:60].replace("\n", " ")
+                print(f"           └─ {ctx}...")
         print()
     
     async def search_memories(self, query: str):
-        """engram.search() - Hybrid search demo."""
+        """engram.search() - Hybrid search demo (searches on fact column)."""
         if not self.engram:
             return
         
@@ -373,7 +455,11 @@ class MemoryChatbot:
             print("  No matches")
         else:
             for r in results:
-                print(f"  [{r.score:.0%}] {r.memory.content[:50]}...")
+                fact = r.memory.fact or r.memory.content
+                print(f"  [{r.score:.0%}] {fact[:50]}...")
+                if r.memory.main_content:
+                    ctx = r.memory.main_content[:50].replace("\n", " ")
+                    print(f"           └─ {ctx}...")
         print()
     
     async def show_graph(self):

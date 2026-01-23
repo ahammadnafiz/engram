@@ -1,16 +1,31 @@
 # Engram Chatbot - Concept Document
 
-> A personal AI assistant demonstrating the full Engram API.
+> A personal AI assistant demonstrating the full Engram API with the **Two-Column Memory System**.
 
 ## Overview
 
 The Engram Chatbot demonstrates how to build an AI assistant with **persistent memory**. Unlike typical chatbots that forget everything when closed, this chatbot:
 
-- Stores **user facts** extracted by LLM (name, preferences, goals)
-- Uses **hybrid search** (semantic + keyword) to retrieve relevant context
+- Stores **user facts** extracted by LLM (name, preferences, goals) - **embedded for search**
+- Preserves **conversation context** in `main_content` - **NOT embedded** (cost-effective)
+- Uses **hybrid search** (semantic + keyword) to retrieve relevant facts + context
 - **Reinforces** frequently used memories (higher importance = higher ranking)
 - Builds a **memory graph** by linking related memories
 - Uses **sliding window** for efficient short-term context
+
+## Two-Column Memory System
+
+The chatbot uses Engram's two-column strategy for cost-effective memory:
+
+| Column | Embedded? | Content | Purpose |
+|--------|-----------|---------|---------|
+| `fact` | ✅ Yes | `"User's name is Nafiz"` | Semantic search |
+| `main_content` | ❌ No | `"[USER]: I'm Nafiz\n[AI]: Nice to meet you!"` | Context preservation |
+
+**Benefits:**
+- Only embed concise facts (cheaper)
+- Keep full conversation context
+- Search returns both for rich responses
 
 ## Engram API Coverage
 
@@ -18,7 +33,7 @@ The chatbot demonstrates these Engram methods:
 
 | Method | Purpose | Used In |
 |--------|---------|---------|
-| `engram.add()` | Store new memory | `_process_fact()` |
+| `engram.add(content, main_content)` | Store fact + context | `_process_fact()` |
 | `engram.search()` | Hybrid search | `recall()`, `search_memories()` |
 | `engram.update()` | Modify memory | `_process_fact()` |
 | `engram.reinforce()` | Boost importance | `recall()` |
@@ -28,6 +43,7 @@ The chatbot demonstrates these Engram methods:
 | `engram.relate()` | Create relations | `_link_to_recent()` |
 | `engram.traverse()` | Graph traversal | `show_graph()` |
 | `engram.health_check()` | Status check | `connect()` |
+| `llm.summarize()` | Summarize AI response | `_summarize_response()` |
 
 ## Architecture
 
@@ -108,9 +124,14 @@ The chatbot demonstrates these Engram methods:
 │     facts = await llm.extract_facts(user_msg, bot_msg)                  │
 │     → ["User's name is Nafiz", "User works in AI"]                      │
 │                                                                         │
+│     ai_summary = await llm.summarize(bot_msg, max_length=50)            │
+│     → "Nice to meet you! AI is fascinating."                            │
+│                                                                         │
+│     main_content = f"[USER]: {user_msg}\n[AI]: {ai_summary}"            │
+│                                                                         │
 │     For each fact:                                                      │
-│       await _process_fact(fact)  # ADD, UPDATE, DELETE, or skip         │
-│       await _link_to_recent()    # Create graph relations               │
+│       await _process_fact(fact, main_content)  # Two-column storage     │
+│       await _link_to_recent()                  # Create graph relations │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -125,28 +146,36 @@ When storing facts, the chatbot uses intelligent deduplication:
 | **DELETE** | Contradicts existing | "User moved to NYC" replaces "User lives in Dhaka" |
 | **NOOP** | Duplicate | "User's name is Nafiz" already exists |
 
-### Deduplication Flow
+### Two-Column Storage Flow
 
 ```python
-# In _process_fact()
+# In _process_fact(fact, user_msg, bot_msg)
 
-# 1. Search for similar memories
+# 1. Summarize AI response for main_content
+ai_summary = await self._summarize_response(bot_msg)
+main_content = f"[USER]: {user_msg}\n[AI]: {ai_summary}"
+
+# 2. Search for similar facts (hybrid search on fact column)
 similar = await engram.search(query=fact, ...)
 
-# 2. Skip exact duplicates (score > 0.85)
+# 3. Skip exact duplicates (score > 0.85)
 for r in similar:
     if r.score > 0.85:
         return  # Already have this fact
 
-# 3. Check for related memories (score > 0.4)
+# 4. Check for related memories (score > 0.4)
 existing = [(id, content) for r in similar if r.score > 0.4]
 
-# 4. If no related memories, just add
+# 5. If no related memories, add with two-column storage
 if not existing:
-    await engram.add(content=fact, ...)
+    await engram.add(
+        content=fact,           # Embedded for search
+        main_content=main_content,  # NOT embedded, context only
+        ...
+    )
     return
 
-# 5. Otherwise, let LLM decide the operation
+# 6. Otherwise, let LLM decide the operation
 op = await llm.evaluate_memory_operation(fact, existing)
 # → ADD, UPDATE, DELETE, or NOOP
 ```
@@ -167,6 +196,40 @@ This implements **memory decay + importance boosting**:
 - Unused memories gradually lose importance (decay)
 - Frequently accessed memories gain importance (reinforcement)
 - Search results rank higher-importance memories higher
+
+## Context Window Management
+
+When building context for the LLM, the chatbot manages token limits:
+
+```python
+# In recall()
+async def recall(self, query: str, max_chars: int = 2000) -> str:
+    results = await engram.search(query=query, ...)
+    
+    context_parts = []
+    char_count = 0
+    
+    for r in results:
+        # Include fact
+        fact_text = f"• {r.memory.fact}"
+        
+        # Include main_content if space allows
+        if r.memory.main_content and char_count < max_chars * 0.7:
+            context_parts.append(f"{fact_text}\n  Context: {r.memory.main_content}")
+        else:
+            context_parts.append(fact_text)  # Facts-only mode
+        
+        char_count += len(context_parts[-1])
+        if char_count > max_chars:
+            break
+    
+    return "\n".join(context_parts)
+```
+
+**Strategy:**
+- Prioritize facts (always included)
+- Add `main_content` when space allows
+- Gracefully degrade to facts-only under token pressure
 
 ## Memory Graph
 
@@ -280,12 +343,27 @@ You: /graph
 
 ## Database Commands
 
-### View All Memories
+### View All Memories (Two-Column)
 
 ```bash
 docker exec engram-postgres psql -U engram -d engram -c "
 SELECT 
-    LEFT(content, 60) as content,
+    LEFT(fact, 40) as fact,
+    LEFT(main_content, 40) as context,
+    ROUND(importance::numeric, 2) as imp,
+    to_char(created_at, 'MM-DD HH24:MI') as created
+FROM agent_memory 
+ORDER BY created_at DESC 
+LIMIT 10;
+"
+```
+
+### View Facts Only
+
+```bash
+docker exec engram-postgres psql -U engram -d engram -c "
+SELECT 
+    LEFT(fact, 60) as fact,
     ROUND(importance::numeric, 2) as importance,
     to_char(created_at, 'MM-DD HH24:MI') as created
 FROM agent_memory 
@@ -332,7 +410,7 @@ DELETE FROM agent_memory WHERE agent_id = 'assistant';
 ## Code Structure
 
 ```
-chatbot.py (~470 lines)
+chatbot.py (~580 lines)
 │
 ├── Configuration (lines 1-64)
 │   ├── Imports and env setup
@@ -350,18 +428,19 @@ chatbot.py (~470 lines)
 │   │   └── _trim_history() - Bound history size
 │   │
 │   ├── Search & Reinforce
-│   │   └── recall() - engram.search() + reinforce()
+│   │   └── recall() - engram.search() + reinforce() + context budget
 │   │
-│   ├── Fact Learning
-│   │   ├── learn() - Extract facts from conversation
-│   │   ├── _process_fact() - ADD/UPDATE/DELETE logic
+│   ├── Fact Learning (Two-Column)
+│   │   ├── learn() - Extract facts + build main_content
+│   │   ├── _summarize_response() - llm.summarize() for AI response
+│   │   ├── _process_fact() - ADD/UPDATE/DELETE with main_content
 │   │   └── _link_to_recent() - engram.relate()
 │   │
 │   ├── Chat
 │   │   └── chat() - Main response generation
 │   │
 │   └── Commands
-│       ├── show_memories() - engram.list_recent()
+│       ├── show_memories() - engram.list_recent() (shows fact + context)
 │       ├── search_memories() - engram.search()
 │       ├── show_graph() - engram.traverse()
 │       └── clear_memories() - engram.purge()

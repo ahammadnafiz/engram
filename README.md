@@ -7,6 +7,7 @@ Engram is a production-ready memory library that gives your AI applications pers
 ## ✨ Features
 
 - 🧠 **Hybrid Search** — Combines semantic (vector) + keyword (BM25) search using RRF fusion
+- 💰 **Two-Column System** — Embed only facts, store full context separately (cost-effective)
 - ⏱️ **Memory Decay** — Exponential decay prioritizes recent and frequently accessed memories
 - 🔗 **Graph Traversal** — Multi-hop reasoning through typed memory relationships
 - 📝 **Session Management** — Cross-session continuity with automatic expiration
@@ -19,7 +20,7 @@ Engram is a production-ready memory library that gives your AI applications pers
 
 ```bash
 # Clone and start
-git clone https://github.com/your-username/engram.git
+git clone https://github.com/ahammadnafiz/engram.git
 cd engram
 docker compose up -d
 ```
@@ -64,22 +65,32 @@ from engram import Engram
 
 async def main():
     async with Engram() as engram:
-        # Add a memory
+        # Add a memory (fact only)
         memory = await engram.add(
-            content="User prefers dark mode",
+            content="User prefers dark mode",  # Fact (embedded)
             agent_id="my-assistant",
             user_id="user_123",
         )
         
+        # Add with conversation context (two-column system)
+        memory = await engram.add(
+            content="User is learning Python",  # Fact (embedded)
+            agent_id="my-assistant",
+            user_id="user_123",
+            main_content="[USER]: I'm learning Python\n[AI]: Great choice!",  # Context (NOT embedded)
+        )
+        
         # Search memories (hybrid: vector + keyword + decay + importance)
         results = await engram.search(
-            query="user interface preferences",
+            query="user preferences",
             agent_id="my-assistant",
             user_id="user_123",
         )
         
         for r in results:
             print(f"[{r.score:.2f}] {r.memory.content}")
+            if r.memory.main_content:
+                print(f"    Context: {r.memory.main_content[:50]}...")
 
 asyncio.run(main())
 ```
@@ -157,11 +168,18 @@ Engram uses a **converged cognitive architecture** — everything runs in Postgr
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### Two-Column Memory System
+
+| Column | Embedded? | Purpose |
+|--------|-----------|---------|
+| `fact` | ✅ Yes | Concise user facts for semantic search |
+| `main_content` | ❌ No | Full conversation context (cost-effective) |
+
 ### Hybrid Search Formula
 
 ```
-score = 0.40 × semantic_similarity 
-      + 0.20 × keyword_rrf_score
+score = 0.40 × semantic_similarity (on fact)
+      + 0.20 × keyword_rrf_score (on fact)
       + 0.25 × time_decay
       + 0.15 × importance
 ```
@@ -186,9 +204,17 @@ from engram import Engram, EmbeddingService, LLMService
 
 async def advanced_example():
     async with Engram() as engram:
-        # Add memories
-        m1 = await engram.add("User's name is Alice", agent_id="bot")
-        m2 = await engram.add("Alice likes Python", agent_id="bot")
+        # Add memories with two-column system
+        m1 = await engram.add(
+            content="User's name is Alice",  # Fact (embedded)
+            agent_id="bot",
+            main_content="[USER]: I'm Alice\n[AI]: Nice to meet you!",  # Context
+        )
+        m2 = await engram.add(
+            content="Alice likes Python",
+            agent_id="bot",
+            main_content="[USER]: I love Python\n[AI]: Great language!",
+        )
         
         # Create relations (graph)
         await engram.relate(m1.memory_id, m2.memory_id, "related_to", weight=0.8)
@@ -203,9 +229,11 @@ async def advanced_example():
         # Reinforce useful memories
         await engram.reinforce(m1.memory_id, importance_boost=0.2)
         
-        # Session-based context
-        async with engram.session(agent_id="bot", user_id="alice") as session:
-            context = await engram.search("Alice", agent_id="bot", limit=5)
+        # Search returns both fact and main_content
+        results = await engram.search("Alice", agent_id="bot", limit=5)
+        for r in results:
+            print(f"Fact: {r.memory.fact}")
+            print(f"Context: {r.memory.main_content}")
 ```
 
 ### Direct Provider Usage

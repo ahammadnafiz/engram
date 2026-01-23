@@ -51,21 +51,35 @@ Add a new memory.
 
 ```python
 memory = await engram.add(
-    content: str,              # Required: text content
+    content: str,              # Required: the fact to store (embedded)
     agent_id: str,             # Required: agent ID
     user_id: str = None,       # Optional: user ID
-    session_id: str = None,    # Optional: session ID  
+    session_id: str = None,    # Optional: session ID
+    main_content: str = None,  # Optional: full context (NOT embedded)
     metadata: dict = None,     # Optional: key-value metadata
 ) -> Memory
 ```
 
+**Two-Column System:**
+- `content` → Stored in `fact` column, **embedded** for semantic search
+- `main_content` → Stored separately, **NOT embedded** (cost-effective)
+
 **Example:**
 ```python
+# Basic usage (fact only)
 memory = await engram.add(
     content="User prefers dark mode",
     agent_id="assistant",
     user_id="user_123",
-    metadata={"type": "preference", "confidence": 0.9}
+    metadata={"type": "preference"}
+)
+
+# With conversation context (two-column)
+memory = await engram.add(
+    content="User prefers dark mode",  # Fact (embedded)
+    agent_id="assistant",
+    user_id="user_123",
+    main_content="[USER]: I like dark themes\n[AI]: Noted your preference!",  # Context (not embedded)
 )
 print(f"Created: {memory.memory_id}")
 ```
@@ -87,6 +101,12 @@ memories = await engram.add_batch(
 memories = await engram.add_batch([
     {"content": "User likes Python", "agent_id": "assistant"},
     {"content": "User works in finance", "agent_id": "assistant", "metadata": {"source": "chat"}},
+    # With two-column system
+    {
+        "content": "User is learning ML",  # Fact (embedded)
+        "agent_id": "assistant",
+        "main_content": "[USER]: I'm taking an ML course\n[AI]: That's great!",  # Context
+    },
 ])
 print(f"Created {len(memories)} memories")
 ```
@@ -504,8 +524,13 @@ class Memory:
     agent_id: str         # Agent ID
     user_id: str | None   # User ID
     session_id: str | None
-    content: str          # Text content
-    embedding: list[float] | None
+    
+    # Two-Column System
+    content: str          # Alias for fact (backward compatible)
+    fact: str | None      # Extracted user fact (EMBEDDED)
+    main_content: str | None  # Full context [USER]:...\n[AI]:... (NOT embedded)
+    
+    embedding: list[float] | None  # Vector of fact
     importance: float     # 0.0-1.0, default 0.5
     access_count: int     # Times accessed
     created_at: datetime
@@ -518,8 +543,13 @@ class Memory:
 ```python
 @dataclass
 class SearchResult:
-    memory: Memory
-    score: float  # Relevance score (0.0-1.0)
+    memory: Memory        # The matched memory
+    score: float          # Relevance score (0.0-1.0)
+    
+    # Access both columns via memory:
+    # result.memory.fact         → What matched (embedded)
+    # result.memory.main_content → Full context (not embedded)
+    # result.memory.content      → Alias for fact
 ```
 
 ### TraversalResult

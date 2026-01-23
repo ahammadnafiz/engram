@@ -11,13 +11,13 @@ PostgreSQL + pgvector for converged storage with hybrid search.
   
     Combines vector similarity, keyword matching, time decay, and importance scoring using RRF fusion.
 
+- :material-currency-usd: **Two-Column System**
+  
+    Embed only facts (cheap), store full conversation context separately. Cost-effective memory.
+
 - :material-graph: **Graph Relations**
   
     Multi-hop traversal using recursive CTEs for associative reasoning and knowledge graphs.
-
-- :material-chat: **Session Management**
-  
-    Track conversation context with async context managers and automatic TTL expiration.
 
 - :material-rocket-launch: **Production Ready**
   
@@ -46,21 +46,23 @@ from engram import Engram
 
 async def main():
     async with Engram() as engram:
-        # Add a memory
+        # Add a memory (two-column system)
         memory = await engram.add(
-            content="User prefers dark mode in applications",
+            content="User prefers dark mode",  # Fact (embedded for search)
             agent_id="my_agent",
-            importance=0.8,
+            main_content="[USER]: I like dark themes\n[AI]: Noted!",  # Context (not embedded)
         )
         
-        # Search memories
+        # Search memories (hybrid: vector + keyword + decay + importance)
         results = await engram.search(
             query="user interface preferences",
             agent_id="my_agent",
         )
         
-        for result in results:
-            print(f"{result.score:.2f}: {result.memory.content}")
+        for r in results:
+            print(f"[{r.score:.2f}] {r.memory.content}")
+            if r.memory.main_content:
+                print(f"    Context: {r.memory.main_content}")
 
 asyncio.run(main())
 ```
@@ -110,5 +112,13 @@ asyncio.run(main())
 - :material-api: **[API Reference](api.md)**
   
     Complete API documentation.
+
+- :material-database-arrow-up: **[Migration Guide](migration.md)**
+  
+    Database migration instructions for upgrades.
+
+- :material-console: **[Command Reference](commands.md)**
+  
+    Docker, database, and chatbot commands.
 
 </div>

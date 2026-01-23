@@ -90,6 +90,10 @@ class MemoryStore:
     async def add(self, create: MemoryCreate) -> Memory:
         """Add a new memory.
 
+        Two-column memory system:
+        - content/fact: The user fact (embedded for hybrid search)
+        - main_content: Optional conversation context (not embedded)
+
         Args:
             create: Memory creation input.
 
@@ -100,14 +104,19 @@ class MemoryStore:
             StorageError: If database operation fails.
             EmbeddingError: If embedding computation fails.
         """
-        # Generate embedding for content
-        embedding = await self._embedding.embed(create.content)
+        # Fact is the content - this is what gets embedded
+        fact_text = create.content
+        
+        # Generate embedding for FACT only (cost-effective)
+        embedding = await self._embedding.embed(fact_text)
 
         memory = Memory(
             agent_id=create.agent_id,
             user_id=create.user_id,
             session_id=create.session_id,
-            content=create.content,
+            content=fact_text,  # Backward compatibility
+            fact=fact_text,  # New: embedded for search
+            main_content=create.main_content,  # New: context (not embedded)
             embedding=embedding,
             importance=0.5,  # Default importance, use reinforce() to boost
             metadata=create.metadata,
@@ -120,14 +129,15 @@ class MemoryStore:
                 await self._ensure_user_exists(create.user_id)
 
             # Use RETURNING to detect if insert actually happened
+            # ON CONFLICT uses fact (not content) for duplicate detection
             row = await self._storage.fetchone(
                 """
                 INSERT INTO agent_memory (
                     memory_id, agent_id, user_id, session_id,
-                    content, embedding, importance, metadata,
+                    content, fact, main_content, embedding, importance, metadata,
                     created_at, last_accessed_at, access_count
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                ON CONFLICT (agent_id, COALESCE(user_id, ''), content) DO UPDATE
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                ON CONFLICT (agent_id, COALESCE(user_id, ''), fact) DO UPDATE
                     SET memory_id = agent_memory.memory_id
                 RETURNING memory_id, 
                     (xmax = 0) AS was_inserted
@@ -136,7 +146,9 @@ class MemoryStore:
                 memory.agent_id,
                 memory.user_id,
                 memory.session_id,
-                memory.content,
+                fact_text,  # content (backward compat)
+                fact_text,  # fact (new)
+                create.main_content,  # main_content (new)
                 json.dumps(memory.embedding),  # Store as JSON for vector type
                 memory.importance,
                 json.dumps(memory.metadata),
@@ -146,8 +158,8 @@ class MemoryStore:
             )
             
             if row and not row["was_inserted"]:
-                # Memory with same content already exists
-                logger.debug(f"Memory with same content already exists, returning existing: {row['memory_id']}")
+                # Memory with same fact already exists
+                logger.debug(f"Memory with same fact already exists, returning existing: {row['memory_id']}")
                 # Return the existing memory
                 existing = await self.get(row["memory_id"])
                 if existing:
@@ -166,6 +178,7 @@ class MemoryStore:
         """Add multiple memories in a batch.
 
         Uses batch embedding for efficiency when adding many memories.
+        Only embeds facts (content), not main_content.
 
         Args:
             creates: List of memory creation inputs.
@@ -188,33 +201,36 @@ class MemoryStore:
         for user_id in user_ids:
             await self._ensure_user_exists(user_id)
 
-        # Batch embed all content
-        contents = [c.content for c in creates]
-        embeddings = await self._embedding.embed_batch(contents)
+        # Batch embed all facts (content is the fact)
+        facts = [c.content for c in creates]
+        embeddings = await self._embedding.embed_batch(facts)
 
         memories: list[Memory] = []
         for create, embedding in zip(creates, embeddings, strict=True):
+            fact_text = create.content
             memory = Memory(
                 agent_id=create.agent_id,
                 user_id=create.user_id,
                 session_id=create.session_id,
-                content=create.content,
+                content=fact_text,  # Backward compat
+                fact=fact_text,  # New: embedded for search
+                main_content=create.main_content,  # New: context (not embedded)
                 embedding=embedding,
                 importance=0.5,  # Default importance, use reinforce() to boost
                 metadata=create.metadata,
             )
             memories.append(memory)
 
-        # Batch insert (skip duplicates)
+        # Batch insert (skip duplicates based on fact)
         try:
             await self._storage.executemany(
                 """
                 INSERT INTO agent_memory (
                     memory_id, agent_id, user_id, session_id,
-                    content, embedding, importance, metadata,
+                    content, fact, main_content, embedding, importance, metadata,
                     created_at, last_accessed_at, access_count
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                ON CONFLICT (agent_id, COALESCE(user_id, ''), content) DO NOTHING
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                ON CONFLICT (agent_id, COALESCE(user_id, ''), fact) DO NOTHING
                 """,
                 [
                     (
@@ -223,6 +239,8 @@ class MemoryStore:
                         m.user_id,
                         m.session_id,
                         m.content,
+                        m.fact,
+                        m.main_content,
                         json.dumps(m.embedding),
                         m.importance,
                         json.dumps(m.metadata),
@@ -260,7 +278,7 @@ class MemoryStore:
             WHERE memory_id = $1
             RETURNING 
                 memory_id, agent_id, user_id, session_id,
-                content, embedding, importance, access_count,
+                content, fact, main_content, embedding, importance, access_count,
                 created_at, last_accessed_at, metadata
             """,
             memory_id,
@@ -287,7 +305,7 @@ class MemoryStore:
             """
             SELECT 
                 memory_id, agent_id, user_id, session_id,
-                content, embedding, importance, access_count,
+                content, fact, main_content, embedding, importance, access_count,
                 created_at, last_accessed_at, metadata
             FROM agent_memory
             WHERE memory_id = $1
@@ -307,6 +325,9 @@ class MemoryStore:
     ) -> Memory:
         """Update an existing memory.
 
+        If content changes, fact is also updated and re-embedded.
+        main_content is preserved unless explicitly set.
+
         Args:
             memory_id: The memory to update.
             update: Fields to update.
@@ -321,24 +342,26 @@ class MemoryStore:
         # Get current memory
         current = await self.get_without_access_update(memory_id)
 
-        # Build update
+        # Build update - content/fact are the same
         new_content = update.content if update.content else current.content
         new_importance = (
             update.importance if update.importance is not None else current.importance
         )
         new_metadata = {**current.metadata, **(update.metadata or {})}
 
-        # Re-embed if content changed
+        # Re-embed if fact (content) changed
         new_embedding = current.embedding
         if update.content and update.content != current.content:
             new_embedding = await self._embedding.embed(update.content)
 
         try:
+            # Update both content and fact to stay in sync
             row = await self._storage.fetchone(
                 """
                 UPDATE agent_memory
                 SET 
                     content = $2,
+                    fact = $2,
                     embedding = $3,
                     importance = $4,
                     metadata = $5,
@@ -346,7 +369,7 @@ class MemoryStore:
                 WHERE memory_id = $1
                 RETURNING 
                     memory_id, agent_id, user_id, session_id,
-                    content, embedding, importance, access_count,
+                    content, fact, main_content, embedding, importance, access_count,
                     created_at, last_accessed_at, metadata
                 """,
                 memory_id,
@@ -402,7 +425,7 @@ class MemoryStore:
             WHERE memory_id = $1
             RETURNING 
                 memory_id, agent_id, user_id, session_id,
-                content, embedding, importance, access_count,
+                content, fact, main_content, embedding, importance, access_count,
                 created_at, last_accessed_at, metadata
             """,
             memory_id,
@@ -492,7 +515,7 @@ class MemoryStore:
                 """
                 SELECT 
                     memory_id, agent_id, user_id, session_id,
-                    content, embedding, importance, access_count,
+                    content, fact, main_content, embedding, importance, access_count,
                     created_at, last_accessed_at, metadata
                 FROM agent_memory
                 WHERE agent_id = $1 AND user_id = $2
@@ -508,7 +531,7 @@ class MemoryStore:
                 """
                 SELECT 
                     memory_id, agent_id, user_id, session_id,
-                    content, embedding, importance, access_count,
+                    content, fact, main_content, embedding, importance, access_count,
                     created_at, last_accessed_at, metadata
                 FROM agent_memory
                 WHERE agent_id = $1
@@ -593,12 +616,16 @@ class MemoryStore:
 
             results: list[SearchResult] = []
             for row in rows:
+                # Handle both fact column (new) and content column (backward compat)
+                fact_text = row.get("fact") or row["content"]
                 memory = Memory(
                     memory_id=row["memory_id"],
                     agent_id=query.agent_id,
                     user_id=row.get("user_id"),
                     session_id=row.get("session_id"),
-                    content=row["content"],
+                    content=fact_text,  # Backward compat
+                    fact=fact_text,
+                    main_content=row.get("main_content"),
                     importance=row["importance"],
                     access_count=row.get("access_count", 0),
                     metadata=json.loads(row["metadata"])
@@ -625,12 +652,12 @@ class MemoryStore:
             raise QueryError(f"Search failed: {e}") from e
 
     async def _keyword_search(self, query: SearchQuery) -> list[SearchResult]:
-        """Keyword-only search using full-text search."""
+        """Keyword-only search using full-text search on fact column."""
         try:
             from engram.core.config import get_settings
             settings = get_settings()
 
-            # Use keyword-focused search with text ranking
+            # Use keyword-focused search with text ranking on fact_tsv
             sql = """
             WITH keyword_matches AS (
                 SELECT 
@@ -638,18 +665,19 @@ class MemoryStore:
                     m.agent_id,
                     m.user_id,
                     m.session_id,
-                    m.content,
+                    m.fact,
+                    m.main_content,
                     m.importance,
                     m.access_count,
                     m.metadata,
                     m.created_at,
                     m.last_accessed_at,
-                    ts_rank(to_tsvector('english', m.content), plainto_tsquery('english', $1)) AS keyword_rank,
+                    ts_rank(fact_tsv, plainto_tsquery('english', $1)) AS keyword_rank,
                     POWER($5, EXTRACT(EPOCH FROM (NOW() - m.created_at)) / 86400.0) AS decay_score
                 FROM agent_memory m
                 WHERE m.agent_id = $2
                     AND ($3::TEXT IS NULL OR m.user_id = $3)
-                    AND to_tsvector('english', m.content) @@ plainto_tsquery('english', $1)
+                    AND fact_tsv @@ plainto_tsquery('english', $1)
             )
             SELECT *,
                 (keyword_rank * 0.7 + decay_score * 0.2 + importance * 0.1) AS score
@@ -669,12 +697,15 @@ class MemoryStore:
 
             results: list[SearchResult] = []
             for row in rows:
+                fact_text = row.get("fact") or row.get("content", "")
                 memory = Memory(
                     memory_id=row["memory_id"],
                     agent_id=query.agent_id,
                     user_id=row.get("user_id"),
                     session_id=row.get("session_id"),
-                    content=row["content"],
+                    content=fact_text,  # Backward compat
+                    fact=fact_text,
+                    main_content=row.get("main_content"),
                     importance=row["importance"],
                     access_count=row.get("access_count", 0),
                     metadata=json.loads(row["metadata"])
@@ -737,10 +768,14 @@ class MemoryStore:
 
             results: list[SearchResult] = []
             for row in rows:
+                # Handle both fact column (new) and content column (backward compat)
+                fact_text = row.get("fact") or row["content"]
                 memory = Memory(
                     memory_id=row["memory_id"],
                     agent_id=agent_id,
-                    content=row["content"],
+                    content=fact_text,  # Backward compat
+                    fact=fact_text,
+                    main_content=row.get("main_content"),
                     importance=row["importance"],
                     metadata=json.loads(row["metadata"])
                     if isinstance(row["metadata"], str)
@@ -764,7 +799,10 @@ class MemoryStore:
             raise QueryError(f"Semantic search failed: {e}") from e
 
     def _row_to_memory(self, row: Any) -> Memory:
-        """Convert a database row to a Memory object."""
+        """Convert a database row to a Memory object.
+        
+        Handles both old schema (content only) and new schema (fact + main_content).
+        """
         embedding = row["embedding"]
         if isinstance(embedding, str):
             embedding = json.loads(embedding)
@@ -773,12 +811,19 @@ class MemoryStore:
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
 
+        # Handle both old and new schema
+        # Prefer fact column if available, fallback to content
+        fact_text = row.get("fact") or row["content"]
+        main_content = row.get("main_content")
+
         return Memory(
             memory_id=row["memory_id"],
             agent_id=row["agent_id"],
             user_id=row["user_id"],
             session_id=row["session_id"],
-            content=row["content"],
+            content=fact_text,  # Backward compat - content = fact
+            fact=fact_text,
+            main_content=main_content,
             embedding=embedding,
             importance=row["importance"],
             access_count=row["access_count"],

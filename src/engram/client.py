@@ -211,18 +211,24 @@ class Engram:
         content: str,
         agent_id: AgentId,
         *,
+        main_content: str | None = None,
         user_id: UserId | None = None,
         session_id: SessionId | None = None,
         metadata: Metadata | None = None,
     ) -> Memory:
         """Add a new memory.
 
+        Two-column memory system:
+        - content: The fact to store (embedded for hybrid search)
+        - main_content: Optional conversation context (not embedded)
+
         All memories start with importance=0.5. Use reinforce() to boost
         importance when a memory proves useful.
 
         Args:
-            content: The text content of the memory.
+            content: The user fact to store (embedded for search).
             agent_id: ID of the agent this memory belongs to.
+            main_content: Optional conversation context [USER]: msg\\n[AI]: summary.
             user_id: Optional user ID.
             session_id: Optional session ID.
             metadata: Additional key-value metadata.
@@ -232,7 +238,8 @@ class Engram:
 
         Example:
             memory = await engram.add(
-                content="User mentioned they work in finance",
+                content="User works in finance",
+                main_content="[USER]: I work in finance\\n[AI]: Interesting field!",
                 agent_id="my_agent",
                 metadata={"source": "conversation"}
             )
@@ -243,6 +250,7 @@ class Engram:
         return await self._memory_store.add(
             MemoryCreate(
                 content=content,
+                main_content=main_content,
                 agent_id=agent_id,
                 user_id=user_id,
                 session_id=session_id,
@@ -257,12 +265,13 @@ class Engram:
         """Add multiple memories in a batch.
 
         More efficient than calling add() multiple times due to
-        batch embedding.
+        batch embedding. Only content (fact) is embedded, not main_content.
 
         Args:
             memories: List of memory dictionaries with keys:
-                - content (required): Text content
+                - content (required): The user fact (embedded for search)
                 - agent_id (required): Agent ID
+                - main_content (optional): Conversation context (not embedded)
                 - user_id (optional): User ID
                 - session_id (optional): Session ID
                 - metadata (optional): Additional metadata
@@ -273,7 +282,8 @@ class Engram:
         Example:
             memories = await engram.add_batch([
                 {"content": "Fact 1", "agent_id": "agent_1"},
-                {"content": "Fact 2", "agent_id": "agent_1", "metadata": {"type": "preference"}},
+                {"content": "Fact 2", "agent_id": "agent_1", 
+                 "main_content": "[USER]: I work...\\n[AI]: Got it!"},
             ])
         """
         self._ensure_connected()
@@ -282,6 +292,7 @@ class Engram:
         creates = [
             MemoryCreate(
                 content=m["content"],
+                main_content=m.get("main_content"),
                 agent_id=m["agent_id"],
                 user_id=m.get("user_id"),
                 session_id=m.get("session_id"),

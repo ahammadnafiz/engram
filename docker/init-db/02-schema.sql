@@ -1,6 +1,7 @@
 -- =============================================================================
 -- Engram Database Schema
 -- PostgreSQL + pgvector schema for AI memory storage
+-- Two-column memory system: fact (embedded) + main_content (context)
 -- =============================================================================
 
 -- ============================================================================
@@ -51,6 +52,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_started ON agent_sessions(started_at DES
 -- ============================================================================
 -- Agent Memory Table
 -- Core memory storage with vector embeddings and full-text search
+-- Two-column system: fact (embedded) + main_content (context, not embedded)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS agent_memory (
     memory_id TEXT PRIMARY KEY,
@@ -58,12 +60,23 @@ CREATE TABLE IF NOT EXISTS agent_memory (
     user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
     session_id TEXT REFERENCES agent_sessions(session_id) ON DELETE SET NULL,
     
-    -- Content
+    -- LEGACY: Kept for backward compatibility (maps to fact)
     content TEXT NOT NULL,
-    embedding VECTOR(1536),  -- Default dimension, auto-adjusted by Engram to match provider
     
-    -- Full-text search
-    content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+    -- NEW: Two-column memory system
+    fact TEXT NOT NULL,              -- Extracted user fact (EMBEDDED for search)
+    main_content TEXT,               -- [USER]: msg\n[AI]: summary (NOT embedded, context only)
+    
+    -- Embedding for fact column only
+    embedding VECTOR(1536),          -- Auto-adjusted by Engram to match provider
+    
+    -- Full-text search vectors
+    fact_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', fact)) STORED,
+    main_content_tsv TSVECTOR GENERATED ALWAYS AS (
+        CASE WHEN main_content IS NOT NULL 
+        THEN to_tsvector('english', main_content) 
+        ELSE NULL END
+    ) STORED,
     
     -- Scoring factors
     importance FLOAT DEFAULT 0.5 CHECK (importance >= 0 AND importance <= 1),
@@ -82,12 +95,14 @@ CREATE INDEX IF NOT EXISTS idx_memory_embedding ON agent_memory
     USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
--- Full-text search index
-CREATE INDEX IF NOT EXISTS idx_memory_content_tsv ON agent_memory USING GIN (content_tsv);
+-- Full-text search indexes
+CREATE INDEX IF NOT EXISTS idx_memory_fact_tsv ON agent_memory USING GIN (fact_tsv);
+CREATE INDEX IF NOT EXISTS idx_memory_main_content_tsv ON agent_memory USING GIN (main_content_tsv) 
+    WHERE main_content IS NOT NULL;
 
--- Trigram index for fuzzy text matching
-CREATE INDEX IF NOT EXISTS idx_memory_content_trgm ON agent_memory 
-    USING GIN (content gin_trgm_ops);
+-- Trigram index for fuzzy text matching on fact
+CREATE INDEX IF NOT EXISTS idx_memory_fact_trgm ON agent_memory 
+    USING GIN (fact gin_trgm_ops);
 
 -- Compound indices for common query patterns
 CREATE INDEX IF NOT EXISTS idx_memory_agent ON agent_memory(agent_id);
@@ -99,10 +114,10 @@ CREATE INDEX IF NOT EXISTS idx_memory_last_accessed ON agent_memory(last_accesse
 -- JSONB index for metadata queries
 CREATE INDEX IF NOT EXISTS idx_memory_metadata ON agent_memory USING GIN (metadata);
 
--- Prevent duplicate memory content per agent+user
+-- Prevent duplicate facts per agent+user
 -- This ensures the same fact isn't stored twice
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_memory_content 
-    ON agent_memory(agent_id, COALESCE(user_id, ''), content);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_memory_fact 
+    ON agent_memory(agent_id, COALESCE(user_id, ''), fact);
 
 -- ============================================================================
 -- Memory Relations Table
@@ -161,6 +176,9 @@ CREATE TRIGGER trigger_users_updated
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at();
 
+-- NOTE: Memory access tracking (update_memory_access) is handled in application code
+-- via the reinforce() method, not via triggers, to avoid overhead on every SELECT.
+
 -- ============================================================================
 -- Decay Calculation Function
 -- Implements MemoryBank-style decay: decay_rate ^ hours_elapsed
@@ -176,7 +194,7 @@ BEGIN
     hours_elapsed := EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 3600.0;
     RETURN POWER(decay_rate, hours_elapsed);
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+$$ LANGUAGE plpgsql STABLE;  -- STABLE not IMMUTABLE: uses NOW() which changes per statement
 
 -- ============================================================================
 -- Verification
@@ -185,4 +203,5 @@ DO $$
 BEGIN
     RAISE NOTICE 'Engram schema initialized successfully!';
     RAISE NOTICE 'Tables created: agents, users, agent_sessions, agent_memory, memory_relations';
+    RAISE NOTICE 'Two-column system: fact (embedded) + main_content (context)';
 END $$;

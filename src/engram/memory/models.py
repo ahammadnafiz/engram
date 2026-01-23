@@ -41,13 +41,19 @@ class Memory(BaseModel):
     and associated metadata. Memories are linked to agents and optionally to
     specific users and sessions.
 
+    Two-column memory system:
+        - fact: The extracted user fact (embedded for search)
+        - main_content: Full conversation context (not embedded)
+
     Attributes:
         memory_id: Unique identifier for the memory.
         agent_id: ID of the agent this memory belongs to.
         user_id: Optional ID of the user associated with this memory.
         session_id: Optional ID of the session where this memory was created.
-        content: The actual text content of the memory.
-        embedding: Vector embedding of the content (None if not yet computed).
+        content: Backward-compatible field (maps to fact).
+        fact: The extracted user fact (embedded for hybrid search).
+        main_content: Optional conversation context [USER]: msg\\n[AI]: summary.
+        embedding: Vector embedding of the fact (None if not yet computed).
         importance: Importance score from 0.0 to 1.0 (default 0.5).
         access_count: Number of times this memory has been accessed.
         created_at: Timestamp when the memory was created.
@@ -57,7 +63,9 @@ class Memory(BaseModel):
     Example:
         memory = Memory(
             agent_id="agent_123",
-            content="User prefers dark mode in applications",
+            content="User prefers dark mode",
+            fact="User prefers dark mode",
+            main_content="[USER]: I like dark mode\\n[AI]: Got it!",
             importance=0.8,
             metadata={"category": "preference"}
         )
@@ -68,7 +76,13 @@ class Memory(BaseModel):
     user_id: UserId | None = None
     session_id: SessionId | None = None
 
+    # Backward-compatible content field (maps to fact)
     content: str = Field(..., min_length=1, max_length=100000)
+    
+    # Two-column memory system
+    fact: str | None = Field(default=None, min_length=1, max_length=100000)
+    main_content: str | None = Field(default=None, max_length=200000)
+    
     embedding: Vector | None = None
 
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -98,8 +112,13 @@ class MemoryCreate(BaseModel):
     This model is used when adding memories via the API. It contains
     only the fields that can be set by the caller.
 
+    Two-column memory system:
+        - content: The fact to store (will be embedded for search)
+        - main_content: Optional conversation context (not embedded)
+
     Attributes:
-        content: The text content of the memory.
+        content: The user fact to store (embedded for hybrid search).
+        main_content: Optional conversation context [USER]: msg\\n[AI]: summary.
         agent_id: ID of the agent this memory belongs to.
         user_id: Optional user ID.
         session_id: Optional session ID.
@@ -111,13 +130,15 @@ class MemoryCreate(BaseModel):
 
     Example:
         create_input = MemoryCreate(
-            content="User mentioned they work in finance",
+            content="User works in finance",
+            main_content="[USER]: I work in finance\\n[AI]: Interesting field!",
             agent_id="agent_123",
             metadata={"source": "conversation"}
         )
     """
 
     content: str = Field(..., min_length=1, max_length=100000)
+    main_content: str | None = Field(default=None, max_length=200000)
     agent_id: AgentId
     user_id: UserId | None = None
     session_id: SessionId | None = None

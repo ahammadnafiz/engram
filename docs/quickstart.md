@@ -109,14 +109,22 @@ async def main():
     # Connect to Engram (reads config from .env)
     async with Engram() as engram:
         
-        # Add a memory
+        # Add a memory (fact only)
         memory = await engram.add(
-            content="User prefers dark mode and Python",
+            content="User prefers dark mode and Python",  # Fact (embedded)
             agent_id="my-assistant",
             user_id="user_123",
             metadata={"type": "preference"}
         )
         print(f"Created memory: {memory.memory_id}")
+        
+        # Add with conversation context (two-column system)
+        memory = await engram.add(
+            content="User is learning machine learning",  # Fact (embedded)
+            agent_id="my-assistant",
+            user_id="user_123",
+            main_content="[USER]: I'm taking an ML course\n[AI]: That's great!",  # Context (NOT embedded)
+        )
         
         # Search memories (hybrid: vector + keyword + decay + importance)
         results = await engram.search(
@@ -128,6 +136,8 @@ async def main():
         
         for r in results:
             print(f"  [{r.score:.2f}] {r.memory.content}")
+            if r.memory.main_content:
+                print(f"      Context: {r.memory.main_content[:50]}...")
 
 asyncio.run(main())
 ```
