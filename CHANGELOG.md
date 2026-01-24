@@ -7,23 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Initial MVP implementation
-- Core memory storage with PostgreSQL + pgvector
-- Hybrid search combining vector similarity, keyword matching, time decay, and importance
-- Graph relations and multi-hop traversal using recursive CTEs
-- Session management with async context managers
-- Embedding service with OpenAI and Sentence Transformers support
-- LRU caching for embeddings
-- Health check functionality
-- Comprehensive type hints with py.typed marker
-- Unit test infrastructure
+## [0.2.0] - 2026-01-23
 
-### Architecture
-- Async-first design using asyncpg
-- src-layout project structure
-- pydantic-settings for configuration
-- Hierarchical exception system
+### Added
+- **Two-Column Memory System** — Separates `fact` (embedded for search) and `main_content` (conversation context, not embedded) for cost-effective storage
+- **LLM Error Handling** — New `LLMError`, `LLMConnectionError`, `LLMRateLimitError` exceptions for robust error handling
+- **Async HTTP Client Cleanup** — Ollama and HuggingFace providers now support proper async `close()` for HTTP clients
+
+### Changed
+- **README Overhaul** — Updated project description, installation instructions, architecture overview, and documentation links
+- **Chatbot Improvements**:
+  - Default embedding provider switched to `sentence-transformers` (local, free)
+  - Enhanced system prompt with structured memory rules, personality traits, and response formatting
+  - Refined memory extraction rules for better fact retrieval and relationship preservation
+  - Increased similarity thresholds: duplicate detection (0.90), relevance filtering (0.55)
+- **Documentation Updates**:
+  - New diagrams for two-column memory storage and retrieval flows
+  - Added database schema documentation
+  - Cost comparison and search vs storage analysis
+  - Removed outdated CHATBOT_CONCEPT.md
+
+### Removed
+- Unused OpenAI and Sentence Transformers embedding provider modules (consolidated into main providers)
+- "Mem0-style" references in documentation for clarity
+
+### Fixed
+- Integration tests improved with better error handling and memory retrieval
+- Environment setup in tests enhanced for better configuration management
 
 ## [0.1.1] - 2026-01-22
 

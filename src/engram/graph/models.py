@@ -78,9 +78,12 @@ class TraversalResult(BaseModel):
 
     Attributes:
         memory_id: The memory ID at this node.
-        content: Memory content.
+        content: Memory content (alias for fact, backward compatible).
+        fact: The extracted user fact (same as content).
+        main_content: Optional conversation context (not embedded).
         importance: Memory importance score.
         metadata: Memory metadata.
+        access_count: Number of times this memory was accessed.
         depth: Distance from the starting node.
         path: List of memory IDs from start to this node.
         relation_type: The relation type that led to this node.
@@ -90,10 +93,13 @@ class TraversalResult(BaseModel):
 
     memory_id: MemoryId
     content: str
+    fact: str | None = None  # New: explicit fact field
+    main_content: str | None = None  # New: conversation context
     importance: float
     metadata: Metadata
     created_at: datetime
     last_accessed_at: datetime
+    access_count: int = 0  # New: access tracking
     depth: int
     path: list[MemoryId]
     relation_type: str | None

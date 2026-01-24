@@ -324,11 +324,21 @@ class CohereEmbeddingProvider(EmbeddingProvider):
 # Ollama Provider
 # =============================================================================
 
+def _normalize_vector(vec: list[float]) -> list[float]:
+    """L2 normalize a vector to unit length."""
+    import math
+    norm = math.sqrt(sum(x * x for x in vec))
+    if norm > 0:
+        return [x / norm for x in vec]
+    return vec
+
+
 @embedding_registry.register("ollama", aliases=["ollama-embedding"])
 class OllamaEmbeddingProvider(EmbeddingProvider):
     """Embedding provider using Ollama's local server.
     
     Ollama runs LLMs and embedding models locally.
+    All embeddings are L2-normalized for consistent cosine similarity.
     
     Args:
         model: Model name (required, e.g., "nomic-embed-text", "mxbai-embed-large").
@@ -400,7 +410,8 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
                 self._dimension = len(embedding)
                 logger.info(f"Auto-detected dimension for {self._model}: {self._dimension}")
             
-            return embedding
+            # Normalize for consistent cosine similarity
+            return _normalize_vector(embedding)
         except self._httpx.HTTPError as e:
             raise EmbeddingProviderError(f"Ollama API error: {e}", model=self._model) from e
         except Exception as e:
@@ -512,7 +523,8 @@ class HuggingFaceEmbeddingProvider(EmbeddingProvider):
                 self._dimension = len(embedding)
                 logger.info(f"Auto-detected dimension for {self._model}: {self._dimension}")
             
-            return embedding
+            # Normalize for consistent cosine similarity
+            return _normalize_vector(embedding)
         except self._httpx.HTTPError as e:
             raise EmbeddingProviderError(f"HuggingFace API error: {e}", model=self._model) from e
         except Exception as e:
@@ -535,10 +547,10 @@ class HuggingFaceEmbeddingProvider(EmbeddingProvider):
             for item in data:
                 if isinstance(item, list) and item and isinstance(item[0], list):
                     # Nested format: [[embedding]]
-                    embeddings.append(item[0])
+                    embeddings.append(_normalize_vector(item[0]))
                 elif isinstance(item, list):
                     # Direct format: [embedding]
-                    embeddings.append(item)
+                    embeddings.append(_normalize_vector(item))
                 else:
                     raise EmbeddingProviderError(
                         f"Unexpected response format from HuggingFace: {type(item)}",

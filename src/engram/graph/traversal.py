@@ -356,10 +356,13 @@ class GraphTraversal:
                     TraversalResult(
                         memory_id=row["memory_id"],
                         content=row["content"],
+                        fact=row.get("fact"),
+                        main_content=row.get("main_content"),
                         importance=row["importance"],
                         metadata=metadata or {},
                         created_at=row["created_at"],
                         last_accessed_at=row["last_accessed_at"],
+                        access_count=row.get("access_count", 0),
                         depth=row["depth"],
                         path=row["path"],
                         relation_type=row["relation_type"],
