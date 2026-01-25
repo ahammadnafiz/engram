@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from engram.core._types import MemoryId, RelationType
 from engram.core.exceptions import (
     GraphError,
     MemoryNotFoundError,
-    RelationNotFoundError,
 )
 from engram.graph.models import (
     MemoryRelation,
@@ -266,49 +264,6 @@ class GraphTraversal:
             )
             for row in rows
         ]
-
-    async def remove_relation(
-        self,
-        source_id: MemoryId,
-        target_id: MemoryId,
-        relation_type: RelationType | None = None,
-    ) -> bool:
-        """Remove a relation between memories.
-
-        Args:
-            source_id: Source memory ID.
-            target_id: Target memory ID.
-            relation_type: Specific relation type to remove (None for all).
-
-        Returns:
-            True if relation(s) were removed.
-        """
-        if relation_type:
-            result = await self._storage.execute(
-                """
-                DELETE FROM memory_relations
-                WHERE source_memory_id = $1 
-                    AND target_memory_id = $2
-                    AND relation_type = $3
-                """,
-                source_id,
-                target_id,
-                relation_type,
-            )
-        else:
-            result = await self._storage.execute(
-                """
-                DELETE FROM memory_relations
-                WHERE source_memory_id = $1 AND target_memory_id = $2
-                """,
-                source_id,
-                target_id,
-            )
-
-        deleted = "DELETE 0" not in result
-        if deleted:
-            logger.debug(f"Removed relation: {source_id} --> {target_id}")
-        return deleted
 
     async def traverse(self, query: TraversalQuery) -> list[TraversalResult]:
         """Traverse the memory graph from a starting point.

@@ -274,11 +274,6 @@ class EmbeddingService:
         # Type assertion: all elements are now Vector (not None)
         return results  # type: ignore[return-value]
 
-    def clear_cache(self) -> None:
-        """Clear the embedding cache."""
-        self._cache.clear()
-        logger.info("Cleared embedding cache")
-
     @property
     def cache_info(self) -> dict[str, int]:
         """Get cache statistics.

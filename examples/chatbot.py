@@ -139,9 +139,12 @@ class MemoryChatbot:
         if pending:
             print(f"  Saving {len(pending)} memories...")
             try:
-                await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=15.0)
+                # Increased timeout to allow complex fact extraction to complete
+                await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=45.0)
             except asyncio.TimeoutError:
-                pass
+                remaining = len([t for t in self._tasks if not t.done()])
+                if remaining:
+                    print(f"  ⚠ {remaining} tasks still pending (timeout)")
         if self.engram:
             await self.engram.close()
     
@@ -238,9 +241,11 @@ class MemoryChatbot:
         
         try:
             # LLM extracts atomic facts about the user
+            # Pass more history (10 messages = 5 exchanges) to maintain relationship context
+            # This helps the LLM know "Amy" refers to "User's wife Amy" from earlier messages
             facts = await self.llm.extract_facts(
                 user_msg, bot_msg,
-                conversation_history=self.history[-6:],
+                conversation_history=self.history[-10:],
             )
             
             # Debug: show extracted facts (comment out in production)

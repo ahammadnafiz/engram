@@ -195,53 +195,6 @@ class SessionManager:
         rows = await self._storage.fetchall(query, *params)
         return [self._row_to_session(row) for row in rows]
 
-    async def list_by_agent(
-        self,
-        agent_id: AgentId,
-        include_ended: bool = True,
-        limit: int = 50,
-    ) -> list[Session]:
-        """List sessions for an agent.
-
-        Args:
-            agent_id: The agent ID to filter by.
-            include_ended: Whether to include ended sessions.
-            limit: Maximum results.
-
-        Returns:
-            List of sessions.
-        """
-        if include_ended:
-            rows = await self._storage.fetchall(
-                """
-                SELECT 
-                    session_id, agent_id, user_id,
-                    started_at, ended_at, metadata
-                FROM agent_sessions
-                WHERE agent_id = $1
-                ORDER BY started_at DESC
-                LIMIT $2
-                """,
-                agent_id,
-                limit,
-            )
-        else:
-            rows = await self._storage.fetchall(
-                """
-                SELECT 
-                    session_id, agent_id, user_id,
-                    started_at, ended_at, metadata
-                FROM agent_sessions
-                WHERE agent_id = $1 AND ended_at IS NULL
-                ORDER BY started_at DESC
-                LIMIT $2
-                """,
-                agent_id,
-                limit,
-            )
-
-        return [self._row_to_session(row) for row in rows]
-
     @asynccontextmanager
     async def session(
         self,

@@ -294,53 +294,96 @@ class LLMService:
         
         context_block = "\n\n".join(context_parts) + "\n\n" if context_parts else ""
         
-        extraction_prompt = f"""{context_block}Current Exchange:
-User: {user_message}
-Assistant: {assistant_response}
+        extraction_prompt = f"""<task>
+Extract ALL atomic facts about the user from the conversation exchange below.
+An atomic fact is a single, self-contained piece of information that can stand alone.
+</task>
 
-Extract ALL atomic facts about the user from this exchange. An atomic fact is a single, 
-self-contained piece of information that can stand alone.
+<context>
+{context_block if context_block else "<none/>"}
+</context>
 
-Categories to extract (EXTRACT ALL that apply):
-- Identity: name, age, birthday, gender, nationality, location, where they live
-- Work: job title, company name, role, what they work on, technologies used
-- Projects: SPECIFIC project names, what they're building, project status (v1, done, in progress)
-- Education: university, degree, field of study, courses
-- Relationships: family members, friends, colleagues, pets (INCLUDE NAMES)
-- Preferences: likes, dislikes, favorites (food, music, hobbies)
-- Schedule: appointments, meetings, plans, events (include times/dates/locations)
-- Goals: aspirations, things they want to do, future plans
-- Possessions: devices, vehicles, items they own
-- Any other SPECIFIC personal information
+<current_exchange>
+<user>{user_message}</user>
+<assistant>{assistant_response}</assistant>
+</current_exchange>
 
-CRITICAL RULES:
-1. BE SPECIFIC - Extract exact names, project names, company names, technologies
-   BAD: "User has a favorite project" ❌
-   GOOD: "User is building AI memory layer for GenAI apps" ✓
-   
-2. Extract EVERY distinct fact separately - don't combine
-   BAD: "User works at X and is building Y" ❌
-   GOOD: Two facts: "User works at X" AND "User is building Y" ✓
+<categories description="Extract ALL that apply">
+<category name="identity">name, age, birthday, gender, nationality, location, where they live</category>
+<category name="work">job title, company name, role, what they work on, technologies used</category>
+<category name="projects">SPECIFIC project names, what they're building, project status (v1, done, in progress)</category>
+<category name="education">university, degree, field of study, courses</category>
+<category name="relationships">family members, friends, colleagues, pets (INCLUDE NAMES)</category>
+<category name="preferences">likes, dislikes, favorites (food, music, hobbies)</category>
+<category name="schedule">appointments, meetings, plans, events (include times/dates/locations)</category>
+<category name="goals">aspirations, things they want to do, future plans</category>
+<category name="possessions">devices, vehicles, items they own</category>
+<category name="other">any other SPECIFIC personal information</category>
+</categories>
 
-3. Include current status when mentioned
-   "I already done the v1" → "User completed version 1 of their AI memory layer project"
-   
-4. Use "User" as subject: "User's birthday is October 24"
+<rules priority="critical">
+<rule id="1" name="be_specific">
+Extract exact names, project names, company names, technologies.
+<example type="bad">User has a favorite project</example>
+<example type="good">User is building AI memory layer for GenAI apps</example>
+</rule>
 
-5. Be precise with names: "User's friend Sarah" not "User has a friend"
+<rule id="2" name="separate_facts">
+Extract EVERY distinct fact separately - don't combine.
+<example type="bad">User works at X and is building Y</example>
+<example type="good">Two facts: "User works at X" AND "User is building Y"</example>
+</rule>
 
-6. Extract implicit facts: "I'm late for CS class" → "User studies Computer Science"
+<rule id="3" name="include_status">
+Include current status when mentioned.
+<example input="I already done the v1">User completed version 1 of their AI memory layer project</example>
+</rule>
 
-7. Preserve possessive chains: "my girlfriend's name is X" → "User's girlfriend's name is X"
+<rule id="4" name="user_subject">Use "User" as subject: "User's birthday is October 24"</rule>
 
-8. NEVER return vague facts like "User has a project (not mentioned)" - either extract the specific name or don't include it
+<rule id="5" name="precise_names">Be precise with names: "User's friend Sarah" not "User has a friend"</rule>
 
-Return one fact per line. Return "NONE" ONLY if truly no extractable facts.
-Do NOT include:
-- Vague facts with "(not mentioned)" or "(unknown)" - these are useless
-- Generic statements without specifics
-- Assistant's opinions
-- Hypotheticals"""
+<rule id="6" name="implicit_facts">
+Extract implicit facts.
+<example input="I'm late for CS class">User studies Computer Science</example>
+</rule>
+
+<rule id="7" name="possessive_chains">
+Preserve possessive chains.
+<example input="my girlfriend's name is X">User's girlfriend's name is X</example>
+</rule>
+
+<rule id="8" name="no_vague_facts">
+NEVER return vague facts like "User has a project (not mentioned)" - either extract the specific name or don't include it.
+</rule>
+
+<rule id="9" name="third_party_attribution" priority="highest">
+CRITICAL: The User is the person chatting (saying "I", "my", "we"). When the User mentions OTHER people by name, those are NOT the User!
+<example type="bad" input="Amy quit her job">User quit her job ❌ WRONG - Amy is not the User!</example>
+<example type="good" input="Amy quit her job">User's wife Amy quit her job ✓</example>
+<example type="bad" input="Lily started school">User started school ❌ WRONG</example>
+<example type="good" input="Lily started school">User's daughter Lily started school ✓</example>
+<example type="bad" input="Karim moved to London">User moved to London ❌ WRONG</example>
+<example type="good" input="Karim moved to London">User's brother Karim moved to London ✓</example>
+Always include the RELATIONSHIP when referring to third parties: "User's wife Amy", "User's brother Karim", "User's child Lucas".
+</rule>
+
+<rule id="10" name="relationship_context">
+Use conversation history to identify relationships. If history says "my wife Amy", then later "Amy did X" means "User's wife Amy did X".
+</rule>
+</rules>
+
+<output_format>
+Return one fact per line.
+Return "NONE" ONLY if truly no extractable facts.
+</output_format>
+
+<exclusions>
+<exclude>Vague facts with "(not mentioned)" or "(unknown)"</exclude>
+<exclude>Generic statements without specifics</exclude>
+<exclude>Assistant's opinions</exclude>
+<exclude>Hypotheticals</exclude>
+</exclusions>"""
 
         try:
             response = await self._provider.complete_text(
@@ -399,44 +442,82 @@ Do NOT include:
             f"{i+1}. {content}" for i, (_, content) in enumerate(existing_memories)
         )
         
-        prompt = f"""Compare this new fact against existing memories and decide the operation.
+        prompt = f"""<task>
+Compare this new fact against existing memories and decide the appropriate memory operation.
+</task>
 
-New Fact: {new_fact}
+<new_fact>{new_fact}</new_fact>
 
-Existing Memories:
+<existing_memories>
 {memories_text}
+</existing_memories>
 
-DECISION RULES (in order of priority):
+<decision_rules priority_order="true">
+<rule operation="DELETE" priority="1">
+Use when new fact CONTRADICTS/REPLACES an existing memory about the SAME person and attribute.
+<criteria>
+<item>Same person's job changed (quit old job, joined new company)</item>
+<item>Same person's location changed (moved from X to Y)</item>
+<item>Same person's status changed (was X, now Y)</item>
+<item>Correction of previous information (had ADHD → is autistic)</item>
+</criteria>
+<examples>
+<example>"Amy joined Doctors Without Borders" contradicts "Amy is a doctor at Johns Hopkins" = DELETE</example>
+<example>"User switched to Bank B" contradicts "User banks at Bank A" = DELETE</example>
+<example>"User now lives in NYC" contradicts "User lives in Dhaka" = DELETE</example>
+<example>"Lucas is autistic" contradicts "Lucas has ADHD" = DELETE (correction!)</example>
+<example>"Amy quit her job at Johns Hopkins" contradicts "Amy works at Johns Hopkins" = DELETE</example>
+</examples>
+</rule>
 
-1. ADD - Use when fact contains NEW INFORMATION not in any existing memory
-   - Different topic/category = ADD (e.g., job vs project vs location)
-   - Same person but different attribute = ADD
-   - "User is building AI memory layer" vs "User works at AskTuring" = ADD (different info!)
-   
-2. NOOP - Use ONLY when new fact is SEMANTICALLY IDENTICAL to an existing memory
-   - "User's LinkedIn is X" ≈ "User's LinkedIn profile is X" = NOOP
-   - "User has cats Luna and Milo" ≈ "User has 2 cats named Luna and Milo" = NOOP
-   - Must be SAME topic AND SAME information
-   
-3. DELETE - Use when new fact CONTRADICTS/REPLACES an existing memory
-   - "User switched to Bank B" contradicts "User banks at Bank A" = DELETE
-   - "User now lives in NYC" contradicts "User lives in Dhaka" = DELETE
-   
-4. UPDATE - Use when new fact ADDS DETAIL to existing (merge them)
-   - "User's sister Nadia" + "Nadia lives in Toronto" = UPDATE with merged
+<rule operation="ADD" priority="2">
+Use when fact contains NEW INFORMATION not in any existing memory.
+<criteria>
+<item>Different topic/category (e.g., job vs project vs location)</item>
+<item>Same person but different attribute (job vs age vs hobby)</item>
+<item>Different person entirely</item>
+</criteria>
+<example>
+"User is building AI memory layer" vs "User works at AskTuring" = ADD (different info!)
+</example>
+</rule>
 
-CRITICAL - Common mistakes to avoid:
-- ❌ NOOP for loosely related facts (job vs project) - these should be ADD
-- ❌ NOOP when topic is same but info is different - should be ADD or UPDATE
-- ✅ NOOP only for truly duplicate information
+<rule operation="NOOP" priority="3">
+Use ONLY when new fact is SEMANTICALLY IDENTICAL to an existing memory.
+<criteria>
+<item>Must be SAME topic AND SAME information</item>
+<item>Only minor wording differences</item>
+</criteria>
+<examples>
+<example>"User's LinkedIn is X" ≈ "User's LinkedIn profile is X" = NOOP</example>
+<example>"User has cats Luna and Milo" ≈ "User has 2 cats named Luna and Milo" = NOOP</example>
+</examples>
+</rule>
 
+<rule operation="UPDATE" priority="4">
+Use when new fact ADDS DETAIL to existing memory (merge them).
+<example>"User's sister Nadia" + "Nadia lives in Toronto" = UPDATE with merged</example>
+</rule>
+</decision_rules>
+
+<common_mistakes>
+<mistake type="avoid">NOOP for job changes - if someone changed jobs, DELETE the old job fact!</mistake>
+<mistake type="avoid">NOOP for corrections - if a fact is being corrected, DELETE the wrong one!</mistake>
+<mistake type="avoid">NOOP for loosely related facts (job vs project) - these should be ADD</mistake>
+<mistake type="correct">DELETE when same attribute (job, location, status) changes for same person</mistake>
+</common_mistakes>
+
+<default_behavior>
 Default to ADD if unsure - it's better to store extra than lose information.
+</default_behavior>
 
+<output_format strict="true">
 Respond in this EXACT format (4 lines):
-OPERATION: <ADD|UPDATE|DELETE|NOOP>
-TARGET: <memory number if UPDATE or DELETE, otherwise none>
-MERGED: <complete merged content if UPDATE, otherwise none>
-REASON: <brief explanation>"""
+OPERATION: [ADD|UPDATE|DELETE|NOOP]
+TARGET: [memory number if UPDATE or DELETE, otherwise none]
+MERGED: [complete merged content if UPDATE, otherwise none]
+REASON: [brief explanation]
+</output_format>"""
 
         try:
             response = await self._provider.complete_text(
@@ -694,45 +775,22 @@ REASON: <brief explanation>"""
             "bullet": f"Summarize as bullet points ({max_length} words max).",
         }
         
-        prompt = f"""{style_instructions.get(style, style_instructions['concise'])}
+        prompt = f"""<task>
+<instruction>{style_instructions.get(style, style_instructions['concise'])}</instruction>
+<style>{style}</style>
+<max_words>{max_length}</max_words>
+</task>
 
-Text to summarize:
+<input>
 {text}
+</input>
 
-Summary:"""
+<output>
+Provide the summary below:
+</output>"""
 
         return await self._provider.complete_text(
             prompt=prompt,
             max_tokens=max_length * 2,  # Rough token estimate
             temperature=0.3,
         )
-    
-    async def answer_question(
-        self,
-        question: str,
-        context: str,
-    ) -> str:
-        """Answer a question given context.
-        
-        Args:
-            question: The question to answer.
-            context: Context/background information.
-            
-        Returns:
-            The answer.
-        """
-        prompt = f"""Answer the question based on the provided context.
-If the answer cannot be found in the context, say "I don't know based on the provided information."
-
-Context:
-{context}
-
-Question: {question}
-
-Answer:"""
-
-        return await self._provider.complete_text(
-            prompt=prompt,
-            temperature=0.3,
-        )
-
