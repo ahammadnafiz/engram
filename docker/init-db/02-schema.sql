@@ -99,9 +99,15 @@ CREATE TABLE IF NOT EXISTS agent_memory (
     fact TEXT NOT NULL,              -- Extracted user fact (EMBEDDED for search)
     main_content TEXT,               -- [USER]: msg\n[AI]: summary (NOT embedded, context only)
 
-    -- Cognitive taxonomy: semantic (facts) | episodic (events) | procedural (rules)
+    -- Cognitive taxonomy for typed retrieval and policy-driven critical recall
     memory_type TEXT NOT NULL DEFAULT 'semantic'
-        CHECK (memory_type IN ('semantic', 'episodic', 'procedural')),
+        CHECK (
+            memory_type IN (
+                'semantic', 'episodic', 'procedural',
+                'profile', 'project', 'task', 'preference',
+                'constraint', 'decision', 'tool_result'
+            )
+        ),
     
     -- Embedding for fact column only
     embedding VECTOR(1536),          -- Auto-adjusted by Engram to match provider

@@ -114,9 +114,9 @@ pull in related decisions, constraints, or tool outputs.
 | `agent_memory` | fact memory with embeddings, type, metadata |
 | `memory_relations` | directed graph edges between memories |
 | `agent_sessions` | conversation sessions and rolling summaries |
-| `agent_tasks` | long-running task runs |
+| `agent_task_runs` | long-running task runs |
 | `agent_events` | raw user/assistant/tool/agent/system event ledger |
-| `task_checkpoints` | compact task summaries |
+| `agent_checkpoints` | compact task summaries |
 | `memory_jobs` | background queue for derivation work |
 
 ## Memory Write Flow

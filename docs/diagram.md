@@ -23,9 +23,9 @@ flowchart TD
 
     DB --> Fact["agent_memory<br/>typed facts + embeddings + metadata"]
     DB --> Relations["memory_relations"]
-    DB --> Tasks["agent_tasks"]
+    DB --> Tasks["agent_task_runs"]
     DB --> Events["agent_events"]
-    DB --> Checkpoints["task_checkpoints"]
+    DB --> Checkpoints["agent_checkpoints"]
     DB --> Jobs["memory_jobs"]
 ```
 
@@ -78,7 +78,7 @@ sequenceDiagram
     participant W as Memory Worker
 
     A->>E: start_task(goal)
-    E->>DB: INSERT agent_tasks
+    E->>DB: INSERT agent_task_runs
     A->>E: build_context(task_id, query)
     E->>DB: SELECT task, recent events, checkpoints, memories
     E-->>A: ContextBuildResult
@@ -88,7 +88,7 @@ sequenceDiagram
     W->>E: process_memory_jobs()
     E->>DB: claim memory_jobs
     E->>DB: INSERT derived agent_memory
-    E->>DB: INSERT task_checkpoints
+    E->>DB: INSERT agent_checkpoints
     E->>DB: mark memory_jobs completed
 ```
 
@@ -116,10 +116,10 @@ erDiagram
     agent_memory ||--o{ memory_relations : source
     agent_memory ||--o{ memory_relations : target
     agents ||--o{ agent_sessions : owns
-    agents ||--o{ agent_tasks : owns
-    agent_tasks ||--o{ agent_events : records
-    agent_tasks ||--o{ task_checkpoints : snapshots
-    memory_jobs }o--|| agent_tasks : derives
+    agents ||--o{ agent_task_runs : owns
+    agent_task_runs ||--o{ agent_events : records
+    agent_task_runs ||--o{ agent_checkpoints : snapshots
+    memory_jobs }o--|| agent_task_runs : derives
 
     agent_memory {
         text memory_id PK
@@ -136,7 +136,7 @@ erDiagram
         jsonb metadata
     }
 
-    agent_tasks {
+    agent_task_runs {
         text task_run_id PK
         text agent_id
         text user_id
@@ -157,7 +157,7 @@ erDiagram
         jsonb metadata
     }
 
-    task_checkpoints {
+    agent_checkpoints {
         text checkpoint_id PK
         text task_run_id
         text summary

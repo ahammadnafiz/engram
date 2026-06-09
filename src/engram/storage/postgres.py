@@ -283,6 +283,23 @@ class PostgresStorage:
             "ALTER TABLE agent_memory "
             "ADD COLUMN IF NOT EXISTS memory_type TEXT NOT NULL DEFAULT 'semantic';"
         )
+        await self.execute(
+            "ALTER TABLE agent_memory "
+            "DROP CONSTRAINT IF EXISTS agent_memory_memory_type_check;"
+        )
+        await self.execute(
+            """
+            ALTER TABLE agent_memory
+            ADD CONSTRAINT agent_memory_memory_type_check
+            CHECK (
+                memory_type IN (
+                    'semantic', 'episodic', 'procedural',
+                    'profile', 'project', 'task', 'preference',
+                    'constraint', 'decision', 'tool_result'
+                )
+            );
+            """
+        )
         # Index created after the column exists (works for both fresh and existing DBs)
         await self.execute(
             "CREATE INDEX IF NOT EXISTS idx_memory_agent_type "

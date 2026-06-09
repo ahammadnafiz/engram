@@ -60,9 +60,9 @@ The chatbot starts a task so the conversation can survive process restarts and
 multi-day usage. Short-term chat history is still kept in memory for convenience,
 but durable continuity lives in:
 
-- `agent_tasks`
+- `agent_task_runs`
 - `agent_events`
-- `task_checkpoints`
+- `agent_checkpoints`
 - `agent_memory`
 
 ## In-Chat Commands

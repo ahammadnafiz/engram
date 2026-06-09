@@ -9,7 +9,7 @@ Engram now has two connected memory planes:
 | Plane | Tables | Purpose |
 |-------|--------|---------|
 | Fact memory | `agent_memory`, `memory_relations` | Searchable, typed, deduped facts and graph relations |
-| Task memory | `agent_tasks`, `agent_events`, `task_checkpoints`, `memory_jobs` | Durable task state, raw ledger, checkpoints, and background derivation |
+| Task memory | `agent_task_runs`, `agent_events`, `agent_checkpoints`, `memory_jobs` | Durable task state, raw ledger, checkpoints, and background derivation |
 
 The fact plane is optimized for retrieval. The task plane is optimized for
 continuity and auditability.
@@ -280,7 +280,7 @@ Postgres and builds a bounded context at every turn:
 | Critical facts disappear from vector ranking | `recall_critical()` and `trace_recall()` |
 | Old facts conflict with corrections | `conflict_key`, `status=superseded`, `superseded_by` |
 | Huge input cannot fit in every prompt | Chunk events + anchored memories + manifest |
-| Multi-day work needs resumability | `agent_tasks`, `agent_events`, `task_checkpoints` |
+| Multi-day work needs resumability | `agent_task_runs`, `agent_events`, `agent_checkpoints` |
 | Broad prompt misses a required item | `expected_terms` and trace fields |
 | Prompt budget is exceeded | Context builders trim deterministically and report what was trimmed |
 

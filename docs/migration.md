@@ -16,6 +16,7 @@ Run migrations in numeric order:
 | `002_add_session_summary.sql` | Adds rolling summaries to `agent_sessions` |
 | `003_add_memory_type.sql` | Adds `memory_type` and type index |
 | `004_add_task_memory.sql` | Adds task runs, event ledger, checkpoints, memory jobs |
+| `005_widen_memory_type_constraint.sql` | Allows all policy memory types in the database check constraint |
 
 Fresh installs can run `src/engram/sql/schema.sql` instead of individual
 migrations.
@@ -40,6 +41,7 @@ psql "$ENGRAM_DATABASE_URL" -f src/engram/sql/migrations/001_add_fact_columns.sq
 psql "$ENGRAM_DATABASE_URL" -f src/engram/sql/migrations/002_add_session_summary.sql
 psql "$ENGRAM_DATABASE_URL" -f src/engram/sql/migrations/003_add_memory_type.sql
 psql "$ENGRAM_DATABASE_URL" -f src/engram/sql/migrations/004_add_task_memory.sql
+psql "$ENGRAM_DATABASE_URL" -f src/engram/sql/migrations/005_widen_memory_type_constraint.sql
 ```
 
 Docker:
@@ -61,9 +63,9 @@ WHERE table_name = 'agent_memory'
 SELECT table_name
 FROM information_schema.tables
 WHERE table_name IN (
-  'agent_tasks',
+  'agent_task_runs',
   'agent_events',
-  'task_checkpoints',
+  'agent_checkpoints',
   'memory_jobs'
 );
 ```
@@ -75,9 +77,9 @@ Expected tables:
 - `agent_memory`
 - `memory_relations`
 - `agent_sessions`
-- `agent_tasks`
+- `agent_task_runs`
 - `agent_events`
-- `task_checkpoints`
+- `agent_checkpoints`
 - `memory_jobs`
 
 ## What Changed
@@ -109,9 +111,9 @@ the same user-facing fact as `fact`.
 
 | Table | Meaning |
 |-------|---------|
-| `agent_tasks` | durable task run state |
+| `agent_task_runs` | durable task run state |
 | `agent_events` | append-only user/assistant/tool/artifact ledger |
-| `task_checkpoints` | compact resumable state |
+| `agent_checkpoints` | compact resumable state |
 | `memory_jobs` | durable background derivation queue |
 
 ## Fresh Install
@@ -142,4 +144,3 @@ may have been written after migration.
 - If switching embedding dimensions, use a fresh database or rebuild the vector
   column and all embeddings.
 - Keep migration files in source control and run them exactly once per database.
-

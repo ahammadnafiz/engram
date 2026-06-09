@@ -11,7 +11,7 @@ Engram separates durable memory into layers:
 | Fact memory | `agent_memory` | Search, deterministic recall, conflict resolution |
 | Graph memory | `memory_relations` | Multi-hop associations |
 | Session memory | `agent_sessions` | Conversation grouping and rolling summaries |
-| Task memory | `agent_tasks`, `agent_events`, `task_checkpoints`, `memory_jobs` | Long-running work and resumability |
+| Task memory | `agent_task_runs`, `agent_events`, `agent_checkpoints`, `memory_jobs` | Long-running work and resumability |
 
 For a short chatbot, fact memory may be enough. For a coding agent, legal review
 agent, or personal assistant running for days, use task memory plus fact memory.

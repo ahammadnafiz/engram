@@ -93,9 +93,9 @@ docker exec -i engram-postgres psql -U engram -d engram -c "\dt"
 
 # View core table structures
 docker exec -i engram-postgres psql -U engram -d engram -c "\d agent_memory"
-docker exec -i engram-postgres psql -U engram -d engram -c "\d agent_tasks"
+docker exec -i engram-postgres psql -U engram -d engram -c "\d agent_task_runs"
 docker exec -i engram-postgres psql -U engram -d engram -c "\d agent_events"
-docker exec -i engram-postgres psql -U engram -d engram -c "\d task_checkpoints"
+docker exec -i engram-postgres psql -U engram -d engram -c "\d agent_checkpoints"
 docker exec -i engram-postgres psql -U engram -d engram -c "\d memory_jobs"
 
 # View all indexes
@@ -200,7 +200,7 @@ docker exec -i engram-postgres psql -U engram -d engram -c \
 # Active tasks
 docker exec -i engram-postgres psql -U engram -d engram -c \
   "SELECT task_run_id, agent_id, user_id, status, goal, updated_at
-   FROM agent_tasks
+   FROM agent_task_runs
    WHERE deleted_at IS NULL
    ORDER BY updated_at DESC LIMIT 20;"
 
@@ -214,7 +214,7 @@ docker exec -i engram-postgres psql -U engram -d engram -c \
 # Latest checkpoints
 docker exec -i engram-postgres psql -U engram -d engram -c \
   "SELECT checkpoint_id, task_run_id, left(summary, 120) AS summary, created_at
-   FROM task_checkpoints
+   FROM agent_checkpoints
    ORDER BY created_at DESC LIMIT 20;"
 
 # Memory job backlog
@@ -254,10 +254,10 @@ docker exec -i engram-postgres psql -U engram -d engram -c \
 | Scenario | Command |
 |----------|---------|
 | Fresh database (after `down -v`) | Run `schema.sql` |
-| Existing database, upgrade current alpha schema | Run migrations `001` through `004` |
+| Existing database, upgrade current alpha schema | Run migrations `001` through `005` |
 | Error: "column fact does not exist" | Run `001_add_fact_columns.sql` |
 | Error: "column memory_type does not exist" | Run `003_add_memory_type.sql` |
-| Error: "relation agent_tasks does not exist" | Run `004_add_task_memory.sql` |
+| Error: "relation agent_task_runs does not exist" | Run `004_add_task_memory.sql` |
 
 ### Fresh Install (schema.sql)
 
@@ -306,7 +306,7 @@ docker exec -i engram-postgres psql -U engram -d engram -c \
 
 docker exec -i engram-postgres psql -U engram -d engram -c \
   "SELECT table_name FROM information_schema.tables
-   WHERE table_name IN ('agent_tasks', 'agent_events', 'task_checkpoints', 'memory_jobs');"
+   WHERE table_name IN ('agent_task_runs', 'agent_events', 'agent_checkpoints', 'memory_jobs');"
 ```
 
 ---
