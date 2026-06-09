@@ -10,7 +10,6 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from engram.core._types import MemoryId, RelationType
 from engram.core.exceptions import (
     GraphError,
     MemoryNotFoundError,
@@ -23,9 +22,14 @@ from engram.graph.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+    from engram.core._types import MemoryId, Metadata, RelationType
     from engram.storage.postgres import PostgresStorage
 
 logger = logging.getLogger(__name__)
+
+VALID_DIRECTIONS = {"outbound", "inbound", "any"}
 
 
 class GraphTraversal:
@@ -37,7 +41,7 @@ class GraphTraversal:
 
     Example:
         graph = GraphTraversal(storage)
-        
+
         # Create a relation
         await graph.relate(
             source_id="mem_abc",
@@ -45,7 +49,7 @@ class GraphTraversal:
             relation_type="causes",
             weight=0.8,
         )
-        
+
         # Traverse from a memory
         results = await graph.traverse(TraversalQuery(
             start_memory_id="mem_abc",
@@ -61,6 +65,71 @@ class GraphTraversal:
             storage: PostgreSQL storage backend.
         """
         self._storage = storage
+
+    def _validate_direction(self, direction: str) -> str:
+        normalized = direction.strip().lower()
+        if normalized not in VALID_DIRECTIONS:
+            raise GraphError(
+                "Invalid graph traversal direction",
+                direction=direction,
+                valid_directions=sorted(VALID_DIRECTIONS),
+            )
+        return normalized
+
+    def _normalize_relation_types(
+        self,
+        relation_types: Iterable[RelationType] | None,
+    ) -> list[RelationType] | None:
+        if relation_types is None:
+            return None
+        normalized = list(dict.fromkeys(relation_types))
+        return normalized or None
+
+    def _json(self, value: object, default: Metadata) -> Metadata:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                logger.debug("Ignoring malformed relation metadata JSON")
+                return default
+            return parsed if isinstance(parsed, dict) else default
+        return value if isinstance(value, dict) else default
+
+    def _row_value(self, row: object, key: str, default: object = None) -> object:
+        try:
+            return row[key]  # type: ignore[index]
+        except (KeyError, TypeError):
+            return default
+
+    def _row_to_relation(self, row: object) -> MemoryRelation:
+        return MemoryRelation(
+            source_memory_id=self._row_value(row, "source_memory_id"),
+            target_memory_id=self._row_value(row, "target_memory_id"),
+            relation_type=self._row_value(row, "relation_type") or "related_to",
+            weight=self._row_value(row, "weight") or 1.0,
+            metadata=self._json(self._row_value(row, "metadata"), {}),
+            created_at=self._row_value(row, "created_at"),
+        )
+
+    def _row_to_traversal_result(self, row: object) -> TraversalResult:
+        return TraversalResult(
+            memory_id=self._row_value(row, "memory_id"),
+            content=self._row_value(row, "content") or "",
+            fact=self._row_value(row, "fact"),
+            main_content=self._row_value(row, "main_content"),
+            importance=self._row_value(row, "importance") or 0.0,
+            metadata=self._json(self._row_value(row, "metadata"), {}),
+            created_at=self._row_value(row, "created_at"),
+            last_accessed_at=self._row_value(row, "last_accessed_at"),
+            access_count=self._row_value(row, "access_count", 0) or 0,
+            depth=self._row_value(row, "depth") or 0,
+            path=self._row_value(row, "path", []) or [],
+            relation_type=self._row_value(row, "relation_type"),
+            path_weight=self._row_value(row, "path_weight") or 0.0,
+            score=self._row_value(row, "score") or 0.0,
+        )
 
     async def relate(
         self,
@@ -86,6 +155,9 @@ class GraphTraversal:
             MemoryNotFoundError: If either memory doesn't exist.
             GraphError: If relation creation fails.
         """
+        if source_id == target_id:
+            raise GraphError("Cannot create a graph relation from a memory to itself")
+
         # Verify both memories exist
         for mem_id in [source_id, target_id]:
             exists = await self._storage.fetchval(
@@ -99,7 +171,7 @@ class GraphTraversal:
             await self._storage.execute(
                 """
                 INSERT INTO memory_relations (
-                    source_memory_id, target_memory_id, 
+                    source_memory_id, target_memory_id,
                     relation_type, weight, metadata, created_at
                 ) VALUES ($1, $2, $3, $4, $5, NOW())
                 ON CONFLICT (source_memory_id, target_memory_id, relation_type)
@@ -150,6 +222,13 @@ class GraphTraversal:
             return []
 
         try:
+            for relation in relations:
+                if relation.source_memory_id == relation.target_memory_id:
+                    raise GraphError(
+                        "Cannot create a graph relation from a memory to itself",
+                        memory_id=relation.source_memory_id,
+                    )
+
             # Verify all memory IDs exist if requested
             if verify_memories:
                 # Collect all unique memory IDs
@@ -157,7 +236,7 @@ class GraphTraversal:
                 for r in relations:
                     memory_ids.add(r.source_memory_id)
                     memory_ids.add(r.target_memory_id)
-                
+
                 # Check existence in batch
                 existing = await self._storage.fetchval(
                     """
@@ -167,10 +246,10 @@ class GraphTraversal:
                     """,
                     list(memory_ids),
                 )
-                
+
                 existing_set = set(existing) if existing else set()
                 missing = memory_ids - existing_set
-                
+
                 if missing:
                     raise GraphError(
                         f"Cannot create relations: {len(missing)} memory IDs not found",
@@ -230,6 +309,9 @@ class GraphTraversal:
         Returns:
             List of relations.
         """
+        direction = self._validate_direction(direction)
+        relation_types = self._normalize_relation_types(relation_types)
+
         if direction == "outbound":
             condition = "source_memory_id = $1"
         elif direction == "inbound":
@@ -238,32 +320,25 @@ class GraphTraversal:
             condition = "(source_memory_id = $1 OR target_memory_id = $1)"
 
         query = f"""
-            SELECT 
+            SELECT
                 source_memory_id, target_memory_id,
                 relation_type, weight, metadata, created_at
             FROM memory_relations
             WHERE {condition}
         """
 
-        if relation_types:
-            query += " AND relation_type = ANY($2)"
-            rows = await self._storage.fetchall(query, memory_id, relation_types)
-        else:
-            rows = await self._storage.fetchall(query, memory_id)
+        try:
+            if relation_types:
+                query += " AND relation_type = ANY($2::text[])"
+                rows = await self._storage.fetchall(query, memory_id, relation_types)
+            else:
+                rows = await self._storage.fetchall(query, memory_id)
 
-        return [
-            MemoryRelation(
-                source_memory_id=row["source_memory_id"],
-                target_memory_id=row["target_memory_id"],
-                relation_type=row["relation_type"],
-                weight=row["weight"],
-                metadata=json.loads(row["metadata"])
-                if isinstance(row["metadata"], str)
-                else row["metadata"],
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+            return [self._row_to_relation(row) for row in rows]
+        except GraphError:
+            raise
+        except Exception as e:
+            raise GraphError(f"Failed to get graph relations: {e}") from e
 
     async def traverse(self, query: TraversalQuery) -> list[TraversalResult]:
         """Traverse the memory graph from a starting point.
@@ -290,48 +365,118 @@ class GraphTraversal:
 
         try:
             sql = self._storage.load_sql("graph_traverse.sql")
+            direction = self._validate_direction(query.direction)
+            relation_types = self._normalize_relation_types(query.relation_types)
 
             rows = await self._storage.fetchall(
                 sql,
                 query.start_memory_id,  # $1
                 query.max_depth,  # $2
-                query.relation_types,  # $3
-                query.direction,  # $4
+                relation_types,  # $3
+                direction,  # $4
                 query.min_weight,  # $5
                 query.limit,  # $6
             )
 
-            results: list[TraversalResult] = []
-            for row in rows:
-                metadata = row["metadata"]
-                if isinstance(metadata, str):
-                    metadata = json.loads(metadata)
-
-                results.append(
-                    TraversalResult(
-                        memory_id=row["memory_id"],
-                        content=row["content"],
-                        fact=row.get("fact"),
-                        main_content=row.get("main_content"),
-                        importance=row["importance"],
-                        metadata=metadata or {},
-                        created_at=row["created_at"],
-                        last_accessed_at=row["last_accessed_at"],
-                        access_count=row.get("access_count", 0),
-                        depth=row["depth"],
-                        path=row["path"],
-                        relation_type=row["relation_type"],
-                        path_weight=row["path_weight"],
-                        score=row["score"],
-                    )
-                )
-
-            return results
+            return [self._row_to_traversal_result(row) for row in rows]
 
         except MemoryNotFoundError:
             raise
+        except GraphError:
+            raise
         except Exception as e:
             raise GraphError(f"Graph traversal failed: {e}") from e
+
+    async def traverse_many(
+        self,
+        start_memory_ids: Iterable[MemoryId],
+        *,
+        max_depth: int = 2,
+        direction: str = "any",
+        relation_types: list[RelationType] | None = None,
+        min_weight: float = 0.0,
+        limit_per_seed: int = 25,
+        total_limit: int = 100,
+        skip_missing: bool = True,
+    ) -> list[TraversalResult]:
+        """Traverse from multiple seed memories and return deduplicated results.
+
+        This is the preferred graph expansion primitive for prompt assembly:
+        retrieval usually returns several relevant memories, and expanding all
+        of them produces a more robust context graph than choosing one seed.
+        """
+        seen_seeds = list(dict.fromkeys(start_memory_ids))
+        if not seen_seeds:
+            return []
+
+        by_memory: dict[MemoryId, TraversalResult] = {}
+        for memory_id in seen_seeds:
+            try:
+                results = await self.traverse(
+                    TraversalQuery(
+                        start_memory_id=memory_id,
+                        max_depth=max_depth,
+                        direction=direction,
+                        relation_types=relation_types,
+                        min_weight=min_weight,
+                        limit=limit_per_seed,
+                    )
+                )
+            except MemoryNotFoundError:
+                if skip_missing:
+                    continue
+                raise
+
+            for result in results:
+                current = by_memory.get(result.memory_id)
+                if current is None or self._rank_key(result) > self._rank_key(current):
+                    by_memory[result.memory_id] = result
+
+        return sorted(
+            by_memory.values(),
+            key=lambda result: (
+                result.depth,
+                -result.score,
+                -result.path_weight,
+                result.memory_id,
+            ),
+        )[:total_limit]
+
+    def render_context(
+        self,
+        results: list[TraversalResult],
+        *,
+        max_tokens: int | None = None,
+        token_counter: Callable[[str], int] | None = None,
+        include_paths: bool = False,
+        header: str = "## Related memory graph",
+    ) -> str:
+        """Render traversal results into a deterministic prompt context block."""
+        if not results:
+            return ""
+
+        count = token_counter or (lambda text: max(1, len(text) // 4))
+        lines = [header] if header else []
+        used = count("\n".join(lines)) if lines else 0
+
+        for result in results:
+            relation = result.relation_type or "related_to"
+            line = (
+                f"- depth={result.depth} relation={relation} "
+                f"score={result.score:.3f}: {result.content}"
+            )
+            if include_paths:
+                line += f" path={' -> '.join(result.path)}"
+            line_cost = count(line)
+            if max_tokens is not None and used + line_cost > max_tokens:
+                break
+            lines.append(line)
+            used += line_cost
+
+        return "\n".join(lines).strip()
+
+    def _rank_key(self, result: TraversalResult) -> tuple[float, float, int]:
+        return (result.score, result.path_weight, -result.depth)
 
     async def find_path(
         self,

@@ -1,240 +1,150 @@
 # Configuration
 
-Complete guide to configuring Engram.
+Engram uses `pydantic-settings` with the `ENGRAM_` environment prefix and reads
+`.env` from the current working directory.
 
-## Environment Variables
-
-Engram uses environment variables for configuration, with the `ENGRAM_` prefix.
-
-### Database
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ENGRAM_DATABASE_URL` | Yes | - | PostgreSQL connection string |
-
-**Format:**
-```
-postgresql://user:password@host:port/database
-```
-
-**Example:**
-```bash
-ENGRAM_DATABASE_URL=postgresql://engram:secret@localhost:5432/engram
-```
-
-### Embeddings
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `EMBEDDING_PROVIDER` | No | `openai` | `openai` or `sentence-transformers` |
-| `OPENAI_API_KEY` | If using OpenAI | - | Your OpenAI API key |
-| `ENGRAM_EMBEDDING_MODEL` | No | `text-embedding-3-small` | Model name |
-| `ENGRAM_EMBEDDING_DIMENSION` | No | `1536` | Vector dimensions |
-| `ENGRAM_EMBEDDING_BATCH_SIZE` | No | `100` | Batch size for bulk embedding |
-| `ENGRAM_EMBEDDING_CACHE_SIZE` | No | `1000` | LRU cache size (0 to disable) |
-
-**OpenAI Models:**
-
-| Model | Dimensions | Notes |
-|-------|------------|-------|
-| `text-embedding-3-small` | 1536 | Fast, cheap, good quality |
-| `text-embedding-3-large` | 3072 | Higher quality |
-| `text-embedding-ada-002` | 1536 | Legacy model |
-
-**Sentence Transformers Models:**
-
-| Model | Dimensions | Notes |
-|-------|------------|-------|
-| `all-MiniLM-L6-v2` | 384 | Fast, lightweight |
-| `all-mpnet-base-v2` | 768 | Better quality |
-
-### Search Weights
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENGRAM_WEIGHT_SEMANTIC` | `0.40` | Semantic similarity weight |
-| `ENGRAM_WEIGHT_KEYWORD` | `0.20` | Keyword match weight |
-| `ENGRAM_WEIGHT_DECAY` | `0.25` | Recency/access weight |
-| `ENGRAM_WEIGHT_IMPORTANCE` | `0.15` | Importance score weight |
-
-!!! note
-    Weights must sum to 1.0
-
-### Memory Decay
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENGRAM_DECAY_RATE` | `0.995` | Decay rate per hour |
-
-**Decay Examples:**
-
-| Rate | After 1 Day | After 1 Week |
-|------|-------------|--------------|
-| 0.999 | 0.976 | 0.844 |
-| 0.995 | 0.887 | 0.512 |
-| 0.990 | 0.786 | 0.262 |
-
-### Connection Pool
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENGRAM_MIN_POOL_SIZE` | `5` | Minimum connections |
-| `ENGRAM_MAX_POOL_SIZE` | `20` | Maximum connections |
-
-### Logging
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR) |
-| `ENGRAM_LOG_SQL_QUERIES` | `false` | Log SQL queries (debug) |
-
-## Configuration File
-
-You can also use a `.env` file:
+## Minimal Local Config
 
 ```bash
-# .env
-ENGRAM_DATABASE_URL=postgresql://engram:secret@localhost:5432/engram
-OPENAI_API_KEY=sk-your-key-here
-EMBEDDING_PROVIDER=openai
+ENGRAM_DATABASE_URL=postgresql://engram:engram@localhost:5432/engram
+ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
+ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
+```
+
+## Minimal OpenAI Config
+
+```bash
+ENGRAM_DATABASE_URL=postgresql://engram:engram@localhost:5432/engram
+ENGRAM_EMBEDDING_PROVIDER=openai
 ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
+ENGRAM_LLM_PROVIDER=openai
+ENGRAM_LLM_MODEL=gpt-4o-mini
+ENGRAM_OPENAI_API_KEY=sk-...
 ```
 
-Engram automatically loads `.env` from the current directory.
+## Database
 
-## Programmatic Configuration
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENGRAM_DATABASE_URL` | `postgresql://localhost:5432/engram` | PostgreSQL connection URL |
+| `ENGRAM_MIN_POOL_SIZE` | `5` | Minimum asyncpg pool size |
+| `ENGRAM_MAX_POOL_SIZE` | `20` | Maximum asyncpg pool size |
+| `ENGRAM_CONNECTION_TIMEOUT` | `30.0` | Connection timeout in seconds |
+| `ENGRAM_COMMAND_TIMEOUT` | `60.0` | SQL command timeout in seconds |
 
-Override settings in code:
+## Embeddings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENGRAM_EMBEDDING_PROVIDER` | `openai` | `openai`, `sentence-transformers`, `cohere`, `ollama`, `huggingface` |
+| `ENGRAM_EMBEDDING_MODEL` | `text-embedding-3-small` | Provider-specific model name |
+| `ENGRAM_EMBEDDING_DIMENSION` | unset | Auto-detected when possible |
+| `ENGRAM_EMBEDDING_BATCH_SIZE` | `100` | Batch size for bulk embedding |
+| `ENGRAM_EMBEDDING_CACHE_SIZE` | `1000` | LRU embedding cache entries, `0` disables |
+
+Provider keys and URLs:
+
+| Variable | Used by |
+|----------|---------|
+| `ENGRAM_OPENAI_API_KEY` | OpenAI embeddings and LLM |
+| `ENGRAM_OPENAI_BASE_URL` | OpenAI-compatible APIs |
+| `ENGRAM_COHERE_API_KEY` | Cohere embeddings |
+| `ENGRAM_HF_API_KEY` | HuggingFace Inference embeddings |
+| `ENGRAM_OLLAMA_BASE_URL` | Ollama embeddings and LLM |
+
+## LLM
+
+LLM features are optional. Without an LLM provider, direct `add()`, `search()`,
+`trace_recall()`, task/event storage, and heuristic long-input extraction still
+work. LLM-backed features include `add_conversation()`, query expansion in
+`deep_search()`, and richer memory job processing.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENGRAM_LLM_PROVIDER` | unset | `openai`, `anthropic`, `ollama`, `groq`, `litellm` |
+| `ENGRAM_LLM_MODEL` | `gpt-4o-mini` | Provider-specific model name |
+| `ENGRAM_ANTHROPIC_API_KEY` | unset | Anthropic key |
+| `ENGRAM_GROQ_API_KEY` | unset | Groq key |
+
+## Search
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENGRAM_WEIGHT_SEMANTIC` | `0.40` | Vector similarity weight |
+| `ENGRAM_WEIGHT_KEYWORD` | `0.20` | Full-text weight |
+| `ENGRAM_WEIGHT_DECAY` | `0.25` | Recency/access weight |
+| `ENGRAM_WEIGHT_IMPORTANCE` | `0.15` | Importance weight |
+| `ENGRAM_DECAY_RATE` | `0.995` | Hourly decay base |
+| `ENGRAM_DEFAULT_SEARCH_LIMIT` | `10` | Default result limit |
+| `ENGRAM_MAX_SEARCH_LIMIT` | `100` | API-level max search limit |
+| `ENGRAM_NEAR_DUPLICATE_THRESHOLD` | `0.95` | Similarity threshold for duplicate guard |
+
+Weights must sum to approximately `1.0`.
+
+## Logging
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENGRAM_LOG_LEVEL` | `INFO` | Python log level |
+| `ENGRAM_LOG_SQL_QUERIES` | `false` | Log SQL statements for debugging |
+
+## Programmatic Settings
 
 ```python
 from engram import Engram
 from engram.core import EngramSettings
 
-# Custom settings
 settings = EngramSettings(
-    database_url="postgresql://...",
-    embedding_dimension=1536,
-    decay_rate=0.995,
-    min_pool_size=10,
-    max_pool_size=50,
+    database_url="postgresql://engram:engram@localhost:5432/engram",
+    embedding_provider="sentence-transformers",
+    embedding_model="all-MiniLM-L6-v2",
+    llm_provider=None,
 )
 
-# Use custom settings
-async with Engram(settings=settings) as engram:
+async with Engram(settings=settings, memory_policy="coding_agent") as engram:
     ...
 ```
 
-## Custom Embedding Provider
+## Memory Policy
 
-Use any embedding function:
+`memory_policy` is passed to `Engram`, not configured through
+`EngramSettings`.
 
 ```python
-from engram import Engram
+async with Engram(memory_policy="default") as engram:
+    ...
 
-# Custom embedding function
-async def my_embeddings(texts: list[str]) -> list[list[float]]:
-    # Your embedding logic here
-    # Must return list of vectors
-    return [[0.1, 0.2, ...] for _ in texts]
+async with Engram(memory_policy="legal") as engram:
+    ...
 
-# Use custom embeddings
-async with Engram(
-    embedding_fn=my_embeddings,
-    embedding_dim=1536  # Must match your vectors
-) as engram:
+async with Engram(memory_policy="coding_agent") as engram:
     ...
 ```
 
-## Docker Configuration
+Use a custom `MemoryPolicy` when you need domain-specific memory types,
+critical slots, and conflict rules.
 
-When using Docker, configure via environment:
+## Docker Compose
 
 ```yaml
-# docker-compose.yml
 services:
-  engram:
+  app:
     environment:
-      - ENGRAM_DATABASE_URL=postgresql://engram:secret@postgres:5432/engram
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - EMBEDDING_PROVIDER=openai
+      ENGRAM_DATABASE_URL: postgresql://engram:engram@postgres:5432/engram
+      ENGRAM_EMBEDDING_PROVIDER: openai
+      ENGRAM_EMBEDDING_MODEL: text-embedding-3-small
+      ENGRAM_LLM_PROVIDER: openai
+      ENGRAM_LLM_MODEL: gpt-4o-mini
+      ENGRAM_OPENAI_API_KEY: ${ENGRAM_OPENAI_API_KEY}
 ```
 
-Or use an env file:
+## Validation Errors
 
-```yaml
-services:
-  engram:
-    env_file:
-      - .env
-```
+Common startup errors:
 
-## Production Recommendations
+- `max_pool_size` lower than `min_pool_size`
+- search weights do not sum to `1.0`
+- invalid `ENGRAM_EMBEDDING_DIMENSION`
+- missing provider package, such as using OpenAI without installing `engram[openai]`
+- missing API key for cloud providers
 
-### Database
-
-```bash
-# Use connection pooling (PgBouncer recommended for high load)
-ENGRAM_DATABASE_URL=postgresql://user:pass@pgbouncer:6432/engram
-
-# Larger pool for production
-ENGRAM_MIN_POOL_SIZE=10
-ENGRAM_MAX_POOL_SIZE=50
-```
-
-### Embeddings
-
-```bash
-# Enable caching
-ENGRAM_EMBEDDING_CACHE_SIZE=10000
-
-# Batch for bulk operations
-ENGRAM_EMBEDDING_BATCH_SIZE=100
-```
-
-### Search Tuning
-
-Adjust weights based on your use case:
-
-```bash
-# More emphasis on semantic similarity
-ENGRAM_WEIGHT_SEMANTIC=0.50
-ENGRAM_WEIGHT_KEYWORD=0.15
-ENGRAM_WEIGHT_DECAY=0.20
-ENGRAM_WEIGHT_IMPORTANCE=0.15
-
-# More emphasis on recency
-ENGRAM_WEIGHT_SEMANTIC=0.35
-ENGRAM_WEIGHT_KEYWORD=0.15
-ENGRAM_WEIGHT_DECAY=0.35
-ENGRAM_WEIGHT_IMPORTANCE=0.15
-```
-
-### Logging
-
-```bash
-# Production logging
-LOG_LEVEL=WARNING
-ENGRAM_LOG_SQL_QUERIES=false
-```
-
-## Validation
-
-Engram validates configuration on startup:
-
-```python
-from engram.core import EngramSettings
-
-# This will raise ValidationError if invalid
-settings = EngramSettings()
-
-# Check specific values
-print(f"Database: {settings.database_url}")
-print(f"Pool size: {settings.min_pool_size}-{settings.max_pool_size}")
-```
-
-Common validation errors:
-
-- `database_url` is required
-- Weights must sum to 1.0
-- `decay_rate` must be between 0 and 1
-- `embedding_dimension` must be positive

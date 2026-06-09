@@ -1,5 +1,10 @@
 # Edge Cases for Engram Memory System
 
+This page lists behavior that application developers should test explicitly.
+The current architecture adds deterministic critical recall, conflict metadata,
+task memory, and long-input ingestion; those features have their own edge cases
+in addition to vector search and CRUD behavior.
+
 ## 1. **Data Integrity**
 
 ### Duplicate Facts with Slight Variations
@@ -85,6 +90,9 @@ results = await engram.search(query=query, ...)
 # Edge case: Embedding API token limit exceeded
 ```
 
+Use `record_long_input()` for multi-thousand-token prompts or documents. Use
+`search()` for concise retrieval queries.
+
 ### Score Ties
 ```python
 # Multiple memories have identical scores (e.g., 0.753)
@@ -128,6 +136,17 @@ results = await engram.search(...)  # Decay = 0.995^0 = 1.0?
 # Add completes and commits
 # Does search see the new memory mid-execution?
 ```
+
+### Simultaneous Corrections To The Same Critical Slot
+```python
+# Request A: "User is allergic to cashews"
+# Request B: "Correction: user is not allergic to cashews"
+# Both produce the same conflict_key
+# Edge case: Which memory remains active?
+```
+
+The application should treat the latest committed row with `status=active` as
+authoritative and inspect superseded rows during audits.
 
 ---
 
@@ -256,6 +275,124 @@ await engram.add(...)  # Inserts 768-dim vector into 1536-dim column?
 # OpenAI API is down
 await engram.add(content="fact", ...)  # Hangs? Times out? Retries?
 ```
+
+---
+
+## 8. **Critical Recall And Conflict Resolution**
+
+### Critical Fact Not In Final Prompt
+```python
+trace = await engram.trace_recall(
+    "What can I order for dinner?",
+    agent_id="assistant",
+    user_id="user",
+    expected_terms=["shellfish"],
+    max_tokens=100,
+)
+
+# Edge case: allergy exists, but max_tokens is too small
+assert "shellfish" in trace.missing_expected_terms
+assert trace.trimmed_memory_ids
+```
+
+### Superseded Fact Still Appears In Search
+```python
+# Old: "User lives in Dhaka"
+# New: "User moved to Seattle"
+# Edge case: old fact should not appear in normal search
+```
+
+Verify:
+
+```python
+trace = await engram.trace_recall("where does the user live?", "assistant")
+assert old_memory_id in trace.superseded_memory_ids
+assert old_memory_id not in trace.kept_memory_ids
+```
+
+### Wrong Critical Slot
+```python
+# "User has a shellfish allergy" and "User has a peanut allergy"
+# Edge case: policy collapses both into profile:allergy instead of separate allergens
+```
+
+Use custom `SlotRule` objects when domain-specific slots need stricter parsing.
+
+---
+
+## 9. **Task Memory**
+
+### Worker Not Running
+```python
+await engram.record_turn(task_id, user_msg, assistant_msg)
+# No process_memory_jobs() or run_memory_worker()
+# Edge case: raw events exist, but derived facts/checkpoints lag behind
+```
+
+Mitigation: build task context includes recent events, but search recall may not
+see newly derived facts until jobs are processed.
+
+### Failed Memory Job
+```sql
+SELECT job_id, error FROM memory_jobs WHERE status = 'failed';
+```
+
+Failed jobs preserve the raw event ledger. Fix the underlying issue and decide
+whether to retry or create a replacement event/job.
+
+### Redacted Events And Existing Derived Memories
+```python
+await engram.redact_event(event_id)
+# Edge case: derived memories from the old event may still exist
+```
+
+Redaction clears the event. Applications that need strict privacy deletion
+should also delete or supersede derived memories linked by `source_event_id`.
+
+---
+
+## 10. **Long Input And Legal Documents**
+
+### Relative Time In Long Prompts
+```python
+await engram.record_long_input(
+    task_id,
+    "We need this reviewed tomorrow and next Friday.",
+)
+```
+
+Engram records time notes where it can, but applications should normalize
+relative dates before high-stakes use when exact deadlines matter.
+
+### Missing Source Chunk
+```python
+context = await engram.build_long_input_context(
+    task_id,
+    query="termination notice",
+    expected_terms=["termination", "notice"],
+)
+```
+
+If `context.trace["missing_expected_terms"]` is non-empty, the application should
+ask for clarification, retrieve more source chunks, or refuse exact-document
+answers.
+
+### Source Chunk Too Large For Prompt
+```python
+context = await engram.build_long_input_context(
+    task_id,
+    query="summarize all obligations",
+    max_tokens=1000,
+)
+```
+
+Relevant chunks may be trimmed. Inspect `context.trace["trimmed_sections"]`.
+
+### Citation Metadata Missing
+
+Engram stores character spans and quote hashes. If you need PDF page numbers,
+line numbers, or OCR bounding boxes, add those fields in `metadata` before
+calling `record_long_input()`.
 
 ---
 

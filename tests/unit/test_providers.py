@@ -2,9 +2,44 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+class FakeEmbedding(list):
+    """List with the numpy-like tolist method used by the provider."""
+
+    def tolist(self) -> list[float]:
+        return list(self)
+
+
+class FakeSentenceTransformer:
+    """Small local stand-in for sentence_transformers.SentenceTransformer."""
+
+    device = "cpu"
+
+    def __init__(self, model: str, device: str | None = None) -> None:
+        self.model = model
+        self.device = device or "cpu"
+
+    def get_sentence_embedding_dimension(self) -> int:
+        return 384
+
+    def encode(
+        self,
+        texts: list[str],
+        *,
+        convert_to_numpy: bool,
+        normalize_embeddings: bool,
+    ) -> list[FakeEmbedding]:
+        _ = (convert_to_numpy, normalize_embeddings)
+        return [FakeEmbedding([float(i % 7) / 7.0 for i in range(384)]) for _ in texts]
+
+
+def fake_sentence_transformers_module() -> SimpleNamespace:
+    return SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
 
 
 class TestEmbeddingProviderRegistry:
@@ -42,36 +77,46 @@ class TestSentenceTransformersProvider:
 
     def test_provider_loads_model(self) -> None:
         """Test that provider loads the model."""
-        pytest.importorskip("sentence_transformers")
-        
-        from engram.providers.embedding.builtin import SentenceTransformersEmbeddingProvider
-
-        provider = SentenceTransformersEmbeddingProvider(
-            model="all-MiniLM-L6-v2",
+        from engram.providers.embedding.builtin import (
+            SentenceTransformersEmbeddingProvider,
         )
+
+        with patch.dict(
+            "sys.modules",
+            {"sentence_transformers": fake_sentence_transformers_module()},
+        ):
+            provider = SentenceTransformersEmbeddingProvider(
+                model="all-MiniLM-L6-v2",
+            )
 
         assert provider.model == "all-MiniLM-L6-v2"
         assert provider.dimension == 384
 
     def test_provider_missing_package_raises(self) -> None:
         """Test that missing package raises ImportError."""
-        with patch.dict('sys.modules', {'sentence_transformers': None}):
-            with patch('builtins.__import__', side_effect=ImportError):
-                # Can't easily test this without actually uninstalling package
-                pass
+        with (
+            patch.dict("sys.modules", {"sentence_transformers": None}),
+            patch("builtins.__import__", side_effect=ImportError),
+        ):
+            # Can't easily test this without actually uninstalling package
+            pass
 
     @pytest.mark.asyncio
     async def test_embed_returns_vector(self) -> None:
         """Test that embed returns a vector."""
-        pytest.importorskip("sentence_transformers")
-        
-        from engram.providers.embedding.builtin import SentenceTransformersEmbeddingProvider
-
-        provider = SentenceTransformersEmbeddingProvider(
-            model="all-MiniLM-L6-v2",
+        from engram.providers.embedding.builtin import (
+            SentenceTransformersEmbeddingProvider,
         )
 
-        vector = await provider.embed("Hello world")
+        with patch.dict(
+            "sys.modules",
+            {"sentence_transformers": fake_sentence_transformers_module()},
+        ):
+            provider = SentenceTransformersEmbeddingProvider(
+                model="all-MiniLM-L6-v2",
+            )
+
+            vector = await provider.embed("Hello world")
 
         assert isinstance(vector, list)
         assert len(vector) == 384
@@ -80,28 +125,36 @@ class TestSentenceTransformersProvider:
     @pytest.mark.asyncio
     async def test_embed_batch_returns_vectors(self) -> None:
         """Test that embed_batch returns multiple vectors."""
-        pytest.importorskip("sentence_transformers")
-        
-        from engram.providers.embedding.builtin import SentenceTransformersEmbeddingProvider
-
-        provider = SentenceTransformersEmbeddingProvider(
-            model="all-MiniLM-L6-v2",
+        from engram.providers.embedding.builtin import (
+            SentenceTransformersEmbeddingProvider,
         )
 
-        vectors = await provider.embed_batch(["Hello", "World", "Test"])
+        with patch.dict(
+            "sys.modules",
+            {"sentence_transformers": fake_sentence_transformers_module()},
+        ):
+            provider = SentenceTransformersEmbeddingProvider(
+                model="all-MiniLM-L6-v2",
+            )
+
+            vectors = await provider.embed_batch(["Hello", "World", "Test"])
 
         assert len(vectors) == 3
         assert all(len(v) == 384 for v in vectors)
 
     def test_provider_cleanup(self) -> None:
         """Test that provider can be cleaned up."""
-        pytest.importorskip("sentence_transformers")
-        
-        from engram.providers.embedding.builtin import SentenceTransformersEmbeddingProvider
-
-        provider = SentenceTransformersEmbeddingProvider(
-            model="all-MiniLM-L6-v2",
+        from engram.providers.embedding.builtin import (
+            SentenceTransformersEmbeddingProvider,
         )
+
+        with patch.dict(
+            "sys.modules",
+            {"sentence_transformers": fake_sentence_transformers_module()},
+        ):
+            provider = SentenceTransformersEmbeddingProvider(
+                model="all-MiniLM-L6-v2",
+            )
 
         # Should not raise
         provider.close()
@@ -115,13 +168,13 @@ class TestOpenAIEmbeddingProvider:
     def mock_openai_client(self) -> MagicMock:
         """Create mock OpenAI client."""
         client = MagicMock()
-        
+
         mock_embedding = MagicMock()
         mock_embedding.embedding = [0.1] * 1536
-        
+
         mock_response = MagicMock()
         mock_response.data = [mock_embedding]
-        
+
         client.embeddings.create = AsyncMock(return_value=mock_response)
         return client
 
@@ -133,8 +186,8 @@ class TestOpenAIEmbeddingProvider:
         # Patch openai import inside the provider constructor
         mock_openai_module = MagicMock()
         mock_openai_module.AsyncOpenAI.return_value = mock_openai_client
-        
-        with patch.dict('sys.modules', {'openai': mock_openai_module}):
+
+        with patch.dict("sys.modules", {"openai": mock_openai_module}):
             provider = OpenAIEmbeddingProvider(
                 api_key="test-key",
                 model="text-embedding-3-small",
@@ -225,14 +278,16 @@ class TestGetEmbeddingProvider:
 
     def test_get_sentence_transformers(self) -> None:
         """Test getting sentence-transformers provider."""
-        pytest.importorskip("sentence_transformers")
-        
         from engram.providers.embedding import get_embedding_provider
 
-        provider = get_embedding_provider(
-            "sentence-transformers",
-            model="all-MiniLM-L6-v2",
-        )
+        with patch.dict(
+            "sys.modules",
+            {"sentence_transformers": fake_sentence_transformers_module()},
+        ):
+            provider = get_embedding_provider(
+                "sentence-transformers",
+                model="all-MiniLM-L6-v2",
+            )
 
         assert provider.dimension == 384
 
@@ -272,12 +327,15 @@ class TestEmbeddingProviderProtocol:
 
     def test_provider_has_required_attributes(self) -> None:
         """Test that providers have required attributes."""
-        pytest.importorskip("sentence_transformers")
-        
-        from engram.providers.embedding.builtin import SentenceTransformersEmbeddingProvider
-        from engram.providers.embedding.protocol import EmbeddingProvider
+        from engram.providers.embedding.builtin import (
+            SentenceTransformersEmbeddingProvider,
+        )
 
-        provider = SentenceTransformersEmbeddingProvider(model="all-MiniLM-L6-v2")
+        with patch.dict(
+            "sys.modules",
+            {"sentence_transformers": fake_sentence_transformers_module()},
+        ):
+            provider = SentenceTransformersEmbeddingProvider(model="all-MiniLM-L6-v2")
 
         # Check protocol attributes
         assert hasattr(provider, "dimension")
@@ -303,4 +361,3 @@ class TestLLMProviderProtocol:
         assert hasattr(provider, "complete_text")
 
         assert isinstance(provider.model, str)
-

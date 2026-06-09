@@ -53,7 +53,7 @@ class DatabaseConnectionError(EngramError):
     - Initial connection to PostgreSQL fails
     - Connection pool exhaustion occurs
     - Connection times out during operation
-    
+
     Note: Named DatabaseConnectionError to avoid shadowing Python's built-in
     ConnectionError, which is a subclass of OSError.
     """
@@ -62,7 +62,7 @@ class DatabaseConnectionError(EngramError):
 
 
 # Alias for backwards compatibility (but prefer DatabaseConnectionError)
-ConnectionError = DatabaseConnectionError  # noqa: A001
+ConnectionError = DatabaseConnectionError
 
 
 class ConnectionPoolExhaustedError(DatabaseConnectionError):

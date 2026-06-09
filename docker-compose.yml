@@ -66,9 +66,9 @@ services:
     
     environment:
       ENGRAM_DATABASE_URL: postgresql://${POSTGRES_USER:-engram}:${POSTGRES_PASSWORD:-engram_secret}@postgres:5432/${POSTGRES_DB:-engram}
-      ENGRAM_OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ENGRAM_EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
-      ENGRAM_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ENGRAM_OPENAI_API_KEY: ${ENGRAM_OPENAI_API_KEY:-}
+      ENGRAM_EMBEDDING_PROVIDER: ${ENGRAM_EMBEDDING_PROVIDER:-openai}
+      ENGRAM_LOG_LEVEL: ${ENGRAM_LOG_LEVEL:-INFO}
     
     volumes:
       # Mount source for development hot-reload

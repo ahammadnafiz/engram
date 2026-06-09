@@ -5,14 +5,14 @@ PostgreSQL + pgvector for converged storage with hybrid search.
 
 Provider System:
     Engram uses a pluggable provider architecture for embeddings and LLMs.
-    
+
     Built-in embedding providers:
     - openai: OpenAI text-embedding models
     - sentence-transformers: Local Sentence Transformers
     - cohere: Cohere embed models
     - ollama: Ollama local embeddings
     - huggingface: HuggingFace Inference API
-    
+
     Built-in LLM providers:
     - openai: OpenAI GPT models
     - anthropic: Anthropic Claude models
@@ -31,16 +31,16 @@ Example:
                 content="User prefers dark mode",
                 agent_id="my_agent",
             )
-            
+
             # Reinforce when memory is useful
             await engram.reinforce(memory.memory_id)
-            
+
             # Search memories
             results = await engram.search(
                 query="user interface preferences",
                 agent_id="my_agent",
             )
-            
+
             for result in results:
                 print(f"{result.score:.2f}: {result.memory.content}")
 
@@ -50,94 +50,135 @@ Example:
 from engram._version import __version__
 from engram.client import Engram
 from engram.core import (
-    # Configuration
-    EngramSettings,
-    get_settings,
+    # Types
+    AgentId,
     # Exceptions
     ConfigurationError,
     ConnectionError,
     ConnectionPoolExhaustedError,
     EngramError,
-    MemoryNotFoundError,
-    QueryError,
-    SessionNotFoundError,
-    StorageError,
-    ValidationError,
-    # Types
-    AgentId,
+    # Configuration
+    EngramSettings,
     MemoryId,
+    MemoryNotFoundError,
+    MemoryType,
     Metadata,
+    QueryError,
     RelationType,
     SearchMode,
     SessionId,
+    SessionNotFoundError,
+    StorageError,
     TraversalDirection,
     UserId,
+    ValidationError,
     Vector,
+    get_settings,
 )
 from engram.embedding import EmbeddingService
 from engram.graph import MemoryRelation, TraversalResult
-from engram.memory import Memory, MemoryCreate, SearchQuery, SearchResult
-from engram.session import Session
+from engram.llm import LLMService
+from engram.memory import Memory, MemoryCreate, RecallTrace, SearchQuery, SearchResult
+from engram.policy import (
+    CODING_AGENT_MEMORY_POLICY,
+    DEFAULT_MEMORY_POLICY,
+    LEGAL_MEMORY_POLICY,
+    MemoryPolicy,
+    SlotRule,
+    TypeRule,
+    get_memory_policy,
+)
 
 # Provider system
 from engram.providers import (
     EmbeddingProvider,
-    LLMProvider,
     LLMMessage,
+    LLMProvider,
     LLMResponse,
     embedding_registry,
-    llm_registry,
     get_embedding_provider,
     get_llm_provider,
+    llm_registry,
 )
-from engram.llm import LLMService
+from engram.session import Session
+from engram.task import (
+    AgentEvent,
+    ContextBuildOptions,
+    ContextBuildResult,
+    EventCreate,
+    LongInputChunk,
+    LongInputContextResult,
+    LongInputIngestionReport,
+    MemoryJob,
+    TaskCheckpoint,
+    TaskRun,
+)
 
 __all__ = [
-    # Main client
-    "Engram",
-    # Version
-    "__version__",
-    # Configuration
-    "EngramSettings",
-    "get_settings",
-    # Models
-    "Memory",
-    "MemoryCreate",
-    "MemoryRelation",
-    "SearchQuery",
-    "SearchResult",
-    "Session",
-    "TraversalResult",
+    "CODING_AGENT_MEMORY_POLICY",
+    "DEFAULT_MEMORY_POLICY",
+    "LEGAL_MEMORY_POLICY",
+    "AgentEvent",
     # Types
     "AgentId",
-    "MemoryId",
-    "Metadata",
-    "RelationType",
-    "SearchMode",
-    "SessionId",
-    "TraversalDirection",
-    "UserId",
-    "Vector",
-    # Embedding & LLM Services
-    "EmbeddingService",
-    "LLMService",
-    # Provider System
-    "EmbeddingProvider",
-    "LLMProvider",
-    "LLMMessage",
-    "LLMResponse",
-    "embedding_registry",
-    "llm_registry",
-    "get_embedding_provider",
-    "get_llm_provider",
     # Exceptions
     "ConfigurationError",
     "ConnectionError",
     "ConnectionPoolExhaustedError",
+    "ContextBuildOptions",
+    "ContextBuildResult",
+    # Provider System
+    "EmbeddingProvider",
+    # Embedding & LLM Services
+    "EmbeddingService",
+    # Main client
+    "Engram",
     "EngramError",
+    # Configuration
+    "EngramSettings",
+    "EventCreate",
+    "LLMMessage",
+    "LLMProvider",
+    "LLMResponse",
+    "LLMService",
+    "LongInputChunk",
+    "LongInputContextResult",
+    "LongInputIngestionReport",
+    # Models
+    "Memory",
+    "MemoryCreate",
+    "MemoryId",
+    "MemoryJob",
     "MemoryNotFoundError",
+    "MemoryPolicy",
+    "MemoryRelation",
+    "MemoryType",
+    "Metadata",
     "QueryError",
+    "RecallTrace",
+    "RelationType",
+    "SearchMode",
+    "SearchQuery",
+    "SearchResult",
+    "Session",
+    "SessionId",
     "SessionNotFoundError",
+    "SlotRule",
     "StorageError",
+    "TaskCheckpoint",
+    "TaskRun",
+    "TraversalDirection",
+    "TraversalResult",
+    "TypeRule",
+    "UserId",
     "ValidationError",
+    "Vector",
+    # Version
+    "__version__",
+    "embedding_registry",
+    "get_embedding_provider",
+    "get_llm_provider",
+    "get_memory_policy",
+    "get_settings",
+    "llm_registry",
 ]

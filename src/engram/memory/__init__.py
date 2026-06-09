@@ -7,6 +7,7 @@ from engram.memory.models import (
     Memory,
     MemoryCreate,
     MemoryUpdate,
+    RecallTrace,
     SearchQuery,
     SearchResult,
 )
@@ -15,8 +16,9 @@ from engram.memory.store import MemoryStore
 __all__ = [
     "Memory",
     "MemoryCreate",
-    "MemoryUpdate",
     "MemoryStore",
+    "MemoryUpdate",
+    "RecallTrace",
     "SearchQuery",
     "SearchResult",
 ]

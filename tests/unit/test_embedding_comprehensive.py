@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,9 +17,9 @@ class TestEmbeddingServiceLRUCache:
         provider = MagicMock()
         provider.dimension = 384
         provider.model = "test-model"
-        
+
         self.call_count = 0
-        
+
         async def mock_embed(text: str) -> list[float]:
             self.call_count += 1
             # Return unique embedding based on text
@@ -54,7 +53,7 @@ class TestEmbeddingServiceLRUCache:
         # Add D - should evict B (least recently used)
         await service.embed("D")
         assert len(service._cache) == 3
-        
+
         # B should require new embedding (was evicted)
         call_count_before = mock_provider.embed.call_count
         await service.embed("B")
@@ -84,7 +83,9 @@ class TestEmbeddingServiceLRUCache:
         assert service._compute_cache_key("first") == keys[-1]
 
     @pytest.mark.asyncio
-    async def test_batch_embed_updates_lru_order(self, mock_provider: MagicMock) -> None:
+    async def test_batch_embed_updates_lru_order(
+        self, mock_provider: MagicMock
+    ) -> None:
         """Test that batch embed updates LRU order for cache hits."""
         from engram.embedding.service import EmbeddingService
 
@@ -104,7 +105,9 @@ class TestEmbeddingServiceLRUCache:
         assert service._compute_cache_key("brand_new") in keys
 
     @pytest.mark.asyncio
-    async def test_cache_disabled_when_size_zero(self, mock_provider: MagicMock) -> None:
+    async def test_cache_disabled_when_size_zero(
+        self, mock_provider: MagicMock
+    ) -> None:
         """Test that cache is disabled when size is 0."""
         from engram.embedding.service import EmbeddingService
 
@@ -130,10 +133,12 @@ class TestEmbeddingServiceBatchValidation:
         return provider
 
     @pytest.mark.asyncio
-    async def test_batch_length_mismatch_raises_error(self, mock_provider: MagicMock) -> None:
+    async def test_batch_length_mismatch_raises_error(
+        self, mock_provider: MagicMock
+    ) -> None:
         """Test that batch returning wrong number of embeddings raises error."""
-        from engram.embedding.service import EmbeddingService
         from engram.core.exceptions import EmbeddingError
+        from engram.embedding.service import EmbeddingService
 
         # Provider returns fewer embeddings than requested
         async def bad_batch(texts: list[str]) -> list[list[float]]:
@@ -175,7 +180,9 @@ class TestEmbeddingServiceBatchValidation:
         assert len(results) == 3
 
     @pytest.mark.asyncio
-    async def test_batch_maintains_order_with_partial_cache(self, mock_provider: MagicMock) -> None:
+    async def test_batch_maintains_order_with_partial_cache(
+        self, mock_provider: MagicMock
+    ) -> None:
         """Test that batch maintains input order with partial cache hits."""
         from engram.embedding.service import EmbeddingService
 
@@ -239,7 +246,7 @@ class TestEmbeddingServiceFromProvider:
         from engram.embedding.service import EmbeddingService
 
         # Patch where the function is used (in the service module)
-        with patch('engram.embedding.service.get_embedding_provider') as mock_get:
+        with patch("engram.embedding.service.get_embedding_provider") as mock_get:
             mock_provider = MagicMock()
             mock_provider.dimension = 384
             mock_provider.model = "test"
@@ -258,7 +265,7 @@ class TestEmbeddingServiceFromProvider:
         from engram.embedding.service import EmbeddingService
 
         # Patch where the function is used (in the service module)
-        with patch('engram.embedding.service.get_embedding_provider') as mock_get:
+        with patch("engram.embedding.service.get_embedding_provider") as mock_get:
             mock_provider = MagicMock()
             mock_provider.dimension = 384
             mock_provider.model = "test"
@@ -282,7 +289,7 @@ class TestEmbeddingServiceEdgeCases:
         provider = MagicMock()
         provider.dimension = 384
         provider.model = "test"
-        
+
         async def mock_embed(text: str) -> list[float]:
             return [0.1] * 384
 
@@ -339,7 +346,7 @@ class TestEmbeddingServiceEdgeCases:
         from engram.embedding.service import EmbeddingService
 
         call_count = 0
-        
+
         async def slow_embed(text: str) -> list[float]:
             nonlocal call_count
             call_count += 1
@@ -360,7 +367,9 @@ class TestEmbeddingServiceEdgeCases:
         # This test documents current behavior
 
     @pytest.mark.asyncio
-    async def test_cache_key_collision_resistance(self, mock_provider: MagicMock) -> None:
+    async def test_cache_key_collision_resistance(
+        self, mock_provider: MagicMock
+    ) -> None:
         """Test that cache keys don't easily collide."""
         from engram.embedding.service import EmbeddingService
 
@@ -371,12 +380,12 @@ class TestEmbeddingServiceEdgeCases:
             "hello world",
             "hello world ",  # trailing space
             " hello world",  # leading space
-            "Hello World",   # different case
+            "Hello World",  # different case
             "hello  world",  # double space
         ]
 
         keys = [service._compute_cache_key(t) for t in similar_texts]
-        
+
         # All keys should be unique
         assert len(keys) == len(set(keys))
 
@@ -398,8 +407,8 @@ class TestEmbeddingServiceEdgeCases:
     @pytest.mark.asyncio
     async def test_provider_error_propagation(self, mock_provider: MagicMock) -> None:
         """Test that provider errors propagate correctly."""
-        from engram.embedding.service import EmbeddingService
         from engram.core.exceptions import EmbeddingError
+        from engram.embedding.service import EmbeddingService
 
         async def failing_embed(text: str) -> list[float]:
             raise EmbeddingError("API limit exceeded")
@@ -412,4 +421,3 @@ class TestEmbeddingServiceEdgeCases:
             await service.embed("test")
 
         assert "API limit exceeded" in str(exc_info.value)
-

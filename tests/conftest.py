@@ -6,10 +6,13 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
-from typing import AsyncGenerator, Generator
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 # Set test environment variables before importing engram
 os.environ.setdefault("ENGRAM_DATABASE_URL", "postgresql://localhost:5432/engram_test")

@@ -6,6 +6,7 @@ Run with: pytest tests/integration -v --run-integration
 
 from __future__ import annotations
 
+import contextlib
 import os
 import uuid
 
@@ -19,21 +20,23 @@ pytestmark = pytest.mark.integration
 async def engram_client():
     """Create Engram client for integration tests."""
     from pathlib import Path
+
     from dotenv import load_dotenv
-    
+
     # Load .env file to get actual database credentials (override existing)
     env_path = Path(__file__).parent.parent.parent / ".env"
     load_dotenv(env_path, override=True)
-    
+
     # Use sentence-transformers for local testing (no API key needed)
     os.environ["ENGRAM_EMBEDDING_PROVIDER"] = "sentence-transformers"
     os.environ["ENGRAM_EMBEDDING_MODEL"] = "all-MiniLM-L6-v2"
     os.environ["ENGRAM_EMBEDDING_DIMENSION"] = "384"
-    
+
     # Clear cached settings to pick up new env vars
     from engram.core.config import clear_settings_cache
+
     clear_settings_cache()
-    
+
     from engram import Engram
 
     client = Engram()
@@ -46,14 +49,12 @@ async def engram_client():
 async def clean_agent(engram_client):
     """Create a unique agent and clean up after test."""
     agent_id = f"test_agent_{uuid.uuid4().hex[:8]}"
-    
+
     yield agent_id
-    
+
     # Cleanup
-    try:
+    with contextlib.suppress(Exception):
         await engram_client.purge(agent_id=agent_id)
-    except Exception:
-        pass
 
 
 class TestMemoryLifecycle:
@@ -113,7 +114,7 @@ class TestMemoryLifecycle:
     async def test_forget_memory(self, engram_client, clean_agent) -> None:
         """Test forgetting a memory."""
         from engram.core.exceptions import MemoryNotFoundError
-        
+
         memory = await engram_client.add(
             content="Temporary fact",
             agent_id=clean_agent,
@@ -223,7 +224,7 @@ class TestGraphOperations:
             start_memory_id=mem1.memory_id,
             max_depth=1,
         )
-        
+
         # Should find mem2 through the relation
         found_ids = [r.memory_id for r in results]
         assert mem2.memory_id in found_ids
@@ -261,7 +262,7 @@ class TestSessionManagement:
             content="Pre-session memory to create agent",
             agent_id=clean_agent,
         )
-        
+
         async with engram_client.session(agent_id=clean_agent) as session:
             assert session.is_active
             assert session.agent_id == clean_agent
@@ -284,8 +285,7 @@ class TestBatchOperations:
         """Test adding multiple memories in batch."""
         # add_batch expects list of dicts, not MemoryCreate objects
         creates = [
-            {"content": f"Batch memory {i}", "agent_id": clean_agent}
-            for i in range(5)
+            {"content": f"Batch memory {i}", "agent_id": clean_agent} for i in range(5)
         ]
 
         memories = await engram_client.add_batch(creates)
@@ -344,7 +344,7 @@ class TestEdgeCases:
     async def test_get_nonexistent_memory(self, engram_client) -> None:
         """Test getting non-existent memory raises MemoryNotFoundError."""
         from engram.core.exceptions import MemoryNotFoundError
-        
+
         with pytest.raises(MemoryNotFoundError):
             await engram_client.get("nonexistent_memory_id")
 

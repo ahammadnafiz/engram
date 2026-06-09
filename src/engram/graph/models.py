@@ -2,6 +2,7 @@
 
 This module defines models for memory relations and graph traversal results.
 """
+# ruff: noqa: TC001
 
 from __future__ import annotations
 

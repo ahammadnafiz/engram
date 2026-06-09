@@ -9,6 +9,7 @@ This module provides the foundational components:
 from engram.core._types import (
     AgentId,
     MemoryId,
+    MemoryType,
     Metadata,
     RelationType,
     SearchMode,
@@ -19,10 +20,7 @@ from engram.core._types import (
     VectorDimension,
 )
 from engram.core.config import (
-    DatabaseSettings,
-    EmbeddingSettings,
     EngramSettings,
-    SearchSettings,
     get_settings,
 )
 from engram.core.exceptions import (
@@ -51,21 +49,6 @@ from engram.core.exceptions import (
 __all__ = [
     # Types
     "AgentId",
-    "MemoryId",
-    "Metadata",
-    "RelationType",
-    "SearchMode",
-    "SessionId",
-    "TraversalDirection",
-    "UserId",
-    "Vector",
-    "VectorDimension",
-    # Config
-    "DatabaseSettings",
-    "EmbeddingSettings",
-    "EngramSettings",
-    "SearchSettings",
-    "get_settings",
     # Exceptions
     "ConfigurationError",
     "ConnectionError",
@@ -76,15 +59,28 @@ __all__ = [
     "EmbeddingError",
     "EmbeddingProviderError",
     "EngramError",
+    # Config
+    "EngramSettings",
     "GraphError",
     "LLMError",
     "LLMProviderError",
+    "MemoryId",
     "MemoryNotFoundError",
+    "MemoryType",
+    "Metadata",
     "QueryError",
     "RelationNotFoundError",
+    "RelationType",
+    "SearchMode",
     "SessionClosedError",
     "SessionError",
+    "SessionId",
     "SessionNotFoundError",
     "StorageError",
+    "TraversalDirection",
+    "UserId",
     "ValidationError",
+    "Vector",
+    "VectorDimension",
+    "get_settings",
 ]

@@ -1,5 +1,5 @@
 site_name: Engram
-site_description: AI Memory Library for LLM Applications
+site_description: Persistent memory infrastructure for long-running AI agents
 site_author: Ahammad Nafiz
 site_url: https://ahammadnafiz.github.io/engram
 
@@ -33,24 +33,16 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - Core Concepts: concepts.md
+  - Long-Running Memory: long-running-memory.md
+  - API Reference: api.md
   - Configuration: configuration.md
-  - User Guide:
-      - Memory Operations: guide/memory.md
-      - Search: guide/search.md
-      - Graph Relations: guide/graph.md
-      - Sessions: guide/sessions.md
-  - API Reference:
-      - Client: api/client.md
-      - Memory: api/memory.md
-      - Embedding: api/embedding.md
-      - Graph: api/graph.md
-  - Examples:
-      - Overview: examples/index.md
-      - OpenAI Integration: examples/openai.md
-      - LangChain Integration: examples/langchain.md
-  - Development:
-      - Contributing: development/contributing.md
-      - Changelog: development/changelog.md
+  - Architecture: architecture.md
+  - Diagrams: diagram.md
+  - Production Guide: production-guide.md
+  - Migration Guide: migration.md
+  - Commands: commands.md
+  - Edge Cases: edge-cases.md
+  - Chatbot Concept: CHATBOT_CONCEPT.md
 
 plugins:
   - search

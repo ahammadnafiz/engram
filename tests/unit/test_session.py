@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -26,14 +25,16 @@ class TestSessionManager:
         from engram.session.manager import SessionManager
         from engram.session.models import SessionCreate
 
-        mock_storage.fetchone = AsyncMock(return_value={
-            "session_id": "sess_123",
-            "agent_id": "agent_1",
-            "user_id": "user_1",
-            "started_at": datetime.now(timezone.utc),
-            "ended_at": None,
-            "metadata": "{}",
-        })
+        mock_storage.fetchone = AsyncMock(
+            return_value={
+                "session_id": "sess_123",
+                "agent_id": "agent_1",
+                "user_id": "user_1",
+                "started_at": datetime.now(timezone.utc),
+                "ended_at": None,
+                "metadata": "{}",
+            }
+        )
 
         manager = SessionManager(storage=mock_storage)
 
@@ -49,14 +50,16 @@ class TestSessionManager:
         """Test ending a session."""
         from engram.session.manager import SessionManager
 
-        mock_storage.fetchone = AsyncMock(return_value={
-            "session_id": "sess_123",
-            "agent_id": "agent_1",
-            "user_id": None,
-            "started_at": datetime.now(timezone.utc),
-            "ended_at": datetime.now(timezone.utc),
-            "metadata": "{}",
-        })
+        mock_storage.fetchone = AsyncMock(
+            return_value={
+                "session_id": "sess_123",
+                "agent_id": "agent_1",
+                "user_id": None,
+                "started_at": datetime.now(timezone.utc),
+                "ended_at": datetime.now(timezone.utc),
+                "metadata": "{}",
+            }
+        )
 
         manager = SessionManager(storage=mock_storage)
 
@@ -71,14 +74,16 @@ class TestSessionManager:
         """Test getting an existing session."""
         from engram.session.manager import SessionManager
 
-        mock_storage.fetchone = AsyncMock(return_value={
-            "session_id": "sess_123",
-            "agent_id": "agent_1",
-            "user_id": "user_1",
-            "started_at": datetime.now(timezone.utc),
-            "ended_at": None,
-            "metadata": '{"key": "value"}',
-        })
+        mock_storage.fetchone = AsyncMock(
+            return_value={
+                "session_id": "sess_123",
+                "agent_id": "agent_1",
+                "user_id": "user_1",
+                "started_at": datetime.now(timezone.utc),
+                "ended_at": None,
+                "metadata": '{"key": "value"}',
+            }
+        )
 
         manager = SessionManager(storage=mock_storage)
 
@@ -89,10 +94,51 @@ class TestSessionManager:
         assert session.metadata == {"key": "value"}
 
     @pytest.mark.asyncio
-    async def test_get_nonexistent_session_raises_error(self, mock_storage: MagicMock) -> None:
-        """Test getting non-existent session raises SessionNotFoundError."""
+    async def test_update_summary(self, mock_storage: MagicMock) -> None:
+        """Test updating a session's rolling summary."""
         from engram.session.manager import SessionManager
+
+        now = datetime.now(timezone.utc)
+        mock_storage.fetchone = AsyncMock(
+            return_value={
+                "session_id": "sess_1",
+                "agent_id": "agent_1",
+                "user_id": None,
+                "started_at": now,
+                "ended_at": None,
+                "summary": "rolled summary",
+                "summary_updated_at": now,
+                "metadata": "{}",
+            }
+        )
+
+        manager = SessionManager(storage=mock_storage)
+        session = await manager.update_summary("sess_1", "rolled summary")
+
+        assert session.summary == "rolled summary"
+        assert session.summary_updated_at == now
+
+    @pytest.mark.asyncio
+    async def test_update_summary_nonexistent_raises(
+        self, mock_storage: MagicMock
+    ) -> None:
+        """Test updating summary of a missing session raises."""
         from engram.core.exceptions import SessionNotFoundError
+        from engram.session.manager import SessionManager
+
+        mock_storage.fetchone = AsyncMock(return_value=None)
+        manager = SessionManager(storage=mock_storage)
+
+        with pytest.raises(SessionNotFoundError):
+            await manager.update_summary("missing", "x")
+
+    @pytest.mark.asyncio
+    async def test_get_nonexistent_session_raises_error(
+        self, mock_storage: MagicMock
+    ) -> None:
+        """Test getting non-existent session raises SessionNotFoundError."""
+        from engram.core.exceptions import SessionNotFoundError
+        from engram.session.manager import SessionManager
 
         mock_storage.fetchone = AsyncMock(return_value=None)
 
@@ -106,24 +152,26 @@ class TestSessionManager:
         """Test listing active sessions for an agent."""
         from engram.session.manager import SessionManager
 
-        mock_storage.fetchall = AsyncMock(return_value=[
-            {
-                "session_id": "sess_1",
-                "agent_id": "agent_1",
-                "user_id": None,
-                "started_at": datetime.now(timezone.utc),
-                "ended_at": None,
-                "metadata": "{}",
-            },
-            {
-                "session_id": "sess_2",
-                "agent_id": "agent_1",
-                "user_id": "user_1",
-                "started_at": datetime.now(timezone.utc),
-                "ended_at": None,
-                "metadata": "{}",
-            },
-        ])
+        mock_storage.fetchall = AsyncMock(
+            return_value=[
+                {
+                    "session_id": "sess_1",
+                    "agent_id": "agent_1",
+                    "user_id": None,
+                    "started_at": datetime.now(timezone.utc),
+                    "ended_at": None,
+                    "metadata": "{}",
+                },
+                {
+                    "session_id": "sess_2",
+                    "agent_id": "agent_1",
+                    "user_id": "user_1",
+                    "started_at": datetime.now(timezone.utc),
+                    "ended_at": None,
+                    "metadata": "{}",
+                },
+            ]
+        )
 
         manager = SessionManager(storage=mock_storage)
 
@@ -144,12 +192,14 @@ class TestSessionManagerContextManager:
         return storage
 
     @pytest.mark.asyncio
-    async def test_context_manager_auto_ends_session(self, mock_storage: MagicMock) -> None:
+    async def test_context_manager_auto_ends_session(
+        self, mock_storage: MagicMock
+    ) -> None:
         """Test that context manager automatically ends session."""
         from engram.session.manager import SessionManager
 
         now = datetime.now(timezone.utc)
-        
+
         # create uses execute, end uses fetchone
         ended_session = {
             "session_id": "sess_ctx",
@@ -167,8 +217,9 @@ class TestSessionManagerContextManager:
             assert session.is_active
 
         # Session should be ended after context exit
-        # Verify: create calls execute, end calls fetchone
-        mock_storage.execute.assert_called_once()  # from create
+        # Verify: create calls execute (auto-create agent + insert session),
+        # end calls fetchone. No user_id, so no user-ensure call.
+        assert mock_storage.execute.call_count == 2  # ensure agent + insert session
         mock_storage.fetchone.assert_called_once()  # from end
 
 
@@ -201,8 +252,9 @@ class TestSessionModel:
 
     def test_session_duration(self) -> None:
         """Test duration_seconds property."""
-        from engram.session.models import Session
         from datetime import timedelta
+
+        from engram.session.models import Session
 
         start = datetime.now(timezone.utc)
         end = start + timedelta(seconds=120)
@@ -260,10 +312,10 @@ class TestSessionCreate:
     def test_session_create_immutable(self) -> None:
         """Test that SessionCreate is immutable."""
         from pydantic import ValidationError
+
         from engram.session.models import SessionCreate
 
         create = SessionCreate(agent_id="agent_1")
 
         with pytest.raises(ValidationError):
             create.agent_id = "other"  # type: ignore
-

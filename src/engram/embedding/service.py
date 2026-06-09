@@ -9,12 +9,14 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import OrderedDict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from engram.core._types import Vector
 from engram.core.config import EngramSettings, get_settings
 from engram.core.exceptions import ConfigurationError, EmbeddingError
 from engram.providers.embedding import EmbeddingProvider, get_embedding_provider
+
+if TYPE_CHECKING:
+    from engram.core._types import Vector
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +32,16 @@ class EmbeddingService:
     Example:
         # Create from settings (uses ENGRAM_EMBEDDING_PROVIDER env var)
         service = EmbeddingService.from_settings()
-        
+
         # Or with explicit provider name
         service = EmbeddingService.from_provider("openai", api_key="sk-...")
-        
+
         # Or with explicit provider instance
         service = EmbeddingService(provider=my_provider)
-        
+
         # Embed text
         vector = await service.embed("Hello, world!")
-        
+
         # Batch embed
         vectors = await service.embed_batch(["Hello", "World"])
     """
@@ -73,12 +75,12 @@ class EmbeddingService:
     def dimension(self) -> int:
         """Get the embedding dimension."""
         return self._provider.dimension
-    
+
     @property
     def model(self) -> str:
         """Get the model name."""
         return self._provider.model
-    
+
     @property
     def provider(self) -> EmbeddingProvider:
         """Get the underlying provider."""
@@ -91,7 +93,7 @@ class EmbeddingService:
         cache_size: int = 1000,
         batch_size: int = 100,
         **kwargs: Any,
-    ) -> "EmbeddingService":
+    ) -> EmbeddingService:
         """Create an EmbeddingService with a specific provider.
 
         Args:
@@ -110,7 +112,7 @@ class EmbeddingService:
                 api_key="sk-...",
                 model="text-embedding-3-small",
             )
-            
+
             # Local
             service = EmbeddingService.from_provider(
                 "sentence-transformers",
@@ -124,7 +126,7 @@ class EmbeddingService:
     def from_settings(
         cls,
         settings: EngramSettings | None = None,
-    ) -> "EmbeddingService":
+    ) -> EmbeddingService:
         """Create an EmbeddingService from settings.
 
         Uses the provider registry to create the appropriate provider
@@ -140,10 +142,10 @@ class EmbeddingService:
             ConfigurationError: If configuration is invalid.
         """
         settings = settings or get_settings()
-        
+
         provider_name = settings.embedding_provider
         provider_kwargs = settings.get_embedding_provider_kwargs()
-        
+
         try:
             provider = get_embedding_provider(provider_name, **provider_kwargs)
         except KeyError as e:
@@ -176,7 +178,7 @@ class EmbeddingService:
             EmbeddingError: If embedding fails.
         """
         cache_key = self._compute_cache_key(text) if self._cache_size > 0 else ""
-        
+
         # Check cache (with LRU move-to-end on access)
         if self._cache_size > 0 and cache_key in self._cache:
             logger.debug(f"Cache hit for text: {text[:50]}...")

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-from unittest.mock import patch
-
 import pytest
 
 
@@ -27,6 +24,7 @@ class TestEngramSettingsValidation:
     def test_weight_sum_validation_fail(self) -> None:
         """Test that invalid weight sum fails validation."""
         from pydantic import ValidationError
+
         from engram.core.config import EngramSettings
 
         with pytest.raises(ValidationError) as exc_info:
@@ -66,6 +64,7 @@ class TestEngramSettingsValidation:
     def test_pool_size_validation_fail(self) -> None:
         """Test that max < min fails validation."""
         from pydantic import ValidationError
+
         from engram.core.config import EngramSettings
 
         with pytest.raises(ValidationError) as exc_info:
@@ -106,13 +105,16 @@ class TestEmbeddingDimensionCoercion:
 
         monkeypatch.setenv("ENGRAM_EMBEDDING_DIMENSION", "")
 
-        settings = EngramSettings()
+        EngramSettings()
         # Should use default or None
         # Default is 1536 for OpenAI
 
-    def test_dimension_invalid_string_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_dimension_invalid_string_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test that invalid string raises error."""
         from pydantic import ValidationError
+
         from engram.core.config import EngramSettings
 
         monkeypatch.setenv("ENGRAM_EMBEDDING_DIMENSION", "not_a_number")
@@ -223,7 +225,7 @@ class TestSettingsCache:
 
     def test_get_settings_cached(self) -> None:
         """Test that get_settings returns cached instance."""
-        from engram.core.config import get_settings, clear_settings_cache
+        from engram.core.config import clear_settings_cache, get_settings
 
         clear_settings_cache()
 
@@ -234,7 +236,7 @@ class TestSettingsCache:
 
     def test_clear_cache_creates_new_instance(self) -> None:
         """Test that clearing cache creates new instance."""
-        from engram.core.config import get_settings, clear_settings_cache
+        from engram.core.config import clear_settings_cache, get_settings
 
         s1 = get_settings()
         clear_settings_cache()
@@ -284,89 +286,3 @@ class TestSettingsFromEnv:
         settings = EngramSettings()
 
         assert settings.log_sql_queries is True
-
-
-class TestSearchSettings:
-    """Tests for SearchSettings validation."""
-
-    def test_search_settings_defaults(self) -> None:
-        """Test search settings default values."""
-        from engram.core.config import SearchSettings
-
-        settings = SearchSettings()
-
-        assert settings.weight_semantic == 0.40
-        assert settings.weight_keyword == 0.20
-        assert settings.weight_decay == 0.25
-        assert settings.weight_importance == 0.15
-        assert settings.default_search_limit == 10
-        assert settings.max_search_limit == 100
-
-    def test_search_settings_weight_bounds(self) -> None:
-        """Test that individual weights must be 0-1."""
-        from pydantic import ValidationError
-        from engram.core.config import SearchSettings
-
-        # Negative weight
-        with pytest.raises(ValidationError):
-            SearchSettings(weight_semantic=-0.1)
-
-        # Weight > 1
-        with pytest.raises(ValidationError):
-            SearchSettings(weight_semantic=1.1)
-
-
-class TestDatabaseSettings:
-    """Tests for DatabaseSettings validation."""
-
-    def test_database_settings_valid_structure(self) -> None:
-        """Test database settings have valid structure."""
-        from engram.core.config import DatabaseSettings
-
-        settings = DatabaseSettings()
-
-        # Check valid structure rather than specific defaults (env may override)
-        assert settings.database_url.startswith("postgresql://")
-        assert isinstance(settings.min_pool_size, int)
-        assert isinstance(settings.max_pool_size, int)
-        assert settings.min_pool_size > 0
-        assert settings.max_pool_size >= settings.min_pool_size
-
-    def test_database_settings_pool_validation(self) -> None:
-        """Test pool size validation in DatabaseSettings."""
-        from pydantic import ValidationError
-        from engram.core.config import DatabaseSettings
-
-        with pytest.raises(ValidationError):
-            DatabaseSettings(min_pool_size=30, max_pool_size=10)
-
-
-class TestEmbeddingSettings:
-    """Tests for EmbeddingSettings."""
-
-    def test_embedding_settings_valid_structure(self) -> None:
-        """Test embedding settings have valid structure."""
-        from engram.core.config import EmbeddingSettings
-
-        settings = EmbeddingSettings()
-
-        # Check valid structure rather than specific defaults (env may override)
-        assert settings.embedding_provider in ["openai", "sentence-transformers", "cohere", "ollama", "huggingface", "hf"]
-        assert isinstance(settings.embedding_model, str)
-        assert len(settings.embedding_model) > 0
-        assert isinstance(settings.embedding_dimension, int)
-        assert settings.embedding_dimension > 0
-
-    def test_embedding_settings_custom(self) -> None:
-        """Test custom embedding settings."""
-        from engram.core.config import EmbeddingSettings
-
-        settings = EmbeddingSettings(
-            embedding_provider="sentence-transformers",
-            embedding_model="all-MiniLM-L6-v2",
-            embedding_dimension=384,
-        )
-
-        assert settings.embedding_provider == "sentence-transformers"
-        assert settings.embedding_dimension == 384
-

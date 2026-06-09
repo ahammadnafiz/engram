@@ -16,12 +16,17 @@
 -- $8: weight_decay (FLOAT) - Weight for decay score (default: 0.25)
 -- $9: weight_importance (FLOAT) - Weight for importance score (default: 0.15)
 -- $10: decay_rate (FLOAT) - Decay rate per hour (default: 0.995)
+-- $11: metadata_filter (JSONB) - Optional metadata containment filter (NULL for none)
+-- $12: memory_types (TEXT[]) - Optional memory type filter (NULL for all types)
 
 WITH 
 -- Semantic search on fact embeddings (2x overfetch for RRF, minimum 20)
 semantic_search AS (
-    SELECT 
+    SELECT
         memory_id,
+        user_id,
+        session_id,
+        memory_type,
         fact,
         main_content,
         importance,
@@ -35,6 +40,9 @@ semantic_search AS (
     FROM agent_memory
     WHERE agent_id = $3
         AND ($4::text IS NULL OR user_id = $4)
+        AND ($11::jsonb IS NULL OR metadata @> $11::jsonb)
+        AND ($12::text[] IS NULL OR memory_type = ANY($12))
+        AND COALESCE(metadata->>'status', 'active') <> 'superseded'
         AND embedding IS NOT NULL
     ORDER BY embedding <=> $1::vector
     LIMIT GREATEST($5 * 2, 20)
@@ -51,6 +59,9 @@ keyword_search AS (
          plainto_tsquery('english', $2) AS query
     WHERE agent_id = $3
         AND ($4::text IS NULL OR user_id = $4)
+        AND ($11::jsonb IS NULL OR metadata @> $11::jsonb)
+        AND ($12::text[] IS NULL OR memory_type = ANY($12))
+        AND COALESCE(metadata->>'status', 'active') <> 'superseded'
         AND fact_tsv @@ query
     ORDER BY keyword_score_raw DESC
     LIMIT GREATEST($5 * 2, 20)
@@ -59,8 +70,11 @@ keyword_search AS (
 -- Optimized combination: LEFT JOIN + UNION ALL (faster than FULL OUTER JOIN)
 combined AS (
     -- Semantic results with keyword boost
-    SELECT 
+    SELECT
         s.memory_id,
+        s.user_id,
+        s.session_id,
+        s.memory_type,
         s.fact,
         s.main_content,
         s.importance,
@@ -83,8 +97,11 @@ combined AS (
     UNION ALL
     
     -- Keyword-only results (not in semantic search)
-    SELECT 
+    SELECT
         k.memory_id,
+        m.user_id,
+        m.session_id,
+        m.memory_type,
         m.fact,
         m.main_content,
         m.importance,
@@ -105,8 +122,11 @@ combined AS (
 
 -- Single-pass final scoring
 final_scored AS (
-    SELECT 
+    SELECT
         memory_id,
+        user_id,
+        session_id,
+        memory_type,
         fact AS content,  -- API compatibility
         fact,
         main_content,
@@ -132,8 +152,11 @@ final_scored AS (
 )
 
 -- Final results: hybrid search output
-SELECT 
+SELECT
     memory_id,
+    user_id,
+    session_id,
+    memory_type,
     content,
     fact,
     main_content,

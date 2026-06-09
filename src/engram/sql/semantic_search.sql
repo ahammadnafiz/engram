@@ -11,12 +11,17 @@
 -- $3: user_id (TEXT) - Filter by user (optional, NULL for all)
 -- $4: limit_count (INTEGER) - Number of results
 -- $5: decay_rate (FLOAT) - Decay rate per hour (default: 0.995)
+-- $6: metadata_filter (JSONB) - Optional metadata containment filter (NULL for none)
+-- $7: memory_types (TEXT[]) - Optional memory type filter (NULL for all types)
 
 -- Note: Weights adjusted from hybrid search (0.40 semantic + 0.20 keyword + 0.25 decay + 0.15 importance)
 -- Since no keyword matching, semantic weight absorbs keyword weight: 0.40 + 0.20 = 0.60
 
-SELECT 
+SELECT
     memory_id,
+    user_id,
+    session_id,
+    memory_type,
     fact AS content,  -- API compatibility
     fact,
     main_content,
@@ -38,6 +43,9 @@ SELECT
 FROM agent_memory
 WHERE agent_id = $2
     AND ($3::text IS NULL OR user_id = $3)
+    AND ($6::jsonb IS NULL OR metadata @> $6::jsonb)
+    AND ($7::text[] IS NULL OR memory_type = ANY($7))
+    AND COALESCE(metadata->>'status', 'active') <> 'superseded'
     AND embedding IS NOT NULL
     AND GREATEST(0, 1 - (embedding <=> $1::vector)) > 0.1  -- Early filter: min 10% similarity
 ORDER BY embedding <=> $1::vector  -- Index-optimized ordering

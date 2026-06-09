@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0a1] - 2026-06-09
+
+### Added
+- **Long-running task memory** with task runs, raw event ledgers, checkpoints, and memory jobs.
+- **Typed production memory** for profile, project, task, preference, constraint, decision, and tool-result facts.
+- **Deterministic critical recall** so critical user/project/task facts do not rely only on vector ranking.
+- **Configurable memory policies** via `MemoryPolicy`, `TypeRule`, and `SlotRule`, with `default`, `legal`, and `coding_agent` presets.
+- **Conflict and freshness metadata** using `critical_slot`, `conflict_key`, `status`, `version`, and `previous_versions`.
+- **Recall observability** with `RecallTrace` and `trace_recall()` to inspect ranked, kept, trimmed, superseded, and missing memories.
+- **Long-input ingestion** with `record_long_input()` and `build_long_input_context()` for source-anchored prompts and documents.
+- **Long-input example** in `examples/long_input_usage.py`.
+- **Security, contributing, and release docs** for OSS alpha publishing.
+
+### Changed
+- `Engram` now accepts `memory_policy="default" | "legal" | "coding_agent"` or a custom `MemoryPolicy`.
+- README now documents alpha status, policies, long-input workflows, recall trace, and production caveats.
+- Optional dependencies now expose provider-specific extras for Anthropic, Cohere, HTTP providers, LiteLLM, examples, and all providers.
+
+### Fixed
+- Positive allergy facts and negative allergy exclusions now use separate conflict slots, preventing accidental supersession.
+- Search filters out superseded memories by default while trace APIs can still report superseded records.
+- Environment examples now consistently use `ENGRAM_`-prefixed variables.
+
 ## [0.2.0] - 2026-01-23
 
 ### Added

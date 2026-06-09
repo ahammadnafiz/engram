@@ -2,6 +2,7 @@
 
 This module defines the Pydantic models for memories and search results.
 """
+# ruff: noqa: TC001
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field
 from engram.core._types import (
     AgentId,
     MemoryId,
+    MemoryType,
     Metadata,
     SessionId,
     UserId,
@@ -28,7 +30,7 @@ def generate_memory_id() -> str:
 
 def _utcnow() -> datetime:
     """Get current UTC time as timezone-aware datetime.
-    
+
     This is the recommended replacement for the deprecated datetime.utcnow().
     """
     return datetime.now(timezone.utc)
@@ -78,11 +80,14 @@ class Memory(BaseModel):
 
     # Backward-compatible content field (maps to fact)
     content: str = Field(..., min_length=1, max_length=100000)
-    
+
     # Two-column memory system
     fact: str | None = Field(default=None, min_length=1, max_length=100000)
     main_content: str | None = Field(default=None, max_length=200000)
-    
+
+    # Cognitive taxonomy: semantic (facts) | episodic (events) | procedural (rules)
+    memory_type: MemoryType = "semantic"
+
     embedding: Vector | None = None
 
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -142,6 +147,7 @@ class MemoryCreate(BaseModel):
     agent_id: AgentId
     user_id: UserId | None = None
     session_id: SessionId | None = None
+    memory_type: MemoryType = "semantic"
     metadata: Metadata = Field(default_factory=dict)
 
     model_config = {"frozen": True, "extra": "forbid"}
@@ -188,6 +194,32 @@ class SearchResult(BaseModel):
     model_config = {"frozen": True}
 
 
+class RecallTrace(BaseModel):
+    """Observability record for one retrieval/context assembly operation.
+
+    The trace answers the production debugging questions that matter for
+    memory: was the fact stored, was it pinned as critical, did search rank it,
+    was it kept in the final prompt budget, was it trimmed, or was it hidden by
+    conflict resolution as superseded.
+    """
+
+    query: str
+    agent_id: AgentId
+    user_id: UserId | None = None
+    critical_memory_ids: list[MemoryId] = Field(default_factory=list)
+    search_memory_ids: list[MemoryId] = Field(default_factory=list)
+    ranked_memory_ids: list[MemoryId] = Field(default_factory=list)
+    kept_memory_ids: list[MemoryId] = Field(default_factory=list)
+    trimmed_memory_ids: list[MemoryId] = Field(default_factory=list)
+    superseded_memory_ids: list[MemoryId] = Field(default_factory=list)
+    missing_expected_terms: list[str] = Field(default_factory=list)
+    context: str = ""
+    notes: list[str] = Field(default_factory=list)
+    metadata: Metadata = Field(default_factory=dict)
+
+    model_config = {"frozen": True}
+
+
 class SearchQuery(BaseModel):
     """Input model for search operations.
 
@@ -210,5 +242,6 @@ class SearchQuery(BaseModel):
     mode: str = Field(default="hybrid")  # hybrid, semantic, keyword
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
     metadata_filter: dict[str, Any] | None = None
+    memory_types: list[MemoryType] | None = None
 
     model_config = {"frozen": True, "extra": "forbid"}

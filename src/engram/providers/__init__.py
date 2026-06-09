@@ -7,42 +7,41 @@ This module provides a pluggable provider architecture for:
 Example:
     # Register a custom embedding provider
     from engram.providers import embedding_registry
-    
+
     @embedding_registry.register("my-provider")
     class MyEmbeddingProvider:
         async def embed(self, text: str) -> list[float]:
             ...
-    
+
     # Use it
     engram = Engram(embedding_provider="my-provider")
 """
 
-from engram.providers.registry import ProviderRegistry
 from engram.providers.embedding import (
     EmbeddingProvider,
     embedding_registry,
     get_embedding_provider,
 )
 from engram.providers.llm import (
-    LLMProvider,
     LLMMessage,
+    LLMProvider,
     LLMResponse,
-    llm_registry,
     get_llm_provider,
+    llm_registry,
 )
+from engram.providers.registry import ProviderRegistry
 
 __all__ = [
-    # Registry
-    "ProviderRegistry",
     # Embedding
     "EmbeddingProvider",
-    "embedding_registry",
-    "get_embedding_provider",
+    "LLMMessage",
     # LLM
     "LLMProvider",
-    "LLMMessage",
     "LLMResponse",
-    "llm_registry",
+    # Registry
+    "ProviderRegistry",
+    "embedding_registry",
+    "get_embedding_provider",
     "get_llm_provider",
+    "llm_registry",
 ]
-

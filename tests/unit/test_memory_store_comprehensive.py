@@ -17,7 +17,9 @@ class TestMemoryStoreAdd:
         """Create mock storage."""
         storage = MagicMock()
         storage.execute = AsyncMock(return_value="INSERT 1")
-        storage.fetchone = AsyncMock(return_value={"memory_id": "mem_123", "was_inserted": True})
+        storage.fetchone = AsyncMock(
+            return_value={"memory_id": "mem_123", "was_inserted": True}
+        )
         storage.fetchval = AsyncMock(return_value=1)
         return storage
 
@@ -25,7 +27,7 @@ class TestMemoryStoreAdd:
     def mock_embedding(self) -> MagicMock:
         """Create mock embedding service."""
         embedding = MagicMock()
-        
+
         async def mock_embed(text: str) -> list[float]:
             return [0.1] * 1536
 
@@ -52,10 +54,10 @@ class TestMemoryStoreAdd:
 
         # Should have called embedding service
         mock_embedding.embed.assert_called_once_with("User likes coffee")
-        
+
         # Should have stored in database
         mock_storage.fetchone.assert_called()
-        
+
         assert memory.content == "User likes coffee"
         assert memory.agent_id == "agent_1"
 
@@ -68,10 +70,12 @@ class TestMemoryStoreAdd:
         from engram.memory.store import MemoryStore
 
         # Simulate duplicate detection
-        mock_storage.fetchone = AsyncMock(return_value={
-            "memory_id": "existing_mem_123",
-            "was_inserted": False,  # Indicates it was a conflict
-        })
+        mock_storage.fetchone = AsyncMock(
+            return_value={
+                "memory_id": "existing_mem_123",
+                "was_inserted": False,  # Indicates it was a conflict
+            }
+        )
 
         # Mock the get() call for existing memory
         existing_memory = Memory(
@@ -81,8 +85,8 @@ class TestMemoryStoreAdd:
         )
 
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
-        
-        with patch.object(store, 'get', AsyncMock(return_value=existing_memory)):
+
+        with patch.object(store, "get", AsyncMock(return_value=existing_memory)):
             create = MemoryCreate(content="User likes coffee", agent_id="agent_1")
             memory = await store.add(create)
 
@@ -103,7 +107,7 @@ class TestMemoryStoreAdd:
 
         # Should have called execute for agent creation
         calls = mock_storage.execute.call_args_list
-        agent_insert_called = any(
+        any(
             "INSERT INTO agents" in str(call) or "agent_id" in str(call)
             for call in calls
         )
@@ -129,6 +133,100 @@ class TestMemoryStoreAdd:
 
         assert memory.metadata == {"source": "conversation", "confidence": 0.9}
 
+    @pytest.mark.asyncio
+    async def test_add_near_duplicate_returns_existing(
+        self, mock_storage: MagicMock, mock_embedding: MagicMock
+    ) -> None:
+        """A vector near-duplicate (e.g. trailing period) returns the existing memory."""
+        from engram.memory.models import MemoryCreate
+        from engram.memory.store import MemoryStore
+
+        existing_row = {
+            "memory_id": "dup_1",
+            "agent_id": "agent_1",
+            "user_id": None,
+            "session_id": None,
+            "content": "User works at AskTuring",
+            "fact": "User works at AskTuring",
+            "main_content": None,
+            "embedding": json.dumps([0.1] * 1536),
+            "importance": 0.5,
+            "access_count": 0,
+            "metadata": "{}",
+            "created_at": datetime.now(timezone.utc),
+            "last_accessed_at": datetime.now(timezone.utc),
+        }
+        mock_storage.fetchone = AsyncMock(
+            side_effect=[
+                {"memory_id": "dup_1", "score": 0.99},  # near-duplicate query
+                existing_row,  # get_without_access_update
+            ]
+        )
+        store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
+
+        memory = await store.add(
+            MemoryCreate(content="User works at AskTuring.", agent_id="agent_1")
+        )
+
+        assert memory.memory_id == "dup_1"
+        mock_storage.execute.assert_not_called()  # short-circuits before insert
+
+    @pytest.mark.asyncio
+    async def test_add_persists_memory_type(
+        self, mock_storage: MagicMock, mock_embedding: MagicMock
+    ) -> None:
+        """add() carries memory_type into the model and the INSERT."""
+        from engram.memory.models import MemoryCreate
+        from engram.memory.store import MemoryStore
+
+        mock_storage.fetchone = AsyncMock(
+            side_effect=[
+                {"memory_id": "x", "score": 0.0},  # near-dup query: none
+                {"memory_id": "mem_1", "was_inserted": True},  # insert RETURNING
+            ]
+        )
+        store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
+
+        mem = await store.add(
+            MemoryCreate(
+                content="User moved to Berlin", agent_id="a", memory_type="episodic"
+            )
+        )
+
+        assert mem.memory_type == "episodic"
+        # the INSERT (last fetchone call) passed the type
+        assert "episodic" in mock_storage.fetchone.call_args.args
+
+    @pytest.mark.asyncio
+    async def test_add_batch_filters_near_duplicates(
+        self, mock_storage: MagicMock, mock_embedding: MagicMock
+    ) -> None:
+        """Batch add drops items that are near-duplicates of existing memories."""
+        from engram.memory.models import MemoryCreate
+        from engram.memory.store import MemoryStore
+
+        mock_embedding.embed_batch = AsyncMock(
+            return_value=[[0.1] * 1536, [0.2] * 1536]
+        )
+        mock_storage.fetchone = AsyncMock(
+            side_effect=[
+                {"memory_id": "dup", "score": 0.99},  # first item near-dup
+                {"memory_id": "x", "score": 0.10},  # second novel
+            ]
+        )
+        mock_storage.executemany = AsyncMock()
+        store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
+
+        out = await store.add_batch(
+            [
+                MemoryCreate(content="dup fact", agent_id="agent_1"),
+                MemoryCreate(content="novel fact", agent_id="agent_1"),
+            ]
+        )
+
+        assert len(out) == 1
+        assert out[0].content == "novel fact"
+
 
 class TestMemoryStoreGet:
     """Tests for MemoryStore.get() method."""
@@ -151,19 +249,21 @@ class TestMemoryStoreGet:
         """Test getting existing memory."""
         from engram.memory.store import MemoryStore
 
-        mock_storage.fetchone = AsyncMock(return_value={
-            "memory_id": "mem_123",
-            "agent_id": "agent_1",
-            "user_id": None,
-            "session_id": None,
-            "content": "Test content",
-            "embedding": json.dumps([0.1] * 1536),
-            "importance": 0.7,
-            "access_count": 5,
-            "metadata": "{}",
-            "created_at": datetime.now(timezone.utc),
-            "last_accessed_at": datetime.now(timezone.utc),
-        })
+        mock_storage.fetchone = AsyncMock(
+            return_value={
+                "memory_id": "mem_123",
+                "agent_id": "agent_1",
+                "user_id": None,
+                "session_id": None,
+                "content": "Test content",
+                "embedding": json.dumps([0.1] * 1536),
+                "importance": 0.7,
+                "access_count": 5,
+                "metadata": "{}",
+                "created_at": datetime.now(timezone.utc),
+                "last_accessed_at": datetime.now(timezone.utc),
+            }
+        )
 
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
         memory = await store.get("mem_123")
@@ -178,8 +278,8 @@ class TestMemoryStoreGet:
         self, mock_storage: MagicMock, mock_embedding: MagicMock
     ) -> None:
         """Test getting non-existent memory raises MemoryNotFoundError."""
-        from engram.memory.store import MemoryStore
         from engram.core.exceptions import MemoryNotFoundError
+        from engram.memory.store import MemoryStore
 
         mock_storage.fetchone = AsyncMock(return_value=None)
 
@@ -209,19 +309,21 @@ class TestMemoryStoreReinforce:
         """Test that reinforce increases importance."""
         from engram.memory.store import MemoryStore
 
-        mock_storage.fetchone = AsyncMock(return_value={
-            "memory_id": "mem_123",
-            "agent_id": "agent_1",
-            "user_id": None,
-            "session_id": None,
-            "content": "Test",
-            "embedding": json.dumps([0.1] * 1536),
-            "importance": 0.7,  # After boost
-            "access_count": 6,
-            "metadata": "{}",
-            "created_at": datetime.now(timezone.utc),
-            "last_accessed_at": datetime.now(timezone.utc),
-        })
+        mock_storage.fetchone = AsyncMock(
+            return_value={
+                "memory_id": "mem_123",
+                "agent_id": "agent_1",
+                "user_id": None,
+                "session_id": None,
+                "content": "Test",
+                "embedding": json.dumps([0.1] * 1536),
+                "importance": 0.7,  # After boost
+                "access_count": 6,
+                "metadata": "{}",
+                "created_at": datetime.now(timezone.utc),
+                "last_accessed_at": datetime.now(timezone.utc),
+            }
+        )
 
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
         memory = await store.reinforce("mem_123", importance_boost=0.1)
@@ -234,8 +336,8 @@ class TestMemoryStoreReinforce:
         self, mock_storage: MagicMock, mock_embedding: MagicMock
     ) -> None:
         """Test that negative importance_boost raises ValidationError."""
-        from engram.memory.store import MemoryStore
         from engram.core.exceptions import ValidationError
+        from engram.memory.store import MemoryStore
 
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
 
@@ -250,8 +352,8 @@ class TestMemoryStoreReinforce:
         self, mock_storage: MagicMock, mock_embedding: MagicMock
     ) -> None:
         """Test that reinforcing non-existent memory raises error."""
-        from engram.memory.store import MemoryStore
         from engram.core.exceptions import MemoryNotFoundError
+        from engram.memory.store import MemoryStore
 
         mock_storage.fetchone = AsyncMock(return_value=None)
 
@@ -274,7 +376,7 @@ class TestMemoryStoreSearch:
     def mock_embedding(self) -> MagicMock:
         embedding = MagicMock()
         embedding.dimension = 1536
-        
+
         async def mock_embed(text: str) -> list[float]:
             return [0.1] * 1536
 
@@ -289,20 +391,22 @@ class TestMemoryStoreSearch:
         from engram.memory.models import SearchQuery
         from engram.memory.store import MemoryStore
 
-        mock_storage.fetchall = AsyncMock(return_value=[
-            {
-                "memory_id": "mem_1",
-                "content": "Result 1",
-                "importance": 0.8,
-                "metadata": "{}",
-                "created_at": datetime.now(timezone.utc),
-                "last_accessed_at": datetime.now(timezone.utc),
-                "score": 0.9,
-                "semantic_score": 0.85,
-                "keyword_score": 0.7,
-                "decay_score": 0.95,
-            }
-        ])
+        mock_storage.fetchall = AsyncMock(
+            return_value=[
+                {
+                    "memory_id": "mem_1",
+                    "content": "Result 1",
+                    "importance": 0.8,
+                    "metadata": "{}",
+                    "created_at": datetime.now(timezone.utc),
+                    "last_accessed_at": datetime.now(timezone.utc),
+                    "score": 0.9,
+                    "semantic_score": 0.85,
+                    "keyword_score": 0.7,
+                    "decay_score": 0.95,
+                }
+            ]
+        )
 
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
 
@@ -338,8 +442,10 @@ class TestMemoryStoreSearch:
         )
 
         # Should use semantic_search method
-        with patch.object(store, 'semantic_search', AsyncMock(return_value=[])) as mock_semantic:
-            results = await store.search(query)
+        with patch.object(
+            store, "semantic_search", AsyncMock(return_value=[])
+        ) as mock_semantic:
+            await store.search(query)
             mock_semantic.assert_called_once()
 
     @pytest.mark.asyncio
@@ -369,9 +475,9 @@ class TestMemoryStoreSearch:
         self, mock_storage: MagicMock, mock_embedding: MagicMock
     ) -> None:
         """Test that invalid search mode raises ValidationError."""
+        from engram.core.exceptions import ValidationError
         from engram.memory.models import SearchQuery
         from engram.memory.store import MemoryStore
-        from engram.core.exceptions import ValidationError
 
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
 
@@ -380,7 +486,7 @@ class TestMemoryStoreSearch:
             agent_id="agent_1",
         )
         # Manually override mode to invalid value
-        object.__setattr__(query, 'mode', 'invalid_mode')
+        object.__setattr__(query, "mode", "invalid_mode")
 
         with pytest.raises(ValidationError) as exc_info:
             await store.search(query)
@@ -395,32 +501,34 @@ class TestMemoryStoreSearch:
         from engram.memory.models import SearchQuery
         from engram.memory.store import MemoryStore
 
-        mock_storage.fetchall = AsyncMock(return_value=[
-            {
-                "memory_id": "mem_1",
-                "content": "High score",
-                "importance": 0.8,
-                "metadata": "{}",
-                "created_at": datetime.now(timezone.utc),
-                "last_accessed_at": datetime.now(timezone.utc),
-                "score": 0.9,
-                "semantic_score": 0.85,
-                "keyword_score": 0.7,
-                "decay_score": 0.95,
-            },
-            {
-                "memory_id": "mem_2",
-                "content": "Low score",
-                "importance": 0.3,
-                "metadata": "{}",
-                "created_at": datetime.now(timezone.utc),
-                "last_accessed_at": datetime.now(timezone.utc),
-                "score": 0.3,
-                "semantic_score": 0.25,
-                "keyword_score": 0.2,
-                "decay_score": 0.4,
-            },
-        ])
+        mock_storage.fetchall = AsyncMock(
+            return_value=[
+                {
+                    "memory_id": "mem_1",
+                    "content": "High score",
+                    "importance": 0.8,
+                    "metadata": "{}",
+                    "created_at": datetime.now(timezone.utc),
+                    "last_accessed_at": datetime.now(timezone.utc),
+                    "score": 0.9,
+                    "semantic_score": 0.85,
+                    "keyword_score": 0.7,
+                    "decay_score": 0.95,
+                },
+                {
+                    "memory_id": "mem_2",
+                    "content": "Low score",
+                    "importance": 0.3,
+                    "metadata": "{}",
+                    "created_at": datetime.now(timezone.utc),
+                    "last_accessed_at": datetime.now(timezone.utc),
+                    "score": 0.3,
+                    "semantic_score": 0.25,
+                    "keyword_score": 0.2,
+                    "decay_score": 0.4,
+                },
+            ]
+        )
 
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
 
@@ -524,7 +632,7 @@ class TestMemoryStoreUpdate:
     def mock_embedding(self) -> MagicMock:
         embedding = MagicMock()
         embedding.dimension = 1536
-        
+
         async def mock_embed(text: str) -> list[float]:
             return [0.2] * 1536  # Different from original
 
@@ -553,7 +661,7 @@ class TestMemoryStoreUpdate:
             "created_at": datetime.now(timezone.utc),
             "last_accessed_at": datetime.now(timezone.utc),
         }
-        
+
         # Second call (UPDATE RETURNING) returns updated content
         updated_row = {
             "memory_id": "mem_123",
@@ -568,7 +676,7 @@ class TestMemoryStoreUpdate:
             "created_at": datetime.now(timezone.utc),
             "last_accessed_at": datetime.now(timezone.utc),
         }
-        
+
         mock_storage.fetchone = AsyncMock(side_effect=[original_row, updated_row])
 
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
@@ -585,16 +693,16 @@ class TestMemoryStoreUpdate:
         self, mock_storage: MagicMock, mock_embedding: MagicMock
     ) -> None:
         """Test that updating non-existent memory raises error."""
+        from engram.core.exceptions import MemoryNotFoundError
         from engram.memory.models import MemoryUpdate
         from engram.memory.store import MemoryStore
-        from engram.core.exceptions import MemoryNotFoundError
 
         mock_storage.fetchone = AsyncMock(return_value=None)
 
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
 
         update = MemoryUpdate(content="New content")
-        
+
         with pytest.raises(MemoryNotFoundError):
             await store.update("nonexistent", update)
 
@@ -605,6 +713,7 @@ class TestMemoryModelValidation:
     def test_memory_content_max_length(self) -> None:
         """Test memory content max length validation."""
         from pydantic import ValidationError
+
         from engram.memory.models import MemoryCreate
 
         # Should accept up to 100000 chars
@@ -619,6 +728,7 @@ class TestMemoryModelValidation:
     def test_memory_importance_bounds(self) -> None:
         """Test importance score validation bounds."""
         from pydantic import ValidationError
+
         from engram.memory.models import Memory
 
         # Valid bounds
@@ -664,6 +774,7 @@ class TestSearchQueryValidation:
     def test_search_query_limit_bounds(self) -> None:
         """Test search query limit validation."""
         from pydantic import ValidationError
+
         from engram.memory.models import SearchQuery
 
         # Valid limits
@@ -681,6 +792,7 @@ class TestSearchQueryValidation:
     def test_search_query_min_score_bounds(self) -> None:
         """Test min_score validation."""
         from pydantic import ValidationError
+
         from engram.memory.models import SearchQuery
 
         # Valid
@@ -693,4 +805,3 @@ class TestSearchQueryValidation:
 
         with pytest.raises(ValidationError):
             SearchQuery(query="test", agent_id="agent", min_score=1.1)
-

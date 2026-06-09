@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
@@ -17,6 +17,8 @@ from engram.core.config import EngramSettings, get_settings
 from engram.core.exceptions import ConnectionError, ConnectionPoolExhaustedError
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from asyncpg import Connection, Pool
 
 logger = logging.getLogger(__name__)
@@ -194,9 +196,7 @@ class PostgresStorage:
         async with self.acquire() as conn:
             await conn.executemany(query, args)
 
-    async def fetchone(
-        self, query: str, *args: Any
-    ) -> asyncpg.Record | None:
+    async def fetchone(self, query: str, *args: Any) -> asyncpg.Record | None:
         """Fetch a single row.
 
         Args:
@@ -209,9 +209,7 @@ class PostgresStorage:
         async with self.acquire() as conn:
             return await conn.fetchrow(query, *args)
 
-    async def fetchall(
-        self, query: str, *args: Any
-    ) -> list[asyncpg.Record]:
+    async def fetchall(self, query: str, *args: Any) -> list[asyncpg.Record]:
         """Fetch all rows.
 
         Args:
@@ -224,9 +222,7 @@ class PostgresStorage:
         async with self.acquire() as conn:
             return await conn.fetch(query, *args)
 
-    async def fetchval(
-        self, query: str, *args: Any, column: int = 0
-    ) -> Any:
+    async def fetchval(self, query: str, *args: Any, column: int = 0) -> Any:
         """Fetch a single value.
 
         Args:
@@ -262,7 +258,7 @@ class PostgresStorage:
 
         This method creates all required tables and indices if they
         don't exist. It's safe to call multiple times.
-        
+
         If embedding_dimension is provided, the schema will be adjusted
         to use that dimension for the vector column.
 
@@ -273,22 +269,41 @@ class PostgresStorage:
         logger.info("Initializing database schema")
         schema_sql = self.load_sql("schema.sql")
         await self.execute(schema_sql)
+
+        # Idempotent column adds for existing databases (CREATE TABLE IF NOT
+        # EXISTS does not add columns to a pre-existing table).
+        await self.execute(
+            "ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS summary TEXT;"
+        )
+        await self.execute(
+            "ALTER TABLE agent_sessions "
+            "ADD COLUMN IF NOT EXISTS summary_updated_at TIMESTAMPTZ;"
+        )
+        await self.execute(
+            "ALTER TABLE agent_memory "
+            "ADD COLUMN IF NOT EXISTS memory_type TEXT NOT NULL DEFAULT 'semantic';"
+        )
+        # Index created after the column exists (works for both fresh and existing DBs)
+        await self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_agent_type "
+            "ON agent_memory(agent_id, memory_type);"
+        )
         logger.info("Database schema initialized")
-        
+
         # Adjust vector dimension if specified
         if embedding_dimension is not None:
             await self._ensure_vector_dimension(embedding_dimension)
-    
+
     async def _get_current_vector_dimension(self) -> int | None:
         """Get the current vector column dimension from the database.
-        
+
         Returns:
             The current dimension, or None if the column doesn't exist.
         """
         query = """
-        SELECT atttypmod 
-        FROM pg_attribute 
-        WHERE attrelid = 'agent_memory'::regclass 
+        SELECT atttypmod
+        FROM pg_attribute
+        WHERE attrelid = 'agent_memory'::regclass
         AND attname = 'embedding';
         """
         try:
@@ -301,61 +316,61 @@ class PostgresStorage:
             # that may fail on first run before schema exists
             logger.debug(f"Could not get current vector dimension: {e}")
             return None
-    
+
     async def _ensure_vector_dimension(self, target_dimension: int) -> None:
         """Ensure the vector column has the correct dimension.
-        
+
         This method checks the current dimension and adjusts it if needed.
         It handles the case where dimensions don't match by dropping and
         recreating the index, then altering the column type.
-        
+
         Args:
             target_dimension: The desired embedding dimension.
         """
         current_dimension = await self._get_current_vector_dimension()
-        
+
         if current_dimension == target_dimension:
             logger.debug(f"Vector dimension already set to {target_dimension}")
             return
-        
+
         logger.info(
             f"Adjusting vector dimension from {current_dimension} to {target_dimension}"
         )
-        
+
         # Check if there's existing data that would be lost
         row_count = await self.fetchval(
             "SELECT COUNT(*) FROM agent_memory WHERE embedding IS NOT NULL"
         )
-        
+
         if row_count and row_count > 0:
             logger.warning(
                 f"Changing vector dimension will clear {row_count} existing embeddings! "
                 "They will need to be re-embedded."
             )
-        
+
         # Drop the HNSW index first (required before altering column type)
         logger.info("Dropping existing vector index")
         await self.execute("DROP INDEX IF EXISTS idx_memory_embedding;")
-        
+
         # Clear existing embeddings (they're incompatible with new dimension)
         if row_count and row_count > 0:
             logger.info("Clearing incompatible embeddings")
             await self.execute("UPDATE agent_memory SET embedding = NULL;")
-        
+
         # Alter the column to the new dimension
         logger.info(f"Altering embedding column to VECTOR({target_dimension})")
         await self.execute(
             f"ALTER TABLE agent_memory ALTER COLUMN embedding TYPE VECTOR({target_dimension});"
         )
-        
+
         # Recreate the HNSW index
         logger.info("Recreating vector index")
         await self.execute(
-            f"""CREATE INDEX IF NOT EXISTS idx_memory_embedding ON agent_memory 
+            """CREATE INDEX IF NOT EXISTS idx_memory_embedding ON agent_memory
             USING hnsw (embedding vector_cosine_ops)
             WITH (m = 16, ef_construction = 64);"""
         )
-        
+
         logger.info(f"Vector dimension successfully set to {target_dimension}")
 
     async def health_check(self) -> dict[str, Any]:

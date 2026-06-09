@@ -2,6 +2,7 @@
 
 This module defines models for agent sessions.
 """
+# ruff: noqa: TC001
 
 from __future__ import annotations
 
@@ -35,6 +36,8 @@ class Session(BaseModel):
         user_id: Optional ID of the user in this session.
         started_at: When the session started.
         ended_at: When the session ended (None if active).
+        summary: Rolling conversation summary (None until first update).
+        summary_updated_at: When the summary was last updated.
         metadata: Additional session metadata.
 
     Example:
@@ -50,6 +53,8 @@ class Session(BaseModel):
     user_id: UserId | None = None
     started_at: datetime = Field(default_factory=_utcnow)
     ended_at: datetime | None = None
+    summary: str | None = None
+    summary_updated_at: datetime | None = None
     metadata: Metadata = Field(default_factory=dict)
 
     model_config = {"frozen": False, "extra": "forbid"}

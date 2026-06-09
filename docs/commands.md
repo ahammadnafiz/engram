@@ -91,8 +91,12 @@ docker exec -i engram-postgres psql -U engram -d engram -c "YOUR_SQL_HERE"
 # List all tables
 docker exec -i engram-postgres psql -U engram -d engram -c "\dt"
 
-# View agent_memory table structure
+# View core table structures
 docker exec -i engram-postgres psql -U engram -d engram -c "\d agent_memory"
+docker exec -i engram-postgres psql -U engram -d engram -c "\d agent_tasks"
+docker exec -i engram-postgres psql -U engram -d engram -c "\d agent_events"
+docker exec -i engram-postgres psql -U engram -d engram -c "\d task_checkpoints"
+docker exec -i engram-postgres psql -U engram -d engram -c "\d memory_jobs"
 
 # View all indexes
 docker exec -i engram-postgres psql -U engram -d engram -c "\di"
@@ -128,8 +132,23 @@ docker exec -i engram-postgres psql -U engram -d engram -c \
 
 # View memories by importance
 docker exec -i engram-postgres psql -U engram -d engram -c \
-  "SELECT fact, importance, access_count 
+  "SELECT memory_type, fact, importance, access_count, metadata->>'status' AS status
    FROM agent_memory ORDER BY importance DESC LIMIT 10;"
+
+# View active critical memories
+docker exec -i engram-postgres psql -U engram -d engram -c \
+  "SELECT memory_type, fact, metadata->>'critical_slot' AS slot
+   FROM agent_memory
+   WHERE metadata->>'critical' = 'true'
+     AND COALESCE(metadata->>'status', 'active') <> 'superseded'
+   ORDER BY created_at DESC LIMIT 20;"
+
+# View superseded memories
+docker exec -i engram-postgres psql -U engram -d engram -c \
+  "SELECT fact, metadata->>'superseded_by' AS superseded_by
+   FROM agent_memory
+   WHERE metadata->>'status' = 'superseded'
+   ORDER BY created_at DESC LIMIT 20;"
 ```
 
 ### Agent & User Queries
@@ -171,7 +190,43 @@ docker exec -i engram-postgres psql -U engram -d engram -c \
 
 # All sessions
 docker exec -i engram-postgres psql -U engram -d engram -c \
-  "SELECT session_id, agent_id, started_at, ended_at FROM agent_sessions;"
+  "SELECT session_id, agent_id, started_at, ended_at, summary_updated_at
+   FROM agent_sessions;"
+```
+
+### Long-Running Tasks
+
+```bash
+# Active tasks
+docker exec -i engram-postgres psql -U engram -d engram -c \
+  "SELECT task_run_id, agent_id, user_id, status, goal, updated_at
+   FROM agent_tasks
+   WHERE deleted_at IS NULL
+   ORDER BY updated_at DESC LIMIT 20;"
+
+# Recent events
+docker exec -i engram-postgres psql -U engram -d engram -c \
+  "SELECT event_id, task_run_id, role, event_type, left(content, 80) AS content
+   FROM agent_events
+   WHERE deleted_at IS NULL
+   ORDER BY created_at DESC LIMIT 20;"
+
+# Latest checkpoints
+docker exec -i engram-postgres psql -U engram -d engram -c \
+  "SELECT checkpoint_id, task_run_id, left(summary, 120) AS summary, created_at
+   FROM task_checkpoints
+   ORDER BY created_at DESC LIMIT 20;"
+
+# Memory job backlog
+docker exec -i engram-postgres psql -U engram -d engram -c \
+  "SELECT status, COUNT(*) FROM memory_jobs GROUP BY status;"
+
+# Failed memory jobs
+docker exec -i engram-postgres psql -U engram -d engram -c \
+  "SELECT job_id, attempts, left(error, 160) AS error, updated_at
+   FROM memory_jobs
+   WHERE status = 'failed'
+   ORDER BY updated_at DESC LIMIT 20;"
 ```
 
 ### Cleanup Commands
@@ -199,15 +254,17 @@ docker exec -i engram-postgres psql -U engram -d engram -c \
 | Scenario | Command |
 |----------|---------|
 | Fresh database (after `down -v`) | Run `schema.sql` |
-| Existing database, upgrade to two-column | Run migration |
-| Error: "column fact does not exist" | Run `schema.sql` or migration |
+| Existing database, upgrade current alpha schema | Run migrations `001` through `004` |
+| Error: "column fact does not exist" | Run `001_add_fact_columns.sql` |
+| Error: "column memory_type does not exist" | Run `003_add_memory_type.sql` |
+| Error: "relation agent_tasks does not exist" | Run `004_add_task_memory.sql` |
 
 ### Fresh Install (schema.sql)
 
 Use after `docker compose down -v` or new database:
 
 ```bash
-# Initialize schema with two-column system
+# Initialize schema with current alpha system
 docker exec -i engram-postgres psql -U engram -d engram \
   < src/engram/sql/schema.sql
 
@@ -217,18 +274,20 @@ docker exec -i engram-postgres psql -U engram -d engram -c "\d agent_memory"
 
 ### Upgrade Existing Database (migration)
 
-Use when you have existing data and need to add fact/main_content columns:
+Use when you have existing data:
 
 ```bash
-# Run migration (preserves existing data)
-docker exec -i engram-postgres psql -U engram -d engram \
-  < src/engram/sql/migrations/001_add_fact_columns.sql
+# Run migrations in order
+for file in src/engram/sql/migrations/*.sql; do
+  docker exec -i engram-postgres psql -U engram -d engram < "$file"
+done
 
 # Verify migration
 docker exec -i engram-postgres psql -U engram -d engram -c \
   "SELECT COUNT(*) as total,
           COUNT(fact) as with_fact,
-          COUNT(main_content) as with_main_content
+          COUNT(main_content) as with_main_content,
+          COUNT(memory_type) as with_memory_type
    FROM agent_memory;"
 ```
 
@@ -239,10 +298,15 @@ docker exec -i engram-postgres psql -U engram -d engram -c \
 # Solution: Run schema or migration
 docker exec -i engram-postgres psql -U engram -d engram < src/engram/sql/schema.sql
 
-# Check if columns exist
+# Check if current alpha columns/tables exist
 docker exec -i engram-postgres psql -U engram -d engram -c \
   "SELECT column_name FROM information_schema.columns 
-   WHERE table_name = 'agent_memory' AND column_name IN ('fact', 'main_content');"
+   WHERE table_name = 'agent_memory'
+     AND column_name IN ('fact', 'main_content', 'memory_type');"
+
+docker exec -i engram-postgres psql -U engram -d engram -c \
+  "SELECT table_name FROM information_schema.tables
+   WHERE table_name IN ('agent_tasks', 'agent_events', 'task_checkpoints', 'memory_jobs');"
 ```
 
 ---
@@ -264,6 +328,8 @@ python examples/chatbot.py
 | `/memories` | List recent memories |
 | `/search <query>` | Hybrid search |
 | `/graph` | Show memory relations |
+| `/task` | Show active long-running task context |
+| `/worker` | Process queued memory jobs |
 | `/forget` | Clear all memories |
 | `/help` | Show help |
 | `/quit` | Exit |
@@ -301,11 +367,19 @@ asyncio.run(check())
 ## Environment Variables
 
 ```bash
-# Required
-export OPENAI_API_KEY=sk-your-key
-
-# Optional overrides
+# Required for local compose
 export ENGRAM_DATABASE_URL=postgresql://engram:engram@localhost:5432/engram
+
+# Embedding provider
+export ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
+export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
+
+# Optional LLM provider
+export ENGRAM_LLM_PROVIDER=openai
+export ENGRAM_LLM_MODEL=gpt-4o-mini
+export ENGRAM_OPENAI_API_KEY=sk-your-key
+
+# Optional OpenAI embeddings instead of local embeddings
 export ENGRAM_EMBEDDING_PROVIDER=openai
 export ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
 ```
@@ -327,4 +401,3 @@ alias engram-chat="cd /path/to/engram && python examples/chatbot.py"
 # Quick memory check
 alias engram-memories="docker exec -i engram-postgres psql -U engram -d engram -c 'SELECT fact, importance FROM agent_memory ORDER BY created_at DESC LIMIT 10;'"
 ```
-

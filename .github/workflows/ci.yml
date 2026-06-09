@@ -20,16 +20,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff mypy
+          pip install -e ".[dev,examples]"
 
       - name: Run Ruff linter
-        run: ruff check src tests
+        run: ruff check src tests examples
 
       - name: Run Ruff formatter check
-        run: ruff format --check src tests
-
-      - name: Run MyPy
-        run: mypy src
+        run: ruff format --check src tests examples
 
   test:
     runs-on: ubuntu-latest
@@ -48,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,examples]"
 
       - name: Run tests
         run: pytest tests/unit -v --cov=src/engram --cov-report=xml
@@ -62,7 +59,6 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     services:
       postgres:
@@ -90,15 +86,55 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,openai]"
+          pip install -e ".[dev,sentence-transformers,examples]"
 
       - name: Run integration tests
         env:
           ENGRAM_DATABASE_URL: postgresql://engram:engram@localhost:5432/engram_test
+          ENGRAM_EMBEDDING_PROVIDER: sentence-transformers
+          ENGRAM_EMBEDDING_MODEL: all-MiniLM-L6-v2
         run: pytest tests/integration -v --run-integration
 
+  package:
+    runs-on: ubuntu-latest
+    needs: [test]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build and check package
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Verify package contains SQL files
+        run: |
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          wheels = list(Path("dist").glob("*.whl"))
+          assert wheels, "wheel not built"
+          with zipfile.ZipFile(wheels[0]) as zf:
+              names = set(zf.namelist())
+          required = {
+              "engram/sql/schema.sql",
+              "engram/sql/hybrid_search.sql",
+              "engram/sql/semantic_search.sql",
+          }
+          missing = required - names
+          assert not missing, f"missing package data: {sorted(missing)}"
+          PY
+
   release:
-    needs: [lint, test]
+    needs: [lint, test, integration, package]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
 

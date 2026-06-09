@@ -8,14 +8,15 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 
-from engram.core._types import AgentId, SessionId, UserId
 from engram.core.exceptions import SessionNotFoundError, StorageError
 from engram.session.models import Session, SessionCreate
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from engram.core._types import AgentId, SessionId, UserId
     from engram.storage.postgres import PostgresStorage
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ class SessionManager:
 
     Example:
         manager = SessionManager(storage)
-        
+
         # Manual session management
         session = await manager.create(SessionCreate(
             agent_id="agent_123",
@@ -38,7 +39,7 @@ class SessionManager:
         ))
         # ... do work ...
         await manager.end(session.session_id)
-        
+
         # Or use context manager
         async with manager.session(agent_id="agent_123") as session:
             # Session is automatically ended when context exits
@@ -52,6 +53,29 @@ class SessionManager:
             storage: PostgreSQL storage backend.
         """
         self._storage = storage
+
+    async def _ensure_agent_exists(self, agent_id: AgentId) -> None:
+        """Ensure agent exists, creating if necessary."""
+        await self._storage.execute(
+            """
+            INSERT INTO agents (agent_id, name)
+            VALUES ($1, $2)
+            ON CONFLICT (agent_id) DO NOTHING
+            """,
+            agent_id,
+            agent_id,  # Use agent_id as default name
+        )
+
+    async def _ensure_user_exists(self, user_id: UserId) -> None:
+        """Ensure user exists, creating if necessary."""
+        await self._storage.execute(
+            """
+            INSERT INTO users (user_id)
+            VALUES ($1)
+            ON CONFLICT (user_id) DO NOTHING
+            """,
+            user_id,
+        )
 
     async def create(self, create: SessionCreate) -> Session:
         """Create a new session.
@@ -72,6 +96,11 @@ class SessionManager:
         )
 
         try:
+            # Auto-create agent and user so the session FKs are satisfied
+            await self._ensure_agent_exists(create.agent_id)
+            if create.user_id:
+                await self._ensure_user_exists(create.user_id)
+
             await self._storage.execute(
                 """
                 INSERT INTO agent_sessions (
@@ -106,9 +135,9 @@ class SessionManager:
         """
         row = await self._storage.fetchone(
             """
-            SELECT 
+            SELECT
                 session_id, agent_id, user_id,
-                started_at, ended_at, metadata
+                started_at, ended_at, summary, summary_updated_at, metadata
             FROM agent_sessions
             WHERE session_id = $1
             """,
@@ -137,9 +166,9 @@ class SessionManager:
             UPDATE agent_sessions
             SET ended_at = NOW()
             WHERE session_id = $1
-            RETURNING 
+            RETURNING
                 session_id, agent_id, user_id,
-                started_at, ended_at, metadata
+                started_at, ended_at, summary, summary_updated_at, metadata
             """,
             session_id,
         )
@@ -148,6 +177,38 @@ class SessionManager:
             raise SessionNotFoundError(session_id)
 
         logger.debug(f"Ended session {session_id}")
+        return self._row_to_session(row)
+
+    async def update_summary(self, session_id: SessionId, summary: str) -> Session:
+        """Update a session's rolling conversation summary.
+
+        Args:
+            session_id: The session to update.
+            summary: The new summary text.
+
+        Returns:
+            The updated session.
+
+        Raises:
+            SessionNotFoundError: If session doesn't exist.
+        """
+        row = await self._storage.fetchone(
+            """
+            UPDATE agent_sessions
+            SET summary = $2, summary_updated_at = NOW()
+            WHERE session_id = $1
+            RETURNING
+                session_id, agent_id, user_id,
+                started_at, ended_at, summary, summary_updated_at, metadata
+            """,
+            session_id,
+            summary,
+        )
+
+        if row is None:
+            raise SessionNotFoundError(session_id)
+
+        logger.debug(f"Updated summary for session {session_id}")
         return self._row_to_session(row)
 
     async def list_active(
@@ -183,9 +244,9 @@ class SessionManager:
         params.append(limit)
 
         query = f"""
-            SELECT 
+            SELECT
                 session_id, agent_id, user_id,
-                started_at, ended_at, metadata
+                started_at, ended_at, summary, summary_updated_at, metadata
             FROM agent_sessions
             WHERE {" AND ".join(conditions)}
             ORDER BY started_at DESC
@@ -249,5 +310,7 @@ class SessionManager:
             user_id=row["user_id"],
             started_at=row["started_at"],
             ended_at=row["ended_at"],
+            summary=row.get("summary"),
+            summary_updated_at=row.get("summary_updated_at"),
             metadata=metadata or {},
         )

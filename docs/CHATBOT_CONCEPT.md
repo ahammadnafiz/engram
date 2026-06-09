@@ -1,455 +1,140 @@
-# Engram Chatbot - Concept Document
+# Chatbot Example Concept
 
-> A personal AI assistant demonstrating the full Engram API with the **Two-Column Memory System**.
+`examples/chatbot.py` is the end-to-end demonstration app for the current Engram
+API. It is not a minimal chatbot. It intentionally exercises persistent memory,
+typed recall, task memory, graph traversal, and background job processing.
 
-## Overview
+## What It Demonstrates
 
-The Engram Chatbot demonstrates how to build an AI assistant with **persistent memory**. Unlike typical chatbots that forget everything when closed, this chatbot:
+| Capability | API |
+|------------|-----|
+| Persistent facts | `add()`, `search()`, `list_recent()` |
+| Typed/critical recall | `trace_recall()` |
+| Conflict-aware updates | `add()` policy metadata, `update()`, `forget()` |
+| Long-running task state | `start_task()`, `build_context()` |
+| Raw turn ledger | `record_turn()` |
+| Background derivation | `process_memory_jobs()` |
+| Graph context | `relate()`, `traverse()`, `traverse_many()`, `render_graph_context()` |
+| Health/status | `health_check()` |
+| Cleanup | `purge()` |
 
-- Stores **user facts** extracted by LLM (name, preferences, goals) - **embedded for search**
-- Preserves **conversation context** in `main_content` - **NOT embedded** (cost-effective)
-- Uses **hybrid search** (semantic + keyword) to retrieve relevant facts + context
-- **Reinforces** frequently used memories (higher importance = higher ranking)
-- Builds a **memory graph** by linking related memories
-- Uses **sliding window** for efficient short-term context
+## Runtime Flow
 
-## Two-Column Memory System
-
-The chatbot uses Engram's two-column strategy for cost-effective memory:
-
-| Column | Embedded? | Content | Purpose |
-|--------|-----------|---------|---------|
-| `fact` | ✅ Yes | `"User's name is Nafiz"` | Semantic search |
-| `main_content` | ❌ No | `"[USER]: I'm Nafiz\n[AI]: Nice to meet you!"` | Context preservation |
-
-**Benefits:**
-- Only embed concise facts (cheaper)
-- Keep full conversation context
-- Search returns both for rich responses
-
-## Engram API Coverage
-
-The chatbot demonstrates these Engram methods:
-
-| Method | Purpose | Used In |
-|--------|---------|---------|
-| `engram.add(content, main_content)` | Store fact + context | `_process_fact()` |
-| `engram.search()` | Hybrid search | `recall()`, `search_memories()` |
-| `engram.update()` | Modify memory | `_process_fact()` |
-| `engram.reinforce()` | Boost importance | `recall()` |
-| `engram.forget()` | Delete memory | `_process_fact()` |
-| `engram.purge()` | Clear all | `clear_memories()` |
-| `engram.list_recent()` | Browse memories | `show_memories()` |
-| `engram.relate()` | Create relations | `_link_to_recent()` |
-| `engram.traverse()` | Graph traversal | `show_graph()` |
-| `engram.health_check()` | Status check | `connect()` |
-| `llm.summarize()` | Summarize AI response | `_summarize_response()` |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           USER INPUT                                    │
-└─────────────────────────────────────────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      MEMORY CHATBOT                                     │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  │
-│  │ Sliding Window  │  │ recall()        │  │ chat()                  │  │
-│  │ (Short-term)    │  │ (Long-term)     │  │ (Response Generation)   │  │
-│  └─────────────────┘  └─────────────────┘  └─────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
-                                   │
-                   ┌───────────────┼───────────────┐
-                   ▼               ▼               ▼
-┌───────────────────────┐ ┌─────────────────┐ ┌─────────────────────────┐
-│     ENGRAM CLIENT     │ │  LLMService     │ │  EmbeddingService       │
-│                       │ │                 │ │                         │
-│ • add, search, update │ │ • complete_full │ │ • embed (vectors)       │
-│ • reinforce, forget   │ │ • extract_facts │ │ • batch embedding       │
-│ • relate, traverse    │ │ • evaluate_op   │ │                         │
-└───────────────────────┘ └─────────────────┘ └─────────────────────────┘
-           │
-           ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    POSTGRESQL + PGVECTOR                                │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  agent_memory: content, embedding, importance, metadata, ...    │    │
-│  │  memory_relations: source_id, target_id, relation_type, ...     │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────┘
+```text
+User message
+    |
+    v
+trace_recall()
+    - critical memories first
+    - deep/vector search
+    - trace missing/trimmed/superseded
+    |
+    v
+build_context()
+    - active task
+    - recent events
+    - checkpoints
+    - typed memory search
+    - graph expansion
+    |
+    v
+LLM response
+    |
+    v
+record_turn()
+    - user event
+    - assistant event
+    - optional tool/artifact events
+    - enqueue memory job
+    |
+    v
+process_memory_jobs()
+    - extract facts
+    - create/update memories
+    - create checkpoints
 ```
 
-## Conversation Flow
+## Why It Uses A Task
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  1. USER INPUT: "I'm Nafiz, I work in AI"                               │
-└─────────────────────────────────────────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  2. MEMORY RETRIEVAL: recall()                                          │
-│     await engram.search(query="I'm Nafiz, I work in AI", ...)           │
-│                                                                         │
-│     Returns relevant memories (if any):                                 │
-│     - "User studies data science" (score: 0.45)                         │
-└─────────────────────────────────────────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  3. CONTEXT BUILDING: chat()                                            │
-│                                                                         │
-│     messages = [                                                        │
-│       {role: "system", content: SYSTEM_PROMPT},                         │
-│       {role: "system", content: "About the user:\n- User studies..."},  │
-│       ...sliding window of recent conversation...,                      │
-│       {role: "user", content: "I'm Nafiz, I work in AI"}                │
-│     ]                                                                   │
-└─────────────────────────────────────────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  4. LLM COMPLETION                                                      │
-│     response = await llm.complete_full(messages)                        │
-│                                                                         │
-│     Bot: "Nice to meet you, Nafiz! AI is such a fascinating field..."   │
-└─────────────────────────────────────────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  5. BACKGROUND LEARNING: learn()                                        │
-│                                                                         │
-│     facts = await llm.extract_facts(user_msg, bot_msg)                  │
-│     → ["User's name is Nafiz", "User works in AI"]                      │
-│                                                                         │
-│     ai_summary = await llm.summarize(bot_msg, max_length=50)            │
-│     → "Nice to meet you! AI is fascinating."                            │
-│                                                                         │
-│     main_content = f"[USER]: {user_msg}\n[AI]: {ai_summary}"            │
-│                                                                         │
-│     For each fact:                                                      │
-│       await _process_fact(fact, main_content)  # Two-column storage     │
-│       await _link_to_recent()                  # Create graph relations │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+The chatbot starts a task so the conversation can survive process restarts and
+multi-day usage. Short-term chat history is still kept in memory for convenience,
+but durable continuity lives in:
 
-## Memory Operations
+- `agent_tasks`
+- `agent_events`
+- `task_checkpoints`
+- `agent_memory`
 
-When storing facts, the chatbot uses intelligent deduplication:
+## In-Chat Commands
 
-| Operation | When Used | Example |
-|-----------|-----------|---------|
-| **ADD** | New fact | "User has a cat named Luna" |
-| **UPDATE** | Augments existing | "User's cat Luna is 2 years old" |
-| **DELETE** | Contradicts existing | "User moved to NYC" replaces "User lives in Dhaka" |
-| **NOOP** | Duplicate | "User's name is Nafiz" already exists |
+| Command | Behavior |
+|---------|----------|
+| `/memories` | Shows recent stored facts |
+| `/search <q>` | Runs hybrid search |
+| `/graph` | Shows related graph memories and rendered graph context |
+| `/task` | Shows active task context |
+| `/worker` | Processes queued memory jobs |
+| `/forget` | Purges memories for the configured agent/user |
+| `/help` | Shows command help |
+| `/quit` | Exits |
 
-### Two-Column Storage Flow
+## Memory Prompt Assembly
 
-```python
-# In _process_fact(fact, user_msg, bot_msg)
+The chatbot builds prompt context from multiple sources:
 
-# 1. Summarize AI response for main_content
-ai_summary = await self._summarize_response(bot_msg)
-main_content = f"[USER]: {user_msg}\n[AI]: {ai_summary}"
+1. System prompt.
+2. `trace_recall()` memory block.
+3. `build_context()` task memory block.
+4. Recent in-process sliding window.
+5. Current user message.
 
-# 2. Search for similar facts (hybrid search on fact column)
-similar = await engram.search(query=fact, ...)
+This combination keeps the prompt useful when a session is short, long,
+interrupted, or resumed later.
 
-# 3. Skip exact duplicates (score > 0.85)
-for r in similar:
-    if r.score > 0.85:
-        return  # Already have this fact
+## Failure Observability
 
-# 4. Check for related memories (score > 0.4)
-existing = [(id, content) for r in similar if r.score > 0.4]
+The chatbot stores the most recent `RecallTrace`. When recall looks wrong, inspect:
 
-# 5. If no related memories, add with two-column storage
-if not existing:
-    await engram.add(
-        content=fact,           # Embedded for search
-        main_content=main_content,  # NOT embedded, context only
-        ...
-    )
-    return
+- `critical_memory_ids`
+- `search_memory_ids`
+- `kept_memory_ids`
+- `trimmed_memory_ids`
+- `superseded_memory_ids`
+- `missing_expected_terms`
 
-# 6. Otherwise, let LLM decide the operation
-op = await llm.evaluate_memory_operation(fact, existing)
-# → ADD, UPDATE, DELETE, or NOOP
-```
-
-## Memory Reinforcement
-
-When memories are retrieved and used, they get **reinforced**:
-
-```python
-# In recall()
-for r in relevant:
-    # Higher relevance = bigger boost (0.02 to 0.1)
-    boost = 0.02 + (r.score * 0.08)
-    await engram.reinforce(r.memory.memory_id, boost)
-```
-
-This implements **memory decay + importance boosting**:
-- Unused memories gradually lose importance (decay)
-- Frequently accessed memories gain importance (reinforcement)
-- Search results rank higher-importance memories higher
-
-## Context Window Management
-
-When building context for the LLM, the chatbot manages token limits:
-
-```python
-# In recall()
-async def recall(self, query: str, max_chars: int = 2000) -> str:
-    results = await engram.search(query=query, ...)
-    
-    context_parts = []
-    char_count = 0
-    
-    for r in results:
-        # Include fact
-        fact_text = f"• {r.memory.fact}"
-        
-        # Include main_content if space allows
-        if r.memory.main_content and char_count < max_chars * 0.7:
-            context_parts.append(f"{fact_text}\n  Context: {r.memory.main_content}")
-        else:
-            context_parts.append(fact_text)  # Facts-only mode
-        
-        char_count += len(context_parts[-1])
-        if char_count > max_chars:
-            break
-    
-    return "\n".join(context_parts)
-```
-
-**Strategy:**
-- Prioritize facts (always included)
-- Add `main_content` when space allows
-- Gracefully degrade to facts-only under token pressure
-
-## Memory Graph
-
-New memories are linked to recent ones for graph connectivity:
-
-```python
-# In _link_to_recent()
-recent = await engram.list_recent(agent_id, user_id, limit=3)
-for mem in recent:
-    if mem.memory_id != new_memory_id:
-        await engram.relate(
-            source_id=new_memory_id,
-            target_id=mem.memory_id,
-            relation_type="related_to",
-        )
-        break  # Link to most recent only
-```
-
-Use `/graph` command to visualize:
-
-```
-📊 Memory Graph (from: User's name is Nafiz...)
-  └─ [1] User works in AI...
-  └─ [2] User studied data science...
-```
-
-## Sliding Window (Short-term Memory)
-
-Recent conversation is kept in-memory for LLM context:
-
-```python
-# Configuration
-MAX_HISTORY = 20        # Total messages stored
-CONTEXT_WINDOW = 10     # Messages sent to LLM
-MAX_CHARS = 4000        # Character limit
-
-# In _get_context()
-def _get_context(self) -> list[dict]:
-    window, chars = [], 0
-    for msg in reversed(self.history):
-        if len(window) >= CONTEXT_WINDOW or chars > MAX_CHARS:
-            break
-        window.append(msg)
-        chars += len(msg.get("content", ""))
-    return list(reversed(window))
-```
-
-**Key distinction**:
-- `self.history` = Temporary, in-memory (lost on restart)
-- Engram storage = Persistent, searchable (permanent)
+That gives a concrete answer to whether a fact was never stored, not ranked,
+trimmed from the prompt, or superseded by a correction.
 
 ## Configuration
 
-```python
-# Providers
-EMBEDDING_PROVIDER = "openai"
-EMBEDDING_MODEL = "text-embedding-3-small"
-LLM_PROVIDER = "openai"
-LLM_MODEL = "gpt-4o-mini"
-
-# Identifiers
-AGENT_ID = "assistant"
-USER_ID = "user"
-
-# Context limits
-MAX_HISTORY = 20
-CONTEXT_WINDOW = 10
-MAX_CHARS = 4000
-```
-
-## Commands
-
-| Command | Description | Engram API |
-|---------|-------------|------------|
-| `/memories` | Show recent memories | `list_recent()` |
-| `/search <q>` | Hybrid search | `search()` |
-| `/graph` | Show memory relations | `traverse()` |
-| `/forget` | Clear all memories | `purge()` |
-| `/help` | Show commands | - |
-| `/quit` | Exit | - |
-
-## Example Session
-
-```
-🧠 Engram Memory Chatbot
-
-Connecting...
-  Database: ✓
-  Embedding: text-embedding-3-small (1536d)
-  LLM: gpt-4o-mini
-
-Type /help for commands.
-
-You: Hi, I'm Nafiz and I work in AI
-Bot: Hey Nafiz! Nice to meet you. AI is such a fascinating field - 
-     what kind of work do you do in AI?
-
-You: /memories
-📝 Memories (2)
-  [50%] User's name is Nafiz...
-  [50%] User works in AI...
-
-You: /search AI
-🔍 Hybrid Search: 'AI'
-  [87%] User works in AI...
-
-You: /graph
-📊 Memory Graph (from: User works in AI...)
-  └─ [1] User's name is Nafiz...
-```
-
-## Database Commands
-
-### View All Memories (Two-Column)
+Local embeddings:
 
 ```bash
-docker exec engram-postgres psql -U engram -d engram -c "
-SELECT 
-    LEFT(fact, 40) as fact,
-    LEFT(main_content, 40) as context,
-    ROUND(importance::numeric, 2) as imp,
-    to_char(created_at, 'MM-DD HH24:MI') as created
-FROM agent_memory 
-ORDER BY created_at DESC 
-LIMIT 10;
-"
+export ENGRAM_DATABASE_URL=postgresql://engram:engram@localhost:5432/engram
+export ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
+export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
+python examples/chatbot.py
 ```
 
-### View Facts Only
+OpenAI LLM and embeddings:
 
 ```bash
-docker exec engram-postgres psql -U engram -d engram -c "
-SELECT 
-    LEFT(fact, 60) as fact,
-    ROUND(importance::numeric, 2) as importance,
-    to_char(created_at, 'MM-DD HH24:MI') as created
-FROM agent_memory 
-ORDER BY created_at DESC 
-LIMIT 20;
-"
+export ENGRAM_DATABASE_URL=postgresql://engram:engram@localhost:5432/engram
+export ENGRAM_EMBEDDING_PROVIDER=openai
+export ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
+export ENGRAM_LLM_PROVIDER=openai
+export ENGRAM_LLM_MODEL=gpt-4o-mini
+export ENGRAM_OPENAI_API_KEY=sk-...
+python examples/chatbot.py
 ```
 
-### Memory Statistics
+## Production Pattern
 
-```bash
-docker exec engram-postgres psql -U engram -d engram -c "
-SELECT 
-    COUNT(*) as total_memories,
-    ROUND(AVG(importance)::numeric, 3) as avg_importance,
-    MAX(access_count) as max_access
-FROM agent_memory;
-"
-```
+For a production chatbot, split the example into two processes:
 
-### View Relations
+- API/chat process: builds context, calls the model, records turns.
+- Worker process: runs `run_memory_worker()` and handles memory derivation.
 
-```bash
-docker exec engram-postgres psql -U engram -d engram -c "
-SELECT 
-    LEFT(s.content, 30) as source,
-    r.relation_type,
-    LEFT(t.content, 30) as target
-FROM memory_relations r
-JOIN agent_memory s ON r.source_memory_id = s.memory_id
-JOIN agent_memory t ON r.target_memory_id = t.memory_id
-LIMIT 10;
-"
-```
+The example uses `/worker` and inline calls so the behavior is easy to inspect
+locally.
 
-### Clear All Memories
-
-```bash
-docker exec engram-postgres psql -U engram -d engram -c "
-DELETE FROM agent_memory WHERE agent_id = 'assistant';
-"
-```
-
-## Code Structure
-
-```
-chatbot.py (~580 lines)
-│
-├── Configuration (lines 1-64)
-│   ├── Imports and env setup
-│   ├── Provider config
-│   └── Constants (AGENT_ID, sliding window limits)
-│
-├── MemoryChatbot class
-│   │
-│   ├── Connection & Lifecycle
-│   │   ├── connect() - Initialize Engram + services
-│   │   └── close() - Wait for tasks, cleanup
-│   │
-│   ├── Sliding Window
-│   │   ├── _get_context() - Get recent messages
-│   │   └── _trim_history() - Bound history size
-│   │
-│   ├── Search & Reinforce
-│   │   └── recall() - engram.search() + reinforce() + context budget
-│   │
-│   ├── Fact Learning (Two-Column)
-│   │   ├── learn() - Extract facts + build main_content
-│   │   ├── _summarize_response() - llm.summarize() for AI response
-│   │   ├── _process_fact() - ADD/UPDATE/DELETE with main_content
-│   │   └── _link_to_recent() - engram.relate()
-│   │
-│   ├── Chat
-│   │   └── chat() - Main response generation
-│   │
-│   └── Commands
-│       ├── show_memories() - engram.list_recent() (shows fact + context)
-│       ├── search_memories() - engram.search()
-│       ├── show_graph() - engram.traverse()
-│       └── clear_memories() - engram.purge()
-│
-└── Main Loop
-    ├── print_help()
-    └── main() - REPL with command handling
-```
-
----
-
-*Built with [Engram](https://github.com/ahammadnafiz/engram) - AI Memory Layer for LLM Applications*

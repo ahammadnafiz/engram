@@ -41,6 +41,32 @@ RelationType: TypeAlias = Literal[
 ]
 
 # ============================================================================
+# Memory Type (cognitive taxonomy)
+# ============================================================================
+# semantic    - generic durable fact
+# episodic    - dated narrative event ("what happened")
+# procedural  - behavioral rule / how the agent should act
+# profile     - identity, location, health, relationships, durable user facts
+# project     - project/product facts, owners, codenames, metrics
+# task        - requirements and state for a specific unit of work
+# preference  - stable user preferences and communication style
+# constraint  - hard rules, repo constraints, safety limits, deadlines
+# decision    - explicit decisions and corrections
+# tool_result - tool outputs, measurements, test results, external observations
+MemoryType: TypeAlias = Literal[
+    "semantic",
+    "episodic",
+    "procedural",
+    "profile",
+    "project",
+    "task",
+    "preference",
+    "constraint",
+    "decision",
+    "tool_result",
+]
+
+# ============================================================================
 # Search Types
 # ============================================================================
 SearchMode: TypeAlias = Literal["hybrid", "semantic", "keyword"]

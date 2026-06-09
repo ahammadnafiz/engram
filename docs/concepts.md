@@ -1,247 +1,287 @@
 # Core Concepts
 
-Understanding how Engram manages AI memory.
+This page explains the current Engram memory model.
 
-## Memory Model
+## Memory Is Not One Thing
 
-A **Memory** in Engram represents a piece of information that your AI should remember:
+Engram separates durable memory into layers:
+
+| Layer | Stored in | Optimized for |
+|-------|-----------|---------------|
+| Fact memory | `agent_memory` | Search, deterministic recall, conflict resolution |
+| Graph memory | `memory_relations` | Multi-hop associations |
+| Session memory | `agent_sessions` | Conversation grouping and rolling summaries |
+| Task memory | `agent_tasks`, `agent_events`, `task_checkpoints`, `memory_jobs` | Long-running work and resumability |
+
+For a short chatbot, fact memory may be enough. For a coding agent, legal review
+agent, or personal assistant running for days, use task memory plus fact memory.
+
+## Two-Column Fact Memory
+
+A memory stores both a concise fact and optional source context.
 
 ```python
-@dataclass
-class Memory:
-    memory_id: str              # Unique identifier (mem_...)
-    agent_id: str               # Which agent owns this memory
-    user_id: str | None         # Optional user scope
-    session_id: str | None      # Optional session scope
-    
-    # Two-Column System (v2)
-    content: str                # Alias for fact (backward compatible)
-    fact: str                   # Extracted user fact (EMBEDDED)
-    main_content: str | None    # [USER]: msg\n[AI]: summary (NOT embedded)
-    
-    embedding: list[float]      # Vector representation of fact
-    importance: float           # 0.0-1.0, how important
-    access_count: int           # Times accessed
-    created_at: datetime        # When created
-    last_accessed_at: datetime  # Last access time
-    metadata: dict              # Flexible JSON metadata
+memory = await engram.add(
+    content="User is allergic to shellfish",
+    main_content="[USER]: I found out in Maine that shellfish makes me sick.",
+    agent_id="assistant",
+    user_id="user_123",
+)
 ```
 
-### Two-Column Memory System
+| Field | Embedded | Search role | Prompt role |
+|-------|----------|-------------|-------------|
+| `content` / `fact` | Yes | Semantic + keyword retrieval | Concise fact |
+| `main_content` | No | Stored context, not vectorized | Evidence/context when needed |
 
-Engram v2 introduces a **two-column strategy** for cost-effective memory storage:
+This keeps embedding cost low while preserving the conversation or source text
+that produced the fact.
 
-| Column | Embedded? | Purpose |
-|--------|-----------|---------|
-| `fact` | ✅ Yes | Extracted user facts for semantic search |
-| `main_content` | ❌ No | Full conversation context `[USER]: ...\n[AI]: ...` |
+## Memory Types
 
-**Benefits:**
-- **Cost-effective**: Only embed concise facts, not full conversations
-- **No context loss**: Full messages preserved in `main_content`
-- **Efficient retrieval**: One query returns both fact and context
-- **Backward compatible**: `content` field still works (maps to `fact`)
+Each memory has a `memory_type`.
+
+| Type | Examples |
+|------|----------|
+| `profile` | name, health, allergy, city, manager |
+| `preference` | communication style, UI preference, meeting preference |
+| `constraint` | "never revert user changes", deadlines, safety limits |
+| `project` | codenames, owners, launch date, metrics |
+| `task` | requirements, pending work, completed work |
+| `decision` | approved approach, correction, changed target |
+| `tool_result` | pytest output, load test result, API response |
+| `semantic` | general durable fact |
+| `episodic` | event or dated narrative |
+| `procedural` | rule or process |
+
+Use typed retrieval when the prompt has a narrow purpose:
+
+```python
+constraints = await engram.search(
+    "repo rules",
+    agent_id="codex",
+    user_id="nafiz",
+    memory_types=["constraint", "decision"],
+)
+```
+
+## Memory Policy
+
+`MemoryPolicy` applies domain rules before storage:
+
+1. Infer a more specific `memory_type` from text or metadata.
+2. Decide whether the memory is critical.
+3. Assign a deterministic `critical_slot`.
+4. Build a `conflict_key` scoped by agent and user.
+
+```python
+async with Engram(memory_policy="coding_agent") as engram:
+    await engram.add(
+        "Repo constraint: do not edit generated migrations manually",
+        agent_id="codex",
+        user_id="nafiz",
+    )
+```
+
+Built-in policies:
+
+| Policy | Focus |
+|--------|-------|
+| `default` | Personal facts, preferences, projects, requirements |
+| `legal` | citations, source chunks, clauses, deadlines, audit logs |
+| `coding_agent` | repo constraints, implementation decisions, tool results |
+
+## Critical Memory
+
+Critical facts should not depend only on vector search. Engram stores policy
+metadata so they can be recalled deterministically:
+
+```json
+{
+  "critical": true,
+  "critical_slot": "constraint:repo",
+  "conflict_key": "codex:nafiz:constraint:repo",
+  "status": "active",
+  "version": 1
+}
+```
+
+Use `recall_critical()` to retrieve them directly:
+
+```python
+critical = await engram.recall_critical(
+    agent_id="codex",
+    user_id="nafiz",
+    memory_types=["constraint", "preference", "profile"],
+)
+```
+
+`trace_recall()` includes critical memories first, then vector-ranked memories.
+
+## Conflict Resolution
+
+When a new memory has the same `conflict_key` as an older active memory, the
+older memory is not deleted. It is marked superseded:
+
+```json
+{
+  "status": "superseded",
+  "superseded_by": "mem_new",
+  "superseded_at": "2026-06-09T..."
+}
+```
+
+Normal search hides superseded memories. Trace APIs can still report them.
+
+This matters for corrections:
+
+- "I am allergic to cashews."
+- Later: "Correction: I am not allergic to cashews."
+
+Both records can exist for auditability, but active recall should use the latest
+slot winner.
 
 ## Hybrid Search
 
-Engram uses **Reciprocal Rank Fusion (RRF)** to combine multiple ranking signals:
+`search()` combines:
 
-```
-final_score = w₁·semantic + w₂·keyword + w₃·decay + w₄·importance
-```
+| Signal | Source |
+|--------|--------|
+| Semantic | pgvector cosine similarity on `embedding` |
+| Keyword | PostgreSQL full-text search on `fact_tsv` |
+| Decay | recency/access score |
+| Importance | explicit importance and reinforcement |
 
-### Search Components
-
-| Component | Weight | Description |
-|-----------|--------|-------------|
-| **Semantic** | 0.40 | Vector similarity on `fact` column (cosine distance) |
-| **Keyword** | 0.20 | Full-text search on `fact_tsv` (BM25-like) |
-| **Decay** | 0.25 | Recency + access frequency |
-| **Importance** | 0.15 | Explicit importance score |
-
-### How It Works
-
-1. **Semantic Search**: Find facts with similar meaning using vector embeddings
-2. **Keyword Search**: Find exact term matches in facts using PostgreSQL full-text search
-3. **Decay Scoring**: Recent and frequently accessed memories rank higher
-4. **RRF Fusion**: Combine all signals with weighted reciprocal rank fusion
-5. **Context Return**: Return both `fact` (what matched) and `main_content` (full context)
-
-```sql
--- Simplified hybrid search (searches fact column)
-WITH semantic AS (
-    SELECT memory_id, fact, main_content,
-           ROW_NUMBER() OVER (ORDER BY embedding <=> query_vec) as rank
-    FROM agent_memory
-),
-keyword AS (
-    SELECT memory_id,
-           ROW_NUMBER() OVER (ORDER BY ts_rank(fact_tsv, query)) as rank
-    FROM agent_memory
-    WHERE fact_tsv @@ plainto_tsquery(query)
-)
-SELECT memory_id,
-    fact AS content,      -- What matched
-    main_content,         -- Full context
-    (0.4 / (60 + semantic.rank)) +
-    (0.2 / (60 + keyword.rank)) +
-    (0.25 * decay_score) +
-    (0.15 * importance) as score
-FROM ...
-```
-
-## Memory Decay
-
-Memories naturally decay over time, mimicking human memory:
-
-```
-decay_score = base_rate ^ hours_since_access
-```
-
-With `base_rate = 0.995`:
-
-| Time Since Access | Decay Score |
-|-------------------|-------------|
-| 1 hour | 0.995 |
-| 1 day | 0.887 |
-| 1 week | 0.512 |
-| 1 month | 0.023 |
-
-### Reinforcement
-
-Accessing a memory "reinforces" it:
+Search supports metadata and type filters:
 
 ```python
-# This automatically updates last_accessed_at and access_count
-memory = await engram.get(memory_id)
-
-# Or explicitly reinforce
-await engram.reinforce(memory_id)
+results = await engram.search(
+    "black friday latency target",
+    agent_id="codex",
+    user_id="nafiz",
+    metadata_filter={"project": "atlas_checkout"},
+    memory_types=["project", "constraint", "tool_result"],
+)
 ```
+
+Use `deep_search()` for broad or multi-part prompts. It expands the query with
+the configured LLM, searches each variant, and dedupes by memory ID.
+
+## Recall Observability
+
+`trace_recall()` builds a prompt block and explains what happened.
+
+```python
+trace = await engram.trace_recall(
+    "Can we launch today?",
+    agent_id="assistant",
+    user_id="user_123",
+    expected_terms=["rollback owner", "error rate"],
+    max_tokens=1000,
+)
+```
+
+Important fields:
+
+| Field | Debug question |
+|-------|----------------|
+| `critical_memory_ids` | Was it pinned as critical? |
+| `search_memory_ids` | Did vector/keyword retrieval find it? |
+| `ranked_memory_ids` | Was it eligible for the context? |
+| `kept_memory_ids` | Did it make the final prompt? |
+| `trimmed_memory_ids` | Was it cut by token budget? |
+| `superseded_memory_ids` | Was an old fact hidden by correction rules? |
+| `missing_expected_terms` | Did required terms fail to appear? |
 
 ## Graph Relationships
 
-Memories can be connected to form a knowledge graph:
+Graph relations connect memories for multi-hop context:
 
 ```python
-# Create relationship
 await engram.relate(
-    source_id=memory_a.id,
-    target_id=memory_b.id,
-    relation_type="relates_to",  # or: causes, contradicts, supports, etc.
-    strength=0.8
+    source_id=task.memory_id,
+    target_id=constraint.memory_id,
+    relation_type="supports",
+    weight=0.8,
+)
+
+graph = await engram.traverse_many(
+    [task.memory_id, constraint.memory_id],
+    max_depth=2,
+    direction="any",
+)
+
+block = engram.render_graph_context(graph, max_tokens=800)
+```
+
+Graph traversal is useful when one retrieved fact should bring along related
+decisions, tool results, or constraints.
+
+## Task Memory
+
+Task memory is for long-running work:
+
+| Model | Meaning |
+|-------|---------|
+| `TaskRun` | Goal, status, owner, outcome |
+| `AgentEvent` | Raw ledger entry for user, assistant, tool, artifact, decision |
+| `TaskCheckpoint` | Compact state snapshot |
+| `MemoryJob` | Durable background derivation work |
+
+Typical loop:
+
+```python
+task = await engram.start_task("Refactor the memory framework", "codex")
+context = await engram.build_context(task.task_run_id, query="resume")
+response = await call_llm(context.text)
+await engram.record_turn(task.task_run_id, user_message, response)
+await engram.process_memory_jobs(limit=10)
+```
+
+For production, run `run_memory_worker()` in a worker process.
+
+## Long Input
+
+Long prompts and documents should be chunked and anchored:
+
+```python
+report = await engram.record_long_input(
+    task.task_run_id,
+    text=large_prompt,
+    title="Legal review packet",
+)
+
+context = await engram.build_long_input_context(
+    task.task_run_id,
+    query="termination obligations",
+    expected_terms=["termination", "notice"],
 )
 ```
 
-### Relationship Types
+Each chunk records:
 
-| Type | Description |
-|------|-------------|
-| `relates_to` | General association |
-| `causes` | Causal relationship |
-| `supports` | Supporting evidence |
-| `contradicts` | Conflicting information |
-| `is_part_of` | Hierarchical relationship |
-| `follows` | Sequential relationship |
+- chunk ID
+- heading/kind
+- character span
+- quote hash
+- source event ID
 
-### Graph Traversal
+Use source chunks for legal, financial, compliance, or exact-document answers.
+Use distilled memory for speed and continuity.
 
-Multi-hop traversal finds related memories:
+## When To Use Which API
 
-```python
-# Find all memories within 2 hops
-related = await engram.traverse(
-    start_id=memory.id,
-    max_hops=2,
-    min_strength=0.5,
-    relation_types=["supports", "causes"]
-)
-```
+| Need | API |
+|------|-----|
+| Store one fact | `add()` |
+| Store facts from a conversation | `add_conversation()` |
+| Retrieve relevant facts | `search()` |
+| Retrieve broad/multi-part facts | `deep_search()` |
+| Build debuggable prompt memory | `trace_recall()` |
+| Build compact prompt block | `get_context_block()` |
+| Start resumable agent work | `start_task()` |
+| Record raw turns/tools | `record_turn()` / `record_event()` |
+| Build task-resume context | `build_context()` |
+| Ingest huge prompt/document | `record_long_input()` |
+| Build source-anchored answer context | `build_long_input_context()` |
 
-This uses PostgreSQL recursive CTEs for efficient traversal:
-
-```sql
-WITH RECURSIVE graph AS (
-    -- Base case
-    SELECT target_id, 1 as depth, strength
-    FROM memory_relations
-    WHERE source_id = start_id
-    
-    UNION ALL
-    
-    -- Recursive case
-    SELECT r.target_id, g.depth + 1, g.strength * r.strength
-    FROM graph g
-    JOIN memory_relations r ON g.target_id = r.source_id
-    WHERE g.depth < max_hops
-)
-SELECT * FROM graph WHERE strength >= min_strength;
-```
-
-## Sessions
-
-Sessions provide context continuity across conversations:
-
-```python
-async with engram.session(
-    agent_id="assistant",
-    user_id="user_123",
-    ttl_hours=24
-) as session:
-    # Memories added here are linked to this session
-    await session.add("User asked about Python")
-    
-    # Get context considers session history
-    context = await session.get_context("What did they ask?")
-```
-
-### Session Lifecycle
-
-1. **Create**: New session with unique ID and TTL
-2. **Active**: Memories added are linked to session
-3. **Expire**: After TTL, session becomes inactive
-4. **Cleanup**: Expired sessions are periodically purged
-
-## Agents
-
-An **Agent** is a namespace for memories:
-
-```python
-# Different agents have separate memory spaces
-await engram.add(content="...", agent_id="customer-support")
-await engram.add(content="...", agent_id="sales-assistant")
-
-# Search only within an agent's memories
-await engram.search(query="...", agent_id="customer-support")
-```
-
-This allows multiple AI agents to share the same database while maintaining separate memory spaces.
-
-## Architecture
-
-Engram uses a **converged architecture** with PostgreSQL:
-
-```
-┌─────────────────────────────────────────────────────┐
-│                    Engram Client                    │
-├─────────────────────────────────────────────────────┤
-│  Memory Store  │  Graph Traversal  │  Session Mgr   │
-├─────────────────────────────────────────────────────┤
-│                  PostgreSQL Storage                 │
-├─────────────────────────────────────────────────────┤
-│  pgvector  │  Full-Text  │  JSONB  │  Relations     │
-└─────────────────────────────────────────────────────┘
-```
-
-### Why PostgreSQL?
-
-| Feature | Benefit |
-|---------|---------|
-| **ACID** | Data integrity guaranteed |
-| **pgvector** | Fast vector similarity search |
-| **Full-text** | Built-in keyword search |
-| **JSONB** | Flexible metadata |
-| **Recursive CTEs** | Efficient graph traversal |
-| **Single Database** | Simpler ops, lower latency |
-
-All operations complete in a single database round-trip (~50ms typical).

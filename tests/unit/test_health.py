@@ -13,11 +13,13 @@ class TestHealthChecker:
     @pytest.fixture
     def mock_storage(self) -> MagicMock:
         storage = MagicMock()
-        storage.health_check = AsyncMock(return_value={
-            "status": "healthy",
-            "database": "connected",
-            "pool_size": 10,
-        })
+        storage.health_check = AsyncMock(
+            return_value={
+                "status": "healthy",
+                "database": "connected",
+                "pool_size": 10,
+            }
+        )
         storage.fetchval = AsyncMock(return_value=1)
         return storage
 
@@ -27,7 +29,7 @@ class TestHealthChecker:
         embedding.dimension = 1536
         embedding.model = "text-embedding-3-small"
         embedding.cache_info = {"size": 10, "max_size": 1000}
-        
+
         async def mock_embed(text: str) -> list[float]:
             return [0.1] * 1536
 
@@ -100,10 +102,12 @@ class TestHealthChecker:
         """Test health check when database fails."""
         from engram.health.checker import HealthChecker
 
-        mock_storage.health_check = AsyncMock(return_value={
-            "status": "unhealthy",
-            "error": "Connection refused",
-        })
+        mock_storage.health_check = AsyncMock(
+            return_value={
+                "status": "unhealthy",
+                "error": "Connection refused",
+            }
+        )
 
         checker = HealthChecker(storage=mock_storage, embedding_service=mock_embedding)
 
@@ -223,4 +227,3 @@ class TestHealthCheckerQuick:
         result = await checker.check_quick()
 
         assert result is False
-

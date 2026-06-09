@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "engram"
 dynamic = ["version"]
-description = "A production-ready AI memory library for LLM applications using PostgreSQL + pgvector"
+description = "Persistent memory infrastructure for long-running AI agents using PostgreSQL + pgvector"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -47,11 +47,32 @@ dependencies = [
 openai = [
     "openai>=1.0.0",
 ]
+anthropic = [
+    "anthropic>=0.25.0",
+]
+cohere = [
+    "cohere>=5.0.0",
+]
+http = [
+    "httpx>=0.25.0",
+]
+litellm = [
+    "litellm>=1.0.0",
+]
 sentence-transformers = [
     "sentence-transformers>=2.2.0",
 ]
+examples = [
+    "python-dotenv>=1.0.0",
+]
 all = [
-    "engram[openai,sentence-transformers]",
+    "openai>=1.0.0",
+    "anthropic>=0.25.0",
+    "cohere>=5.0.0",
+    "httpx>=0.25.0",
+    "litellm>=1.0.0",
+    "sentence-transformers>=2.2.0",
+    "python-dotenv>=1.0.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -60,6 +81,9 @@ dev = [
     "mypy>=1.0.0",
     "ruff>=0.1.0",
     "pre-commit>=3.0.0",
+    "python-dotenv>=1.0.0",
+    "build>=1.0.0",
+    "twine>=5.0.0",
 ]
 docs = [
     "mkdocs>=1.5.0",
@@ -84,8 +108,15 @@ packages = ["src/engram"]
 include = [
     "/src",
     "/tests",
+    "/examples",
+    "/docs",
+    "/mkdocs.yml",
     "/README.md",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
     "/LICENSE",
+    "/RELEASE.md",
+    "/SECURITY.md",
 ]
 
 # ============================================================================

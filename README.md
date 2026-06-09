@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Production-Ready Memory Infrastructure for AI Applications</strong>
+  <strong>Persistent memory infrastructure for long-running AI agents</strong>
 </p>
 
 <p align="center">
@@ -16,7 +16,13 @@
 
 ---
 
-Engram is a memory management library that provides persistent, searchable memory for AI agents using PostgreSQL and pgvector. It handles the complexity of hybrid search, memory decay, and graph relationships so you can focus on building your application.
+Engram is an alpha-stage memory management library for AI agents and LLM
+applications. It provides persistent, searchable memory using PostgreSQL and
+pgvector, with hybrid retrieval, durable task ledgers, typed critical memory,
+source-anchored long-input ingestion, and traceable recall.
+
+> Status: **developer preview / alpha**. The architecture and local test suite
+> are in good shape, but public APIs may still change before a stable release.
 
 ## Features
 
@@ -24,9 +30,13 @@ Engram is a memory management library that provides persistent, searchable memor
 - **Two-Column Memory System** — Embed only facts for search, store full conversation context separately (cost-effective)
 - **Memory Decay** — Exponential decay prioritizes recent and frequently accessed memories
 - **Graph Traversal** — Multi-hop reasoning through typed memory relationships using recursive CTEs
+- **Long-Running Task Memory** — Durable task runs, raw event ledger, checkpoints, and background memory jobs for agents that run across many turns
 - **Session Management** — Track conversation context with automatic TTL expiration
 - **Pluggable Providers** — Support for OpenAI, Anthropic, Cohere, Ollama, Sentence Transformers, and custom providers
-- **Production-Ready** — ACID guarantees, connection pooling, automatic vector dimension scaling
+- **Configurable Memory Policies** — Domain-specific typing and conflict slots for personal, coding, legal, and custom agents
+- **Long Input Ingestion** — Store full prompts/documents, chunk by structure, extract anchored memories, and build source-grounded context
+- **Recall Observability** — Trace whether memories were stored, ranked, kept, trimmed, superseded, or missing
+- **Operational Foundation** — ACID storage, connection pooling, and automatic vector dimension scaling
 
 ## Installation
 
@@ -38,8 +48,12 @@ With specific providers:
 
 ```bash
 pip install engram[openai]                # OpenAI embeddings and LLM
-pip install engram[anthropic]             # Anthropic Claude
+pip install engram[anthropic]             # Anthropic Claude LLM
+pip install engram[cohere]                # Cohere embeddings
+pip install engram[http]                  # Ollama/Hugging Face/Groq HTTP providers
+pip install engram[litellm]               # LiteLLM universal LLM provider
 pip install engram[sentence-transformers] # Local embeddings (free)
+pip install engram[examples]              # Example helper dependencies
 pip install engram[all]                   # All providers
 ```
 
@@ -96,7 +110,94 @@ async def main():
         for r in results:
             print(f"[{r.score:.2f}] {r.memory.content}")
 
+        # Long-running agent task memory
+        task = await engram.start_task(
+            "Help the user plan a Python learning path",
+            agent_id="assistant",
+            user_id="user_123",
+        )
+
+        # Store the raw turn in the event ledger and queue memory derivation
+        await engram.record_turn(
+            task.task_run_id,
+            user_message="I want to learn Python for data analysis.",
+            assistant_response="Let's focus on pandas, notebooks, and small projects.",
+        )
+
+        # Process queued work: facts + checkpoints
+        await engram.process_memory_jobs(limit=10)
+
+        # Build prompt-ready context for the next agent turn
+        context = await engram.build_context(
+            task.task_run_id,
+            query="Python data analysis learning plan",
+            max_tokens=2000,
+        )
+        print(context.text)
+
 asyncio.run(main())
+```
+
+## Long Input and Legal/Source Documents
+
+For large prompts, legal documents, or multi-day sessions, store the exact
+source and derive anchored memories from chunks instead of relying only on a
+summary.
+
+```python
+from engram import Engram
+
+async with Engram(memory_policy="legal") as engram:
+    task = await engram.start_task(
+        "Review vendor contract",
+        agent_id="legal-agent",
+        user_id="user_123",
+    )
+
+    report = await engram.record_long_input(
+        task.task_run_id,
+        contract_text,
+        title="Vendor SaaS review",
+        max_chunk_tokens=500,
+    )
+
+    context = await engram.build_long_input_context(
+        task.task_run_id,
+        query="audit logs liability indemnity risk table",
+        expected_terms=["audit logs", "liability", "indemnify"],
+    )
+
+    print(context.text)
+    print(context.trace["missing_expected_terms"])
+```
+
+`record_long_input()` keeps the raw input event, records source chunks, stores
+chunk metadata (`source_event_id`, `chunk_id`, `section`, character range, and
+`quote_hash`), normalizes common relative dates, and creates a manifest
+checkpoint.
+
+## Memory Policies
+
+Policies control memory typing, deterministic critical recall, and conflict
+slots. Built-in presets are:
+
+| Policy | Use case |
+|--------|----------|
+| `default` | General personal/product/task agents |
+| `legal` | Source-grounded legal or contract review |
+| `coding_agent` | Repo-aware coding agents and tool-result memory |
+
+```python
+from engram import Engram, MemoryPolicy, SlotRule, TypeRule
+
+sales_policy = MemoryPolicy(
+    name="sales",
+    type_rules=(TypeRule("project", (r"\baccount\b",)),),
+    slot_rules=(SlotRule("sales:account_owner", (r"\baccount owner\b",)),),
+)
+
+async with Engram(memory_policy=sales_policy) as engram:
+    await engram.add("The account owner is Rina.", "sales-agent")
 ```
 
 ## Architecture
@@ -124,6 +225,52 @@ Engram uses a converged architecture where all operations run in PostgreSQL:
 |--------|----------|---------|
 | `fact` | Yes | Concise user facts for semantic search |
 | `main_content` | No | Full conversation context (cost-effective storage) |
+
+### Long-Running Task Memory
+
+For agents that need to work across many turns or process restarts, Engram
+stores task memory separately from extracted facts:
+
+| Record | Purpose |
+|--------|---------|
+| `agent_task_runs` | Durable unit of work with status, goal, outcome, and metadata |
+| `agent_events` | Raw append-only ledger of user, assistant, agent, tool, artifact, and error events |
+| `agent_checkpoints` | Compact summaries of current state, decisions, blockers, and artifacts |
+| `memory_jobs` | Durable background queue for deriving facts/checkpoints from raw turns |
+
+```python
+task = await engram.start_task("Investigate a production incident", "sre-agent")
+
+await engram.record_turn(
+    task.task_run_id,
+    "Latency is high in checkout.",
+    "I will inspect recent deploys and database metrics.",
+    tool_calls=[{"name": "query_metrics", "service": "checkout"}],
+)
+
+await engram.process_memory_jobs()
+
+context = await engram.build_context(task.task_run_id, max_tokens=200000)
+```
+
+### Critical Recall and Traceability
+
+For broad or multi-part prompts, use `trace_recall()` to inspect what was
+included or missed:
+
+```python
+trace = await engram.trace_recall(
+    "final verification: city allergy codename rollback owner",
+    "assistant",
+    user_id="user_123",
+    expected_terms=["Denver", "cashews", "quartz-falcon", "Priya"],
+)
+
+print(trace.context)
+print(trace.missing_expected_terms)
+print(trace.trimmed_memory_ids)
+print(trace.superseded_memory_ids)
+```
 
 ### Hybrid Search
 
@@ -220,6 +367,15 @@ async def example():
             max_depth=2,
             direction="outbound",
         )
+
+        # Multi-seed graph expansion for prompt assembly
+        graph = await engram.traverse_many(
+            [m1.memory_id, m2.memory_id],
+            max_depth=2,
+            direction="any",
+        )
+        graph_context = engram.render_graph_context(graph, max_tokens=500)
+        print(graph_context)
         
         # Reinforce important memories
         await engram.reinforce(m1.memory_id, importance_boost=0.2)
@@ -266,11 +422,29 @@ docker compose down -v
 
 ## Documentation
 
-- [Quickstart Guide](./docs/quickstart.md) — Get started in 5 minutes
-- [Core Concepts](./docs/concepts.md) — Memory model, hybrid search, decay
-- [API Reference](./docs/api.md) — Complete API documentation
-- [Architecture](./docs/architecture.md) — System design and schema
-- [Configuration](./docs/configuration.md) — All configuration options
+Current alpha documentation lives in this README and the examples:
+
+- [examples/basic_usage.py](./examples/basic_usage.py) — comprehensive API walkthrough
+- [examples/chatbot.py](./examples/chatbot.py) — task-memory chatbot demo
+- [examples/long_input_usage.py](./examples/long_input_usage.py) — source-anchored long-input demo
+- [CHANGELOG.md](./CHANGELOG.md) — release notes
+- [SECURITY.md](./SECURITY.md) — privacy, deletion, and API-key guidance
+
+The hosted documentation site will be added after the public API stabilizes.
+
+## Production Caveats
+
+Engram stores user facts, source documents, and agent events. Treat it as
+sensitive infrastructure:
+
+- Scope memories by `agent_id` and `user_id`.
+- Use `forget()`, `purge()`, `redact_event()`, and task deletion workflows for
+  retention/deletion requirements.
+- For legal or exact-document answers, retrieve source chunks first and memory
+  summaries second.
+- Review `trace_recall()` output for broad prompts and production incidents.
+- Start public deployments with explicit retention, tenant isolation, backup,
+  and access-control policies.
 
 ## Requirements
 

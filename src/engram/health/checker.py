@@ -66,12 +66,8 @@ class HealthChecker:
         embedding_status = await self._check_embedding(skip_test=skip_embedding_test)
 
         # Determine overall status
-        is_healthy = (
-            db_status.get("status") == "healthy"
-            and (
-                embedding_status is None
-                or embedding_status.get("status") == "healthy"
-            )
+        is_healthy = db_status.get("status") == "healthy" and (
+            embedding_status is None or embedding_status.get("status") == "healthy"
         )
 
         end_time = datetime.now(timezone.utc)

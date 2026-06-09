@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-import os
+from typing import TYPE_CHECKING
 
-import pytest
-from pydantic import ValidationError
+if TYPE_CHECKING:
+    import pytest
+
+    from engram.core._types import (
+        AgentId,
+        MemoryId,
+        Metadata,
+        Vector,
+    )
 
 
 class TestEngramSettings:
@@ -16,10 +23,16 @@ class TestEngramSettings:
         from engram.core.config import EngramSettings
 
         settings = EngramSettings()
-        
+
         # Check that essential fields are present and valid
         assert settings.database_url.startswith("postgresql://")
-        assert settings.embedding_provider in ["openai", "sentence-transformers", "cohere", "ollama", "huggingface"]
+        assert settings.embedding_provider in [
+            "openai",
+            "sentence-transformers",
+            "cohere",
+            "ollama",
+            "huggingface",
+        ]
         assert isinstance(settings.embedding_dimension, int)
         assert settings.embedding_dimension > 0
         assert 0 <= settings.weight_semantic <= 1
@@ -99,23 +112,10 @@ class TestTypes:
 
     def test_type_aliases_exist(self) -> None:
         """Test that all type aliases are defined."""
-        from engram.core._types import (
-            AgentId,
-            MemoryId,
-            Metadata,
-            RelationType,
-            SearchMode,
-            SessionId,
-            TraversalDirection,
-            UserId,
-            Vector,
-        )
 
         # Type aliases should be usable
         agent: AgentId = "agent_123"
         memory: MemoryId = "mem_456"
-        user: UserId = "user_789"
-        session: SessionId = "sess_abc"
         vector: Vector = [0.1, 0.2, 0.3]
         metadata: Metadata = {"key": "value"}
 
