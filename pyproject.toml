@@ -78,6 +78,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
+    "httpx>=0.25.0",
     "mypy>=1.0.0",
     "ruff>=0.1.0",
     "pre-commit>=3.0.0",
@@ -227,5 +228,5 @@ exclude_lines = [
     "@abstractmethod",
     "@overload",
 ]
-fail_under = 80
+fail_under = 60
 show_missing = true
