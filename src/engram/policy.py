@@ -63,7 +63,11 @@ class MemoryPolicy:
     )
     type_rules: tuple[TypeRule, ...] = field(default_factory=tuple)
     slot_rules: tuple[SlotRule, ...] = field(default_factory=tuple)
-    generic_critical_slots: bool = True
+    # Off by default: a content-digest slot can never match a *reworded*
+    # contradiction, so it cannot supersede anything real — it only adds a
+    # junk conflict_key and an extra supersede query on every add. Explicit
+    # slot_rules are the supported conflict mechanism.
+    generic_critical_slots: bool = False
 
     def infer_type(
         self,
@@ -135,15 +139,18 @@ class MemoryPolicy:
         return inferred_type, merged
 
     def _allergy_slot(self, text: str) -> str | None:
+        """Slot allergy statements by allergen.
+
+        Positive ("allergic to X") and negative ("not allergic to X")
+        statements share the same slot so a correction supersedes the
+        contradicted fact instead of coexisting with it. Compound allergens
+        ("shellfish and peanuts") are kept whole.
+        """
         if "allerg" not in text:
             return None
-        negative = re.search(r"not allergic to ([a-z0-9 _-]+)", text)
-        if negative:
-            allergen = re.sub(r"[^a-z0-9]+", "_", negative.group(1)).strip("_")
-            return f"profile:not_allergy:{allergen or 'unknown'}"
-        positive = re.search(r"allergic to ([a-z0-9 _-]+?)(?:[,.;]| and |$)", text)
-        if positive:
-            allergen = re.sub(r"[^a-z0-9]+", "_", positive.group(1)).strip("_")
+        match = re.search(r"allergic to ([a-z0-9 _-]+?)(?:[,.;]|$)", text)
+        if match:
+            allergen = re.sub(r"[^a-z0-9]+", "_", match.group(1)).strip("_")
             return f"profile:allergy:{allergen or 'unknown'}"
         return "profile:allergy"
 

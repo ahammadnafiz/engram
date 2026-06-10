@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# finish_reason values that indicate the model hit its output token cap
+# (OpenAI: "length", Anthropic: "max_tokens", some providers: "max_output_tokens")
+_TRUNCATION_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
+
 
 class MemoryOperationType(str, Enum):
     """Types of memory operations."""
@@ -140,7 +144,7 @@ class LLMService:
             service = LLMService.from_provider(
                 "anthropic",
                 api_key="sk-ant-...",
-                model="claude-3-haiku-20240307",
+                model="claude-haiku-4-5-20251001",
             )
 
             # Ollama (local)
@@ -393,18 +397,18 @@ Return "NONE" ONLY if truly no extractable facts.
 </exclusions>"""
 
         try:
-            response = await self._provider.complete_text(
-                prompt=extraction_prompt,
-                max_tokens=500,
+            response = await self._provider.complete(
+                [{"role": "user", "content": extraction_prompt}],
+                max_tokens=1000,
                 temperature=0,
             )
 
-            response = response.strip()
-            if not response or response.upper() == "NONE":
+            text = (response.content or "").strip()
+            if not text or text.upper() == "NONE":
                 return []
 
             facts = []
-            for line in response.split("\n"):
+            for line in text.split("\n"):
                 # Clean up various bullet formats
                 fact = line.strip().lstrip("-•*·").strip()
                 # Remove numbering like "1.", "1)", etc.
@@ -415,10 +419,104 @@ Return "NONE" ONLY if truly no extractable facts.
                 if fact and len(fact) > 5 and fact.upper() != "NONE":
                     facts.append(fact)
 
+            # If output hit the token cap, the last line is likely cut
+            # mid-sentence; storing a partial fact is worse than missing one.
+            finish = (response.finish_reason or "").lower()
+            if finish in _TRUNCATION_FINISH_REASONS and facts:
+                logger.warning(
+                    f"Fact extraction output truncated (finish_reason="
+                    f"{response.finish_reason}); dropping last partial fact"
+                )
+                facts = facts[:-1]
+
             return facts
 
         except Exception as e:
             logger.warning(f"Fact extraction failed: {e}")
+            return []
+
+    async def extract_document_facts(
+        self,
+        text: str,
+        *,
+        kind: str | None = None,
+        heading: str | None = None,
+        max_facts: int = 8,
+    ) -> list[str]:
+        """Extract atomic facts from a document chunk (not a conversation).
+
+        The conversation prompt (extract_facts) phrases everything as facts
+        about "the User", which is wrong for ingested documents, contracts,
+        and specs. This prompt extracts the document's own statements
+        verbatim-faithfully.
+
+        Args:
+            text: The document chunk text.
+            kind: Optional chunk classification (requirement, constraint, ...).
+            heading: Optional section heading for context.
+            max_facts: Upper bound on returned facts.
+
+        Returns:
+            List of extracted facts (empty if none found).
+        """
+        context_lines = []
+        if heading:
+            context_lines.append(f"Section: {heading}")
+        if kind:
+            context_lines.append(f"Chunk type: {kind}")
+        context_block = "\n".join(context_lines) if context_lines else "<none/>"
+
+        prompt = f"""<task>
+Extract up to {max_facts} atomic facts from the document excerpt below.
+An atomic fact is one self-contained statement that can stand alone.
+</task>
+
+<context>
+{context_block}
+</context>
+
+<document_excerpt>
+{text}
+</document_excerpt>
+
+<rules>
+<rule>Preserve exact names, numbers, dates, thresholds, and identifiers.</rule>
+<rule>State requirements, constraints, decisions, and deadlines as the document states them.</rule>
+<rule>Do NOT phrase facts as being about "the User" — this is a document, not a chat.</rule>
+<rule>One fact per line. No numbering, no commentary.</rule>
+<rule>Return "NONE" only if the excerpt contains no extractable statements.</rule>
+</rules>"""
+
+        try:
+            response = await self._provider.complete(
+                [{"role": "user", "content": prompt}],
+                max_tokens=600,
+                temperature=0,
+            )
+            content = (response.content or "").strip()
+            if not content or content.upper() == "NONE":
+                return []
+
+            facts = []
+            for line in content.split("\n"):
+                fact = line.strip().lstrip("-•*·").strip()
+                if fact and len(fact) > 1 and fact[0].isdigit():
+                    fact = fact.lstrip("0123456789.)").strip()
+                if fact and len(fact) > 5 and fact.upper() != "NONE":
+                    facts.append(fact)
+
+            finish = (response.finish_reason or "").lower()
+            if finish in _TRUNCATION_FINISH_REASONS and facts:
+                logger.warning(
+                    f"Document fact extraction truncated (finish_reason="
+                    f"{response.finish_reason}); dropping last partial fact"
+                )
+                facts = facts[:-1]
+
+            return facts[:max_facts]
+
+        except Exception as e:
+            logger.warning(f"Document fact extraction failed: {e}")
             return []
 
     async def classify_facts(self, facts: list[str]) -> list[str]:
@@ -458,24 +556,34 @@ Use only: profile, preference, project, task, constraint, decision, tool_result,
 Default to semantic if unsure.
 </output_format>"""
 
-        valid = {
-            "profile",
+        # Longest-first fixed order so compound answers like "task/decision"
+        # resolve deterministically (set iteration order would be random).
+        valid = (
+            "tool_result",
+            "constraint",
             "preference",
+            "procedural",
+            "decision",
+            "episodic",
+            "semantic",
+            "profile",
             "project",
             "task",
-            "constraint",
-            "decision",
-            "tool_result",
-            "semantic",
-            "episodic",
-            "procedural",
-        }
+        )
         types: list[str] = ["semantic"] * len(facts)
         try:
-            response = await self._provider.complete_text(
-                prompt=prompt, max_tokens=200, temperature=0
+            response = await self._provider.complete(
+                [{"role": "user", "content": prompt}],
+                max_tokens=400,
+                temperature=0,
             )
-            for line in response.strip().split("\n"):
+            finish = (response.finish_reason or "").lower()
+            if finish in _TRUNCATION_FINISH_REASONS:
+                logger.warning(
+                    f"Fact classification output truncated (finish_reason="
+                    f"{response.finish_reason}); missing entries default to semantic"
+                )
+            for line in (response.content or "").strip().split("\n"):
                 line = line.strip().lower()
                 if ":" not in line:
                     continue
@@ -677,6 +785,25 @@ REASON: [brief explanation]
             if target_idx is not None and 0 <= target_idx < len(existing_memories):
                 target_id = existing_memories[target_idx][0]
 
+            # UPDATE/DELETE without a resolvable target would silently drop
+            # the fact downstream. Fall back to ADD (the prompt's own default:
+            # better to store extra than lose information).
+            if (
+                op_type in (MemoryOperationType.UPDATE, MemoryOperationType.DELETE)
+                and target_id is None
+            ):
+                logger.warning(
+                    f"{op_type.value} operation had unresolvable target; "
+                    f"falling back to ADD for fact: {new_fact[:80]}"
+                )
+                return MemoryOperation(
+                    operation=MemoryOperationType.ADD,
+                    content=new_fact,
+                    original_fact=new_fact,
+                    reason=f"{op_type.value} target unresolvable; stored as new"
+                    + (f" ({reason})" if reason else ""),
+                )
+
             # Determine content based on operation
             if op_type == MemoryOperationType.UPDATE:
                 content = merged_content if merged_content else new_fact
@@ -706,15 +833,13 @@ REASON: [brief explanation]
         self,
         user_message: str,
         assistant_response: str,
-        existing_memories: list[
-            tuple[str, str, float]
-        ],  # (id, content, similarity_score)
+        existing_memories: list[tuple[Any, ...]],  # (id, content, score[, semantic])
         *,
         conversation_history: list[dict[str, str]] | None = None,
         conversation_summary: str | None = None,
         similarity_threshold: float = 0.50,  # Only consider highly related memories
         duplicate_threshold: float = 0.92,  # Only skip truly identical facts
-        retrieve_for_fact: Callable[[str], Awaitable[list[tuple[str, str, float]]]]
+        retrieve_for_fact: Callable[[str], Awaitable[list[tuple[Any, ...]]]]
         | None = None,
         classify_types: bool = False,
     ) -> ExtractionResult:
@@ -729,9 +854,12 @@ REASON: [brief explanation]
         Args:
             user_message: Current user message.
             assistant_response: Current assistant response.
-            existing_memories: List of (memory_id, content, similarity_score) from
-                a single search on the user message. Used only when
-                retrieve_for_fact is not provided.
+            existing_memories: List of (memory_id, content, score) or
+                (memory_id, content, score, semantic_score) tuples from a
+                single search on the user message. The optional 4th element
+                is raw cosine similarity, used for the duplicate check (the
+                combined score includes decay and is unsuitable for it).
+                Used only when retrieve_for_fact is not provided.
             conversation_history: Recent messages for context (last 10 recommended).
             conversation_summary: Optional semantic summary.
             similarity_threshold: Min similarity to consider memories related (default 0.3).
@@ -792,17 +920,26 @@ REASON: [brief explanation]
                 else existing_memories
             )
 
+            # Candidates are (id, content, score) or (id, content, score,
+            # semantic_score). The combined score ranks relevance; the
+            # duplicate check needs raw cosine similarity, because the hybrid
+            # combined score includes time decay and sags below the duplicate
+            # threshold within hours even for identical facts.
+            def _similarity(cand: tuple) -> float:  # type: ignore[type-arg]
+                return float(cand[3]) if len(cand) > 3 else float(cand[2])
+
             # Find relevant existing memories for this specific fact
             relevant_memories: list[tuple[str, str]] = []
 
-            for mem_id, content, score in candidates:
-                if score >= similarity_threshold:
-                    relevant_memories.append((mem_id, content))
+            for cand in candidates:
+                if cand[2] >= similarity_threshold:
+                    relevant_memories.append((cand[0], cand[1]))
 
             # Quick duplicate check - if very high similarity to any memory, skip
             is_duplicate = False
-            for _mem_id, content, score in candidates:
-                if score >= duplicate_threshold:
+            for cand in candidates:
+                content = cand[1]
+                if _similarity(cand) >= duplicate_threshold:
                     # Check if this specific fact is the duplicate
                     # (the existing_memories might match the user message, not the fact)
                     # Do a quick content comparison
