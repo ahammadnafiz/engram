@@ -51,6 +51,7 @@ class EmbeddingService:
         provider: EmbeddingProvider,
         cache_size: int = 1000,
         batch_size: int = 100,
+        max_input_chars: int = 30000,
     ) -> None:
         """Initialize the embedding service.
 
@@ -58,10 +59,14 @@ class EmbeddingService:
             provider: The embedding provider instance to use.
             cache_size: LRU cache size for embeddings (0 to disable).
             batch_size: Maximum batch size for batch operations.
+            max_input_chars: Inputs longer than this are truncated before
+                embedding (most embedding models cap around 8k tokens; an
+                overlong fact would otherwise fail the whole operation).
         """
         self._provider = provider
         self._batch_size = batch_size
         self._cache_size = cache_size
+        self._max_input_chars = max_input_chars
         # Use OrderedDict for proper LRU cache behavior
         self._cache: OrderedDict[str, Vector] = OrderedDict()
 
@@ -159,11 +164,22 @@ class EmbeddingService:
             provider=provider,
             cache_size=settings.embedding_cache_size,
             batch_size=settings.embedding_batch_size,
+            max_input_chars=settings.embedding_max_input_chars,
         )
 
     def _compute_cache_key(self, text: str) -> str:
         """Compute cache key for text."""
         return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def _bounded(self, text: str) -> str:
+        """Truncate overlong input (applied before caching and embedding)."""
+        if len(text) > self._max_input_chars:
+            logger.warning(
+                f"Embedding input truncated from {len(text)} to "
+                f"{self._max_input_chars} chars"
+            )
+            return text[: self._max_input_chars]
+        return text
 
     async def embed(self, text: str) -> Vector:
         """Generate embedding for text with LRU caching.
@@ -177,6 +193,7 @@ class EmbeddingService:
         Raises:
             EmbeddingError: If embedding fails.
         """
+        text = self._bounded(text)
         cache_key = self._compute_cache_key(text) if self._cache_size > 0 else ""
 
         # Check cache (with LRU move-to-end on access)
@@ -219,6 +236,7 @@ class EmbeddingService:
         if not texts:
             return []
 
+        texts = [self._bounded(t) for t in texts]
         n_texts = len(texts)
         results: list[Vector | None] = [None] * n_texts
         texts_to_embed: list[tuple[int, str]] = []

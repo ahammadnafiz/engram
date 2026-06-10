@@ -13,6 +13,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from engram.core.exceptions import ConfigurationError, LLMProviderError
+from engram.providers.http_retry import request_with_retries
 from engram.providers.llm.protocol import LLMMessage, LLMProvider, LLMResponse
 from engram.providers.llm.registry import llm_registry
 
@@ -157,23 +158,23 @@ class OpenAILLMProvider(LLMProvider):
 class AnthropicLLMProvider(LLMProvider):
     """LLM provider using Anthropic's API.
 
-    Supports Claude 3 Opus, Sonnet, Haiku, and other Claude models.
+    Supports current Claude models (Haiku, Sonnet, Opus families).
 
     Args:
         api_key: Anthropic API key (required).
-        model: Model name (default: "claude-3-haiku-20240307").
+        model: Model name (default: "claude-haiku-4-5-20251001").
 
     Example:
         provider = AnthropicLLMProvider(
             api_key="sk-ant-...",
-            model="claude-3-haiku-20240307",
+            model="claude-haiku-4-5-20251001",
         )
     """
 
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "claude-3-haiku-20240307",
+        model: str = "claude-haiku-4-5-20251001",
         **_kwargs: Any,
     ) -> None:
         if not api_key:
@@ -321,8 +322,9 @@ class OllamaLLMProvider(LLMProvider):
             if options:
                 call_kwargs["options"] = options
 
-            response = await self._client.post("/api/chat", json=call_kwargs)
-            response.raise_for_status()
+            response = await request_with_retries(
+                lambda: self._client.post("/api/chat", json=call_kwargs)
+            )
             data = response.json()
 
             return LLMResponse(
@@ -423,8 +425,9 @@ class GroqLLMProvider(LLMProvider):
                 call_kwargs["temperature"] = temperature
             call_kwargs.update(kwargs)
 
-            response = await self._client.post("/chat/completions", json=call_kwargs)
-            response.raise_for_status()
+            response = await request_with_retries(
+                lambda: self._client.post("/chat/completions", json=call_kwargs)
+            )
             data = response.json()
 
             return LLMResponse(
@@ -472,7 +475,9 @@ class LiteLLMLLMProvider(LLMProvider):
         provider = LiteLLMLLMProvider(model="gpt-4o-mini", api_key="sk-...")
 
         # Anthropic via LiteLLM
-        provider = LiteLLMLLMProvider(model="claude-3-haiku", api_key="sk-ant-...")
+        provider = LiteLLMLLMProvider(
+            model="claude-haiku-4-5-20251001", api_key="sk-ant-..."
+        )
 
         # Ollama via LiteLLM
         provider = LiteLLMLLMProvider(model="ollama/llama3")
