@@ -7,11 +7,20 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
+
 from engram.core.config import EngramSettings, get_settings
-from engram.core.exceptions import MemoryNotFoundError, QueryError, StorageError
+from engram.core.exceptions import (
+    DuplicateMemoryError,
+    MemoryNotFoundError,
+    QueryError,
+    StorageError,
+)
+from engram.core.serialization import json_dumps
 from engram.memory.models import (
     Memory,
     MemoryCreate,
@@ -26,6 +35,47 @@ if TYPE_CHECKING:
     from engram.storage.postgres import PostgresStorage
 
 logger = logging.getLogger(__name__)
+
+# Insert one memory; on an exact-fact conflict return the existing row's id.
+# (xmax = 0) distinguishes a real insert from a conflict-update.
+_INSERT_MEMORY_SQL = """
+INSERT INTO agent_memory (
+    memory_id, agent_id, user_id, session_id,
+    content, fact, main_content, memory_type, embedding, importance, metadata,
+    created_at, last_accessed_at, access_count
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+ON CONFLICT (agent_id, COALESCE(user_id, ''), fact) DO UPDATE
+    SET memory_id = agent_memory.memory_id
+RETURNING memory_id,
+    (xmax = 0) AS was_inserted
+"""
+
+# Mark older active memories with the same conflict key superseded.
+_SUPERSEDE_CONFLICTS_SQL = """
+UPDATE agent_memory
+SET metadata =
+    metadata
+    || jsonb_build_object(
+        'status', 'superseded',
+        'superseded_by', $4::text,
+        'superseded_at', NOW()::text
+    )
+WHERE agent_id = $1
+    AND ($2::text IS NULL OR user_id = $2)
+    AND memory_id <> $4
+    AND metadata->>'conflict_key' = $3
+    AND COALESCE(metadata->>'status', 'active') <> 'superseded'
+"""
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors (0.0 when either is zero)."""
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 class MemoryStore:
@@ -104,13 +154,19 @@ class MemoryStore:
 
         This catches near-duplicates that the exact-text unique index misses
         (e.g. same fact with different punctuation or wording).
+
+        Scope matches the unique index exactly (agent + COALESCE(user_id, '')),
+        and superseded memories never block a re-insert: a corrected fact that
+        gets re-asserted must become active again, not resolve to the hidden
+        superseded row.
         """
         row = await self._storage.fetchone(
             """
             SELECT memory_id, 1 - (embedding <=> $1::vector) AS score
             FROM agent_memory
             WHERE agent_id = $2
-                AND ($3::text IS NULL OR user_id = $3)
+                AND COALESCE(user_id, '') = COALESCE($3::text, '')
+                AND COALESCE(metadata->>'status', 'active') <> 'superseded'
                 AND embedding IS NOT NULL
             ORDER BY embedding <=> $1::vector
             LIMIT 1
@@ -161,6 +217,15 @@ class MemoryStore:
                 logger.debug(
                     f"Near-duplicate (>= {threshold}) of {dup_id}; skipping insert"
                 )
+                # The resolved memory still wins its conflict slot
+                conflict_key = create.metadata.get("conflict_key")
+                if conflict_key:
+                    await self.supersede_conflicts(
+                        agent_id=create.agent_id,
+                        user_id=create.user_id,
+                        conflict_key=str(conflict_key),
+                        winner_memory_id=dup_id,
+                    )
                 return await self.get_without_access_update(dup_id)
 
         memory = Memory(
@@ -182,35 +247,36 @@ class MemoryStore:
             if create.user_id:
                 await self._ensure_user_exists(create.user_id)
 
-            # Use RETURNING to detect if insert actually happened
-            # ON CONFLICT uses fact (not content) for duplicate detection
-            row = await self._storage.fetchone(
-                """
-                INSERT INTO agent_memory (
-                    memory_id, agent_id, user_id, session_id,
-                    content, fact, main_content, memory_type, embedding, importance, metadata,
-                    created_at, last_accessed_at, access_count
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                ON CONFLICT (agent_id, COALESCE(user_id, ''), fact) DO UPDATE
-                    SET memory_id = agent_memory.memory_id
-                RETURNING memory_id,
-                    (xmax = 0) AS was_inserted
-                """,
-                memory.memory_id,
-                memory.agent_id,
-                memory.user_id,
-                memory.session_id,
-                fact_text,  # content (backward compat)
-                fact_text,  # fact (new)
-                create.main_content,  # main_content (new)
-                memory.memory_type,  # memory_type (new)
-                json.dumps(memory.embedding),  # Store as JSON for vector type
-                memory.importance,
-                json.dumps(memory.metadata),
-                memory.created_at,
-                memory.last_accessed_at,
-                memory.access_count,
-            )
+            conflict_key = memory.metadata.get("conflict_key")
+
+            # Insert and conflict-supersede atomically: a crash between the
+            # two must not leave two active memories in the same slot.
+            async with self._storage.transaction() as conn:
+                row = await conn.fetchrow(
+                    _INSERT_MEMORY_SQL,
+                    memory.memory_id,
+                    memory.agent_id,
+                    memory.user_id,
+                    memory.session_id,
+                    fact_text,  # content (backward compat)
+                    fact_text,  # fact (new)
+                    create.main_content,  # main_content (new)
+                    memory.memory_type,  # memory_type (new)
+                    json.dumps(memory.embedding),  # Store as JSON for vector type
+                    memory.importance,
+                    json_dumps(memory.metadata),
+                    memory.created_at,
+                    memory.last_accessed_at,
+                    memory.access_count,
+                )
+                if row and conflict_key:
+                    await conn.execute(
+                        _SUPERSEDE_CONFLICTS_SQL,
+                        memory.agent_id,
+                        memory.user_id,
+                        str(conflict_key),
+                        row["memory_id"],
+                    )
 
             if row and not row["was_inserted"]:
                 # Memory with same fact already exists
@@ -282,36 +348,65 @@ class MemoryStore:
         # Near-duplicate guard against existing memories (1.0 disables). Exact
         # text duplicates are still handled by the ON CONFLICT clause below;
         # this catches vector-near-identical facts the unique index misses.
+        # Near-dups of existing memories resolve to the existing memory (same
+        # semantics as add()); vector-near-identical facts *within* the batch
+        # collapse into the first occurrence.
         threshold = self._settings.near_duplicate_threshold
+        plan: list[Memory | str] = []  # Memory -> insert, str -> existing id
         if threshold < 1.0:
-            kept: list[Memory] = []
+            inserting: list[Memory] = []
             for m in memories:
                 assert m.embedding is not None
                 dup_id = await self._find_near_duplicate(
                     m.agent_id, m.user_id, m.embedding, threshold
                 )
-                if dup_id is None:
-                    kept.append(m)
-                else:
-                    logger.debug(f"Batch near-duplicate of {dup_id}; skipping")
-            memories = kept
+                if dup_id is not None:
+                    logger.debug(f"Batch near-duplicate of {dup_id}; resolving")
+                    plan.append(dup_id)
+                    continue
+                in_batch_dup = any(
+                    k.embedding is not None
+                    and k.agent_id == m.agent_id
+                    and (k.user_id or "") == (m.user_id or "")
+                    and _cosine_similarity(m.embedding, k.embedding) >= threshold
+                    for k in inserting
+                )
+                if in_batch_dup:
+                    logger.debug("In-batch near-duplicate; skipping")
+                    continue
+                inserting.append(m)
+                plan.append(m)
+        else:
+            plan = list(memories)
 
-        if not memories:
+        if not plan:
             return []
 
-        # Batch insert (skip duplicates based on fact)
+        # Insert per-row with RETURNING so exact-fact conflicts resolve to the
+        # real existing memory instead of a phantom id, all in one transaction.
         try:
-            await self._storage.executemany(
-                """
-                INSERT INTO agent_memory (
-                    memory_id, agent_id, user_id, session_id,
-                    content, fact, main_content, memory_type, embedding, importance, metadata,
-                    created_at, last_accessed_at, access_count
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                ON CONFLICT (agent_id, COALESCE(user_id, ''), fact) DO NOTHING
-                """,
-                [
-                    (
+            results: list[Memory] = []
+            async with self._storage.transaction() as conn:
+                for item in plan:
+                    if isinstance(item, str):
+                        existing_row = await conn.fetchrow(
+                            """
+                            SELECT
+                                memory_id, agent_id, user_id, session_id,
+                                content, fact, main_content, memory_type, embedding,
+                                importance, access_count,
+                                created_at, last_accessed_at, metadata
+                            FROM agent_memory
+                            WHERE memory_id = $1
+                            """,
+                            item,
+                        )
+                        if existing_row is not None:
+                            results.append(self._row_to_memory(existing_row))
+                        continue
+                    m = item
+                    row = await conn.fetchrow(
+                        _INSERT_MEMORY_SQL,
                         m.memory_id,
                         m.agent_id,
                         m.user_id,
@@ -322,16 +417,39 @@ class MemoryStore:
                         m.memory_type,
                         json.dumps(m.embedding),
                         m.importance,
-                        json.dumps(m.metadata),
+                        json_dumps(m.metadata),
                         m.created_at,
                         m.last_accessed_at,
                         m.access_count,
                     )
-                    for m in memories
-                ],
-            )
-            logger.debug(f"Added {len(memories)} memories in batch")
-            return memories
+                    resolved_id = row["memory_id"]
+                    conflict_key = m.metadata.get("conflict_key")
+                    if conflict_key:
+                        await conn.execute(
+                            _SUPERSEDE_CONFLICTS_SQL,
+                            m.agent_id,
+                            m.user_id,
+                            str(conflict_key),
+                            resolved_id,
+                        )
+                    if row["was_inserted"]:
+                        results.append(m)
+                    else:
+                        existing_row = await conn.fetchrow(
+                            """
+                            SELECT
+                                memory_id, agent_id, user_id, session_id,
+                                content, fact, main_content, memory_type, embedding,
+                                importance, access_count,
+                                created_at, last_accessed_at, metadata
+                            FROM agent_memory
+                            WHERE memory_id = $1
+                            """,
+                            resolved_id,
+                        )
+                        results.append(self._row_to_memory(existing_row))
+            logger.debug(f"Added {len(results)} memories in batch")
+            return results
 
         except Exception as e:
             raise StorageError(f"Failed to add memories in batch: {e}") from e
@@ -468,9 +586,9 @@ class MemoryStore:
                 """,
                 memory_id,
                 new_content,
-                json.dumps(new_embedding),
+                json.dumps(new_embedding) if new_embedding is not None else None,
                 new_importance,
-                json.dumps(new_metadata),
+                json_dumps(new_metadata),
                 new_memory_type,
             )
 
@@ -481,6 +599,14 @@ class MemoryStore:
 
         except MemoryNotFoundError:
             raise
+        except asyncpg.UniqueViolationError as e:
+            # The new content equals another memory's fact for the same
+            # agent/user. Surface a typed error so callers (e.g. the
+            # add_conversation merge path) can treat it as "already stored".
+            raise DuplicateMemoryError(
+                "Updated content collides with an existing memory's fact",
+                memory_id=memory_id,
+            ) from e
         except Exception as e:
             raise StorageError(f"Failed to update memory: {e}") from e
 
@@ -495,21 +621,7 @@ class MemoryStore:
         """Mark older active memories with the same conflict key superseded."""
         try:
             result = await self._storage.execute(
-                """
-                UPDATE agent_memory
-                SET metadata =
-                    metadata
-                    || jsonb_build_object(
-                        'status', 'superseded',
-                        'superseded_by', $4::text,
-                        'superseded_at', NOW()::text
-                    )
-                WHERE agent_id = $1
-                    AND ($2::text IS NULL OR user_id = $2)
-                    AND memory_id <> $4
-                    AND metadata->>'conflict_key' = $3
-                    AND COALESCE(metadata->>'status', 'active') <> 'superseded'
-                """,
+                _SUPERSEDE_CONFLICTS_SQL,
                 agent_id,
                 user_id,
                 conflict_key,
@@ -774,6 +886,7 @@ class MemoryStore:
                 limit=query.limit,
                 metadata_filter=query.metadata_filter,
                 memory_types=query.memory_types,
+                min_score=query.min_score,
             )
         elif mode == "keyword":
             return await self._keyword_search(query)
@@ -805,10 +918,12 @@ class MemoryStore:
                 settings.weight_decay,  # $8
                 settings.weight_importance,  # $9
                 settings.decay_rate,  # $10
-                json.dumps(query.metadata_filter)
+                json_dumps(query.metadata_filter)
                 if query.metadata_filter
                 else None,  # $11
                 list(query.memory_types) if query.memory_types else None,  # $12
+                query.min_score,  # $13
+                settings.text_search_config,  # $14
             )
 
             results: list[SearchResult] = []
@@ -854,7 +969,11 @@ class MemoryStore:
         try:
             settings = self._settings
 
-            # Use keyword-focused search with text ranking on fact_tsv
+            # Use keyword-focused search with text ranking on fact_tsv.
+            # Decay matches hybrid/semantic: calculate_decay on
+            # last_accessed_at per hour (not per-day on created_at).
+            # min_score filters BEFORE the LIMIT so qualifying matches
+            # beyond the first page are not lost.
             sql = """
             WITH keyword_matches AS (
                 SELECT
@@ -870,19 +989,22 @@ class MemoryStore:
                     m.metadata,
                     m.created_at,
                     m.last_accessed_at,
-                    ts_rank(fact_tsv, plainto_tsquery('english', $1)) AS keyword_rank,
-                    POWER($5, EXTRACT(EPOCH FROM (NOW() - m.created_at)) / 86400.0) AS decay_score
+                    ts_rank(fact_tsv, plainto_tsquery($9::regconfig, $1)) AS keyword_rank,
+                    calculate_decay(m.last_accessed_at, $5) AS decay_score
                 FROM agent_memory m
                 WHERE m.agent_id = $2
                     AND ($3::TEXT IS NULL OR m.user_id = $3)
                     AND ($6::jsonb IS NULL OR m.metadata @> $6::jsonb)
                     AND ($7::text[] IS NULL OR m.memory_type = ANY($7))
                     AND COALESCE(m.metadata->>'status', 'active') <> 'superseded'
-                    AND fact_tsv @@ plainto_tsquery('english', $1)
+                    AND fact_tsv @@ plainto_tsquery($9::regconfig, $1)
             )
-            SELECT *,
-                (keyword_rank * 0.7 + decay_score * 0.2 + importance * 0.1) AS score
-            FROM keyword_matches
+            SELECT * FROM (
+                SELECT *,
+                    (keyword_rank * 0.7 + decay_score * 0.2 + importance * 0.1) AS score
+                FROM keyword_matches
+            ) scored
+            WHERE score >= $8
             ORDER BY score DESC
             LIMIT $4
             """
@@ -894,10 +1016,12 @@ class MemoryStore:
                 query.user_id,  # $3
                 query.limit,  # $4
                 settings.decay_rate,  # $5
-                json.dumps(query.metadata_filter)
+                json_dumps(query.metadata_filter)
                 if query.metadata_filter
                 else None,  # $6
                 list(query.memory_types) if query.memory_types else None,  # $7
+                query.min_score,  # $8
+                settings.text_search_config,  # $9
             )
 
             results: list[SearchResult] = []
@@ -945,6 +1069,7 @@ class MemoryStore:
         limit: int = 10,
         metadata_filter: dict[str, Any] | None = None,
         memory_types: list[str] | None = None,
+        min_score: float = 0.0,
     ) -> list[SearchResult]:
         """Pure semantic search using vector similarity.
 
@@ -955,6 +1080,7 @@ class MemoryStore:
             limit: Maximum results.
             metadata_filter: Optional metadata containment filter.
             memory_types: Optional list of memory types to restrict to.
+            min_score: Minimum final score (filtered before the limit).
 
         Returns:
             List of search results.
@@ -972,8 +1098,9 @@ class MemoryStore:
                 user_id,
                 limit,
                 settings.decay_rate,
-                json.dumps(metadata_filter) if metadata_filter else None,
+                json_dumps(metadata_filter) if metadata_filter else None,
                 list(memory_types) if memory_types else None,
+                min_score,
             )
 
             results: list[SearchResult] = []

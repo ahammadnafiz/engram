@@ -18,6 +18,10 @@
 -- $10: decay_rate (FLOAT) - Decay rate per hour (default: 0.995)
 -- $11: metadata_filter (JSONB) - Optional metadata containment filter (NULL for none)
 -- $12: memory_types (TEXT[]) - Optional memory type filter (NULL for all types)
+-- $13: min_score (FLOAT) - Minimum combined score (applied BEFORE the final
+--      LIMIT so qualifying matches beyond the first page are not lost)
+-- $14: text_search_config (TEXT) - Text search configuration name (must match
+--      the configuration of the generated fact_tsv column)
 
 WITH 
 -- Semantic search on fact embeddings (2x overfetch for RRF, minimum 20)
@@ -56,7 +60,7 @@ keyword_search AS (
         ts_rank(fact_tsv, query, 32) AS keyword_score_raw,
         ROW_NUMBER() OVER (ORDER BY ts_rank(fact_tsv, query, 32) DESC) AS keyword_rank
     FROM agent_memory,
-         plainto_tsquery('english', $2) AS query
+         plainto_tsquery($14::regconfig, $2) AS query
     WHERE agent_id = $3
         AND ($4::text IS NULL OR user_id = $4)
         AND ($11::jsonb IS NULL OR metadata @> $11::jsonb)
@@ -171,5 +175,6 @@ SELECT
     combined_score AS score
 FROM final_scored
 WHERE combined_score > 0
+    AND combined_score >= $13
 ORDER BY combined_score DESC
 LIMIT $5;

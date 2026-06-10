@@ -9,6 +9,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+def wire_transaction(storage: MagicMock) -> MagicMock:
+    """Route storage.transaction() connection calls to the storage mocks.
+
+    MemoryStore now runs insert + supersede on one connection inside a
+    transaction; this keeps fetchone/execute mocks authoritative for it.
+    """
+    conn = MagicMock()
+
+    async def _fetchrow(query: str, *args: object) -> object:
+        return await storage.fetchone(query, *args)
+
+    async def _execute(query: str, *args: object) -> object:
+        return await storage.execute(query, *args)
+
+    conn.fetchrow = AsyncMock(side_effect=_fetchrow)
+    conn.execute = AsyncMock(side_effect=_execute)
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=conn)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    storage.transaction = MagicMock(return_value=tx)
+    return storage
+
+
 class TestMemoryStoreAdd:
     """Tests for MemoryStore.add() method."""
 
@@ -21,7 +44,7 @@ class TestMemoryStoreAdd:
             return_value={"memory_id": "mem_123", "was_inserted": True}
         )
         storage.fetchval = AsyncMock(return_value=1)
-        return storage
+        return wire_transaction(storage)
 
     @pytest.fixture
     def mock_embedding(self) -> MagicMock:
@@ -198,23 +221,40 @@ class TestMemoryStoreAdd:
         assert "episodic" in mock_storage.fetchone.call_args.args
 
     @pytest.mark.asyncio
-    async def test_add_batch_filters_near_duplicates(
+    async def test_add_batch_resolves_near_duplicates_to_existing(
         self, mock_storage: MagicMock, mock_embedding: MagicMock
     ) -> None:
-        """Batch add drops items that are near-duplicates of existing memories."""
+        """Batch items that near-duplicate an existing memory resolve to it
+        (same semantics as add()); novel items are inserted."""
         from engram.memory.models import MemoryCreate
         from engram.memory.store import MemoryStore
 
         mock_embedding.embed_batch = AsyncMock(
             return_value=[[0.1] * 1536, [0.2] * 1536]
         )
+        existing_dup_row = {
+            "memory_id": "dup",
+            "agent_id": "agent_1",
+            "user_id": None,
+            "session_id": None,
+            "content": "existing dup fact",
+            "fact": "existing dup fact",
+            "main_content": None,
+            "embedding": json.dumps([0.1] * 1536),
+            "importance": 0.5,
+            "access_count": 0,
+            "metadata": "{}",
+            "created_at": datetime.now(timezone.utc),
+            "last_accessed_at": datetime.now(timezone.utc),
+        }
         mock_storage.fetchone = AsyncMock(
             side_effect=[
                 {"memory_id": "dup", "score": 0.99},  # first item near-dup
                 {"memory_id": "x", "score": 0.10},  # second novel
+                existing_dup_row,  # resolve dup -> existing memory
+                {"memory_id": "mem_new", "was_inserted": True},  # insert novel
             ]
         )
-        mock_storage.executemany = AsyncMock()
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
 
         out = await store.add_batch(
@@ -224,8 +264,9 @@ class TestMemoryStoreAdd:
             ]
         )
 
-        assert len(out) == 1
-        assert out[0].content == "novel fact"
+        assert len(out) == 2
+        assert out[0].memory_id == "dup"  # resolved, not phantom
+        assert out[1].content == "novel fact"
 
 
 class TestMemoryStoreGet:
