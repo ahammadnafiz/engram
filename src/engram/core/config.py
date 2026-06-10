@@ -15,6 +15,7 @@ Provider Architecture:
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -101,6 +102,23 @@ class EngramSettings(BaseSettings):
     )
     embedding_batch_size: int = Field(default=100, ge=1, le=2048)
     embedding_cache_size: int = Field(default=1000, ge=0)
+    embedding_max_input_chars: int = Field(
+        default=30000,
+        ge=100,
+        description=(
+            "Inputs longer than this are truncated before embedding instead "
+            "of failing at the provider's token limit."
+        ),
+    )
+    allow_embedding_dimension_change: bool = Field(
+        default=False,
+        description=(
+            "Permit connect() to change the vector column dimension when "
+            "existing embeddings would be cleared. Default False: a provider/"
+            "model config change that invalidates stored embeddings raises "
+            "instead of silently destroying them."
+        ),
+    )
 
     # -------------------------------------------------------------------------
     # LLM Provider Settings
@@ -148,12 +166,40 @@ class EngramSettings(BaseSettings):
             "duplicate of an existing one and not re-inserted (1.0 disables the guard)."
         ),
     )
+    hnsw_ef_search: int | None = Field(
+        default=None,
+        ge=1,
+        le=1000,
+        description=(
+            "Optional hnsw.ef_search override per connection. Raise this when "
+            "many agents share the index and filtered vector recall drops."
+        ),
+    )
+    text_search_config: str = Field(
+        default="english",
+        description=(
+            "PostgreSQL text search configuration for keyword search and the "
+            "generated tsvector columns (e.g. 'english', 'german', 'simple'). "
+            "Changing it on an existing database rebuilds the tsvector columns."
+        ),
+    )
 
     # -------------------------------------------------------------------------
     # Logging
     # -------------------------------------------------------------------------
     log_level: str = Field(default="INFO")
     log_sql_queries: bool = Field(default=False)
+
+    @field_validator("text_search_config")
+    @classmethod
+    def validate_text_search_config(cls, v: str) -> str:
+        """Restrict to a safe identifier (it is interpolated into DDL)."""
+        if not re.fullmatch(r"[a-z_]+", v):
+            raise ValueError(
+                f"Invalid text_search_config {v!r}: must match [a-z_]+ "
+                "(a PostgreSQL text search configuration name)"
+            )
+        return v
 
     @field_validator("embedding_dimension", mode="before")
     @classmethod

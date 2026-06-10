@@ -10,11 +10,16 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 
 from engram.core.config import EngramSettings, get_settings
-from engram.core.exceptions import ConnectionError, ConnectionPoolExhaustedError
+from engram.core.exceptions import (
+    ConfigurationError,
+    ConnectionError,
+    ConnectionPoolExhaustedError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -25,6 +30,18 @@ logger = logging.getLogger(__name__)
 
 # SQL directory path
 SQL_DIR = Path(__file__).parent.parent / "sql"
+
+
+def _redact_dsn(dsn: str) -> str:
+    """Mask the password component of a DSN for safe logging."""
+    try:
+        parsed = urlsplit(dsn)
+        if parsed.password is None:
+            return dsn
+        netloc = parsed.netloc.replace(f":{parsed.password}@", ":***@", 1)
+        return urlunsplit(parsed._replace(netloc=netloc))
+    except (ValueError, AttributeError):
+        return "<unparseable dsn>"
 
 
 class PostgresStorage:
@@ -90,7 +107,7 @@ class PostgresStorage:
         try:
             logger.info(
                 "Connecting to PostgreSQL",
-                extra={"url": self._settings.database_url[:50] + "..."},
+                extra={"url": _redact_dsn(self._settings.database_url)},
             )
 
             self._pool = await asyncpg.create_pool(
@@ -99,6 +116,7 @@ class PostgresStorage:
                 max_size=self._settings.max_pool_size,
                 timeout=self._settings.connection_timeout,
                 command_timeout=self._settings.command_timeout,
+                setup=self._setup_connection,
             )
             self._connected = True
             logger.info("Connected to PostgreSQL successfully")
@@ -106,13 +124,40 @@ class PostgresStorage:
         except asyncpg.PostgresError as e:
             raise ConnectionError(
                 f"Failed to connect to PostgreSQL: {e}",
-                dsn=self._settings.database_url,
+                dsn=_redact_dsn(self._settings.database_url),
             ) from e
         except TimeoutError as e:
             raise ConnectionError(
                 "Connection timeout",
                 timeout=self._settings.connection_timeout,
             ) from e
+        except OSError as e:
+            raise ConnectionError(
+                f"Failed to connect to PostgreSQL: {e}",
+                dsn=_redact_dsn(self._settings.database_url),
+            ) from e
+
+    async def _setup_connection(self, conn: Connection) -> None:
+        """Per-connection session settings for filtered vector search recall.
+
+        One global HNSW index is filtered by agent_id after the scan; with
+        many agents, ef_search candidates can all belong to other agents and
+        recall collapses. Iterative scans (pgvector >= 0.8) keep scanning
+        until enough rows survive the filter; strict_order preserves exact
+        distance ordering. Both SETs are best-effort: older pgvector versions
+        reject them and search still works (with the old recall behavior).
+        """
+        try:
+            await conn.execute("SET hnsw.iterative_scan = strict_order")
+        except asyncpg.PostgresError:
+            logger.debug("pgvector iterative scans unavailable (< 0.8); skipped")
+        if self._settings.hnsw_ef_search is not None:
+            try:
+                await conn.execute(
+                    f"SET hnsw.ef_search = {int(self._settings.hnsw_ef_search)}"
+                )
+            except asyncpg.PostgresError:
+                logger.debug("hnsw.ef_search not supported; skipped")
 
     async def close(self) -> None:
         """Close the connection pool.
@@ -171,6 +216,22 @@ class PostgresStorage:
                 pool_size=self._settings.max_pool_size,
                 timeout=self._settings.connection_timeout,
             ) from e
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[Connection]:
+        """Acquire a connection and open a transaction on it.
+
+        Statements executed on the yielded connection commit together and
+        roll back together. Use this for multi-statement operations that
+        must be atomic (e.g. insert + conflict supersede).
+
+        Example:
+            async with storage.transaction() as conn:
+                await conn.execute("INSERT ...")
+                await conn.execute("UPDATE ...")
+        """
+        async with self.acquire() as conn, conn.transaction():
+            yield conn
 
     async def execute(self, query: str, *args: Any) -> str:
         """Execute a query without returning results.
@@ -270,6 +331,10 @@ class PostgresStorage:
         schema_sql = self.load_sql("schema.sql")
         await self.execute(schema_sql)
 
+        # Pre-0.2 databases lack the fact/main_content columns; migration 001
+        # adds them idempotently (it no-ops on fresh and current schemas).
+        await self.execute(self.load_sql("migrations/001_add_fact_columns.sql"))
+
         # Idempotent column adds for existing databases (CREATE TABLE IF NOT
         # EXISTS does not add columns to a pre-existing table).
         await self.execute(
@@ -307,9 +372,83 @@ class PostgresStorage:
         )
         logger.info("Database schema initialized")
 
+        # Align the generated tsvector columns with the configured language
+        await self._ensure_text_search_config(self._settings.text_search_config)
+
         # Adjust vector dimension if specified
         if embedding_dimension is not None:
             await self._ensure_vector_dimension(embedding_dimension)
+
+    async def _ensure_text_search_config(self, config: str) -> None:
+        """Rebuild the generated tsvector columns when the language changed.
+
+        The schema ships with 'english'; non-English deployments set
+        ENGRAM_TEXT_SEARCH_CONFIG and the columns are recreated with that
+        configuration (a table rewrite — cheap on fresh DBs, logged on
+        populated ones).
+        """
+        import re as _re
+
+        if not _re.fullmatch(r"[a-z_]+", config):
+            raise ConfigurationError(
+                f"Invalid text_search_config {config!r}: must match [a-z_]+"
+            )
+
+        expr = await self.fetchval(
+            """
+            SELECT pg_get_expr(d.adbin, d.adrelid)
+            FROM pg_attrdef d
+            JOIN pg_attribute a
+                ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+            WHERE d.adrelid = 'agent_memory'::regclass
+                AND a.attname = 'fact_tsv'
+            """
+        )
+        current = None
+        if expr:
+            match = _re.search(r"'([a-z_]+)'::regconfig", expr)
+            current = match.group(1) if match else None
+
+        if current == config:
+            return
+
+        logger.warning(
+            f"Rebuilding tsvector columns for text search config "
+            f"{current!r} -> {config!r} (table rewrite)"
+        )
+        await self.execute("DROP INDEX IF EXISTS idx_memory_fact_tsv;")
+        await self.execute("DROP INDEX IF EXISTS idx_memory_main_content_tsv;")
+        await self.execute("ALTER TABLE agent_memory DROP COLUMN IF EXISTS fact_tsv;")
+        await self.execute(
+            "ALTER TABLE agent_memory DROP COLUMN IF EXISTS main_content_tsv;"
+        )
+        # config is validated against [a-z_]+ above; safe to interpolate.
+        await self.execute(
+            f"""
+            ALTER TABLE agent_memory ADD COLUMN fact_tsv TSVECTOR
+                GENERATED ALWAYS AS (to_tsvector('{config}', fact)) STORED;
+            """
+        )
+        await self.execute(
+            f"""
+            ALTER TABLE agent_memory ADD COLUMN main_content_tsv TSVECTOR
+                GENERATED ALWAYS AS (
+                    CASE WHEN main_content IS NOT NULL
+                    THEN to_tsvector('{config}', main_content)
+                    ELSE NULL END
+                ) STORED;
+            """
+        )
+        await self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_fact_tsv "
+            "ON agent_memory USING GIN (fact_tsv);"
+        )
+        await self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_main_content_tsv "
+            "ON agent_memory USING GIN (main_content_tsv) "
+            "WHERE main_content IS NOT NULL;"
+        )
+        logger.info(f"tsvector columns now use text search config '{config}'")
 
     async def _get_current_vector_dimension(self) -> int | None:
         """Get the current vector column dimension from the database.
@@ -350,13 +489,31 @@ class PostgresStorage:
             logger.debug(f"Vector dimension already set to {target_dimension}")
             return
 
-        logger.info(
-            f"Adjusting vector dimension from {current_dimension} to {target_dimension}"
-        )
-
         # Check if there's existing data that would be lost
         row_count = await self.fetchval(
             "SELECT COUNT(*) FROM agent_memory WHERE embedding IS NOT NULL"
+        )
+
+        if (
+            row_count
+            and row_count > 0
+            and not self._settings.allow_embedding_dimension_change
+        ):
+            raise ConfigurationError(
+                f"Embedding dimension changed from {current_dimension} to "
+                f"{target_dimension}, which would clear {row_count} stored "
+                "embeddings and make those memories invisible to vector "
+                "search. If this is intentional, set "
+                "ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=true and re-embed "
+                "existing memories afterwards; otherwise restore the previous "
+                "embedding provider/model configuration.",
+                current_dimension=current_dimension,
+                target_dimension=target_dimension,
+                affected_embeddings=row_count,
+            )
+
+        logger.info(
+            f"Adjusting vector dimension from {current_dimension} to {target_dimension}"
         )
 
         if row_count and row_count > 0:
