@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from engram.core.exceptions import EngramError, StorageError
+from engram.core.serialization import json_dumps
 from engram.task.models import (
     AgentEvent,
     EventCreate,
@@ -16,8 +17,26 @@ from engram.task.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from engram.core._types import AgentId, Metadata, SessionId, UserId
     from engram.storage.postgres import PostgresStorage
+
+
+_INSERT_EVENT_SQL = """
+INSERT INTO agent_events (
+    event_id, task_run_id, session_id, agent_id, user_id,
+    role, event_type, content, payload, metadata, created_at,
+    deleted_at, redacted_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+"""
+
+_INSERT_JOB_SQL = """
+INSERT INTO memory_jobs (
+    job_id, job_type, status, attempts, payload, error,
+    locked_until, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+"""
 
 
 class TaskNotFoundError(EngramError):
@@ -95,7 +114,7 @@ class TaskMemoryManager:
                 task.goal,
                 task.status,
                 task.outcome,
-                json.dumps(task.metadata),
+                json_dumps(task.metadata),
                 task.started_at,
                 task.ended_at,
                 task.updated_at,
@@ -172,6 +191,12 @@ class TaskMemoryManager:
         *,
         outcome: str | None = None,
     ) -> TaskRun:
+        """Change a task's status.
+
+        Terminal statuses (completed/failed/cancelled) are final: setting the
+        same terminal status again is an idempotent no-op, but transitioning
+        out of a terminal status raises EngramError.
+        """
         ended_expr = (
             "NOW()" if status in {"completed", "failed", "cancelled"} else "ended_at"
         )
@@ -183,6 +208,10 @@ class TaskMemoryManager:
                 ended_at = {ended_expr},
                 updated_at = NOW()
             WHERE task_run_id = $1 AND deleted_at IS NULL
+                AND (
+                    status NOT IN ('completed', 'failed', 'cancelled')
+                    OR status = $2
+                )
             RETURNING task_run_id, agent_id, user_id, session_id, goal, status,
                       outcome, metadata, started_at, ended_at, updated_at, deleted_at
             """,
@@ -191,7 +220,15 @@ class TaskMemoryManager:
             outcome,
         )
         if row is None:
-            raise TaskNotFoundError(f"Task not found: {task_run_id}")
+            # Distinguish missing task from an invalid transition
+            task = await self.get_task(task_run_id)  # raises TaskNotFoundError
+            raise EngramError(
+                f"Task {task_run_id} is terminal ({task.status}); "
+                f"cannot transition to {status}",
+                task_run_id=task_run_id,
+                current_status=task.status,
+                requested_status=status,
+            )
         return self._row_to_task(row)
 
     async def soft_delete_task(self, task_run_id: str) -> TaskRun:
@@ -235,31 +272,99 @@ class TaskMemoryManager:
             metadata=create.metadata,
         )
         try:
-            await self._storage.execute(
-                """
-                INSERT INTO agent_events (
-                    event_id, task_run_id, session_id, agent_id, user_id,
-                    role, event_type, content, payload, metadata, created_at,
-                    deleted_at, redacted_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                """,
-                event.event_id,
-                event.task_run_id,
-                event.session_id,
-                event.agent_id,
-                event.user_id,
-                event.role,
-                event.event_type,
-                event.content,
-                json.dumps(event.payload),
-                json.dumps(event.metadata),
-                event.created_at,
-                event.deleted_at,
-                event.redacted_at,
-            )
+            await self._storage.execute(*self._event_insert_args(event))
             return event
         except Exception as e:
             raise StorageError(f"Failed to record event: {e}") from e
+
+    def _event_insert_args(self, event: AgentEvent) -> tuple[Any, ...]:
+        return (
+            _INSERT_EVENT_SQL,
+            event.event_id,
+            event.task_run_id,
+            event.session_id,
+            event.agent_id,
+            event.user_id,
+            event.role,
+            event.event_type,
+            event.content,
+            json_dumps(event.payload),
+            json_dumps(event.metadata),
+            event.created_at,
+            event.deleted_at,
+            event.redacted_at,
+        )
+
+    async def record_events(
+        self,
+        creates: list[EventCreate],
+        *,
+        job_type: str | None = None,
+        job_payload: Callable[[list[AgentEvent]], dict[str, Any]] | None = None,
+    ) -> tuple[list[AgentEvent], MemoryJob | None]:
+        """Record several events — and optionally a derivation job — atomically.
+
+        Used by record_turn(): a crash between writing the turn's events and
+        enqueueing its ingestion job would otherwise leave a turn that is
+        recorded but never processed (or vice versa).
+
+        Args:
+            creates: Events to record, in order.
+            job_type: Optional memory job type to enqueue with the events.
+            job_payload: Builds the job payload from the created events
+                (their event_ids are assigned before insert).
+
+        Returns:
+            (events, job) — job is None when job_type wasn't given.
+        """
+        if not creates:
+            return [], None
+
+        for agent_id in {c.agent_id for c in creates}:
+            await self._ensure_agent_exists(agent_id)
+        for user_id in {c.user_id for c in creates if c.user_id}:
+            await self._ensure_user_exists(user_id)
+
+        events = [
+            AgentEvent(
+                task_run_id=create.task_run_id,
+                session_id=create.session_id,
+                agent_id=create.agent_id,
+                user_id=create.user_id,
+                role=create.role,
+                event_type=create.event_type,
+                content=create.content,
+                payload=create.payload,
+                metadata=create.metadata,
+            )
+            for create in creates
+        ]
+
+        job: MemoryJob | None = None
+        if job_type is not None:
+            payload = job_payload(events) if job_payload is not None else {}
+            job = MemoryJob(job_type=job_type, payload=payload)  # type: ignore[arg-type]
+
+        try:
+            async with self._storage.transaction() as conn:
+                for event in events:
+                    await conn.execute(*self._event_insert_args(event))
+                if job is not None:
+                    await conn.execute(
+                        _INSERT_JOB_SQL,
+                        job.job_id,
+                        job.job_type,
+                        job.status,
+                        job.attempts,
+                        json_dumps(job.payload),
+                        job.error,
+                        job.locked_until,
+                        job.created_at,
+                        job.updated_at,
+                    )
+            return events, job
+        except Exception as e:
+            raise StorageError(f"Failed to record events atomically: {e}") from e
 
     async def list_events(
         self,
@@ -298,10 +403,10 @@ class TaskMemoryManager:
                        deleted_at, redacted_at
                 FROM agent_events
                 WHERE {where}
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, event_id DESC
                 LIMIT ${idx}
             )
-            SELECT * FROM recent ORDER BY created_at ASC
+            SELECT * FROM recent ORDER BY created_at ASC, event_id ASC
             """,
             *params,
         )
@@ -341,13 +446,13 @@ class TaskMemoryManager:
                 checkpoint.agent_id,
                 checkpoint.user_id,
                 checkpoint.summary,
-                json.dumps(checkpoint.completed_steps),
-                json.dumps(checkpoint.pending_steps),
-                json.dumps(checkpoint.decisions),
-                json.dumps(checkpoint.blockers),
-                json.dumps(checkpoint.artifacts),
-                json.dumps(checkpoint.source_event_ids),
-                json.dumps(checkpoint.metadata),
+                json_dumps(checkpoint.completed_steps),
+                json_dumps(checkpoint.pending_steps),
+                json_dumps(checkpoint.decisions),
+                json_dumps(checkpoint.blockers),
+                json_dumps(checkpoint.artifacts),
+                json_dumps(checkpoint.source_event_ids),
+                json_dumps(checkpoint.metadata),
                 checkpoint.created_at,
             )
             return checkpoint
@@ -386,17 +491,12 @@ class TaskMemoryManager:
     ) -> MemoryJob:
         job = MemoryJob(job_type=job_type, payload=payload)  # type: ignore[arg-type]
         await self._storage.execute(
-            """
-            INSERT INTO memory_jobs (
-                job_id, job_type, status, attempts, payload, error,
-                locked_until, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            """,
+            _INSERT_JOB_SQL,
             job.job_id,
             job.job_type,
             job.status,
             job.attempts,
-            json.dumps(job.payload),
+            json_dumps(job.payload),
             job.error,
             job.locked_until,
             job.created_at,
@@ -405,15 +505,38 @@ class TaskMemoryManager:
         return job
 
     async def claim_jobs(
-        self, *, limit: int = 10, lock_seconds: int = 300
+        self, *, limit: int = 10, lock_seconds: int = 300, max_attempts: int = 5
     ) -> list[MemoryJob]:
+        """Claim pending (or lock-expired) jobs for processing.
+
+        Jobs that already burned ``max_attempts`` are dead-lettered as
+        ``failed`` instead of being reclaimed forever — a job whose payload
+        crashes the worker before fail_job() runs would otherwise loop
+        indefinitely.
+        """
+        # Dead-letter exhausted jobs before claiming.
+        await self._storage.execute(
+            """
+            UPDATE memory_jobs
+            SET status = 'failed',
+                error = 'exceeded max attempts (' || attempts || ')',
+                locked_until = NULL,
+                updated_at = NOW()
+            WHERE attempts >= $1
+              AND (status = 'pending'
+                   OR (status = 'processing' AND locked_until < NOW()))
+            """,
+            max_attempts,
+        )
+
         rows = await self._storage.fetchall(
             """
             WITH candidates AS (
                 SELECT job_id
                 FROM memory_jobs
-                WHERE status = 'pending'
-                   OR (status = 'processing' AND locked_until < NOW())
+                WHERE (status = 'pending'
+                       OR (status = 'processing' AND locked_until < NOW()))
+                  AND attempts < $3
                 ORDER BY created_at ASC
                 LIMIT $1
                 FOR UPDATE SKIP LOCKED
@@ -430,6 +553,7 @@ class TaskMemoryManager:
             """,
             limit,
             lock_seconds,
+            max_attempts,
         )
         return [self._row_to_job(row) for row in rows]
 
