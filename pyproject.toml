@@ -54,7 +54,7 @@ cohere = [
     "cohere>=5.0.0",
 ]
 http = [
-    "httpx>=0.25.0",
+    "httpx>=0.26.0,<0.29.0",
 ]
 litellm = [
     "litellm>=1.0.0",
@@ -69,7 +69,7 @@ all = [
     "openai>=1.0.0",
     "anthropic>=0.25.0",
     "cohere>=5.0.0",
-    "httpx>=0.25.0",
+    "httpx>=0.26.0,<0.29.0",
     "litellm>=1.0.0",
     "sentence-transformers>=2.2.0",
     "python-dotenv>=1.0.0",
@@ -78,7 +78,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
-    "httpx>=0.25.0",
+    "httpx>=0.26.0,<0.29.0",
     "mypy>=1.0.0",
     "ruff>=0.1.0",
     "pre-commit>=3.0.0",
