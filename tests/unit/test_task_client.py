@@ -70,29 +70,33 @@ class TestTaskClientTurnFlow:
     @pytest.mark.asyncio
     async def test_record_turn_records_events_and_enqueues_ingestion(self) -> None:
         eg = make_engram()
-        count = 0
 
-        async def create_event(create) -> AgentEvent:
-            nonlocal count
-            count += 1
-            return AgentEvent(
-                event_id=f"evt_{count}",
-                task_run_id=create.task_run_id,
-                session_id=create.session_id,
-                agent_id=create.agent_id,
-                user_id=create.user_id,
-                role=create.role,
-                event_type=create.event_type,
-                content=create.content,
-                payload=create.payload,
-                metadata=create.metadata,
-            )
+        async def record_events(creates, *, job_type=None, job_payload=None):
+            events = [
+                AgentEvent(
+                    event_id=f"evt_{i + 1}",
+                    task_run_id=create.task_run_id,
+                    session_id=create.session_id,
+                    agent_id=create.agent_id,
+                    user_id=create.user_id,
+                    role=create.role,
+                    event_type=create.event_type,
+                    content=create.content,
+                    payload=create.payload,
+                    metadata=create.metadata,
+                )
+                for i, create in enumerate(creates)
+            ]
+            job = None
+            if job_type is not None:
+                job = MemoryJob(
+                    job_type=job_type,
+                    payload=job_payload(events) if job_payload else {},
+                )
+            return events, job
 
         eg._task_memory.get_task = AsyncMock(return_value=task())
-        eg._task_memory.record_event = AsyncMock(side_effect=create_event)
-        eg._task_memory.enqueue_job = AsyncMock(
-            return_value=MemoryJob(job_type="turn_ingest", payload={})
-        )
+        eg._task_memory.record_events = AsyncMock(side_effect=record_events)
 
         events = await eg.record_turn(
             "task_1",
@@ -108,7 +112,10 @@ class TestTaskClientTurnFlow:
             "tool_call",
             "artifact",
         ]
-        payload = eg._task_memory.enqueue_job.call_args.args[1]
+        # Events and the ingestion job go through one atomic call
+        call = eg._task_memory.record_events.call_args
+        assert call.kwargs["job_type"] == "turn_ingest"
+        payload = call.kwargs["job_payload"](events)
         assert payload["task_run_id"] == "task_1"
         assert payload["user_event_id"] == "evt_1"
         assert payload["assistant_event_id"] == "evt_2"

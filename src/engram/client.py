@@ -15,7 +15,12 @@ from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Any
 
 from engram.core.config import EngramSettings, get_settings
-from engram.core.exceptions import ConfigurationError, EngramError, SessionNotFoundError
+from engram.core.exceptions import (
+    ConfigurationError,
+    DuplicateMemoryError,
+    EngramError,
+    SessionNotFoundError,
+)
 from engram.embedding.service import EmbeddingService
 from engram.graph.models import TraversalQuery, TraversalResult
 from engram.graph.traversal import GraphTraversal
@@ -57,6 +62,7 @@ if TYPE_CHECKING:
         MemoryType,
         Metadata,
         RelationType,
+        SearchMode,
         SessionId,
         UserId,
     )
@@ -179,8 +185,12 @@ class Engram:
 
         logger.info("Connecting to Engram")
 
-        # Initialize embedding service FIRST to get dimension
-        self._embedding = EmbeddingService.from_settings(self._settings)
+        # Initialize embedding service FIRST to get dimension. Provider
+        # construction can block for seconds (sentence-transformers loads
+        # model weights synchronously), so run it off the event loop.
+        self._embedding = await asyncio.to_thread(
+            EmbeddingService.from_settings, self._settings
+        )
         embedding_dimension = self._embedding.dimension
         logger.info(f"Embedding dimension detected: {embedding_dimension}")
 
@@ -294,6 +304,24 @@ class Engram:
     def _estimate_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
 
+    # Frequent English noise words at >= 3 chars that would skew chunk
+    # relevance counting.
+    _QUERY_STOPWORDS = frozenset(
+        {"the", "and", "for", "with", "that", "this", "what", "how", "was", "are"}
+    )
+
+    def _query_terms(self, query: str) -> set[str]:
+        """Lowercased significant query tokens for chunk relevance ranking.
+
+        Three characters minimum: domain-critical short tokens like "p95",
+        "SLA", or "NDA" must be matchable.
+        """
+        return {
+            term.lower()
+            for term in re.findall(r"[A-Za-z0-9_-]{3,}", query)
+            if term.lower() not in self._QUERY_STOPWORDS
+        }
+
     def _hash_text(self, text: str) -> str:
         return hashlib.sha256(text.encode()).hexdigest()[:24]
 
@@ -357,19 +385,22 @@ class Engram:
         max_chars = max(400, max_chunk_tokens * 4)
         parts: list[tuple[str | None, str, int, int]] = []
         heading: str | None = None
-        start = 0
-        cursor = 0
         buffer: list[str] = []
         buffer_start: int | None = None
         heading_re = re.compile(
             r"^\s{0,3}(#{1,6}\s+.+|[A-Z][A-Z0-9 _/-]{6,}|(?:Section|Clause)\s+[\w.-]+.*)$"
         )
 
-        def flush(end_pos: int) -> None:
+        def flush() -> None:
             nonlocal buffer, buffer_start
-            body = "\n".join(buffer).strip()
+            joined = "\n".join(buffer)
+            lead = len(joined) - len(joined.lstrip())
+            body = joined.strip()
             if body:
-                parts.append((heading, body, buffer_start or 0, end_pos))
+                # body is a contiguous slice of the source text starting at
+                # buffer_start + lead; exact offsets keep anchors citable.
+                start = (buffer_start or 0) + lead
+                parts.append((heading, body, start, start + len(body)))
             buffer = []
             buffer_start = None
 
@@ -379,55 +410,59 @@ class Engram:
                 break
             stripped = line.strip()
             if stripped and heading_re.match(stripped):
-                flush(match.start())
+                flush()
                 heading = stripped.lstrip("#").strip()
-                start = match.end()
-                cursor = start
                 continue
             if buffer_start is None and stripped:
                 buffer_start = match.start()
             if stripped or buffer:
                 buffer.append(line.rstrip("\n"))
-            cursor = match.end()
             if buffer and sum(len(x) + 1 for x in buffer) >= max_chars:
-                flush(cursor)
-        flush(len(text))
+                flush()
+        flush()
 
         if not parts and text.strip():
-            parts = [(None, text.strip(), 0, len(text))]
+            lead = len(text) - len(text.lstrip())
+            body = text.strip()
+            parts = [(None, body, lead, lead + len(body))]
 
         chunks: list[LongInputChunk] = []
         for heading, body, char_start, _char_end in parts:
             remaining = body
             offset = char_start
             while remaining:
-                piece = remaining[:max_chars]
+                window = remaining[:max_chars]
                 split_at = max(
-                    piece.rfind("\n\n"), piece.rfind("\n"), piece.rfind(". ")
+                    window.rfind("\n\n"), window.rfind("\n"), window.rfind(". ")
                 )
                 if len(remaining) > max_chars and split_at > max_chars // 2:
-                    piece = piece[: split_at + 1]
-                piece = piece.strip()
-                if not piece:
-                    break
-                end = offset + len(piece)
-                kind = self._classify_long_input_chunk(piece, heading)
-                chunks.append(
-                    LongInputChunk(
-                        chunk_id=f"chunk_{len(chunks) + 1:04d}_{self._hash_text(piece)[:10]}",
-                        index=len(chunks),
-                        kind=kind,
-                        heading=heading,
-                        text=piece,
-                        char_start=offset,
-                        char_end=end,
-                        token_estimate=self._estimate_tokens(piece),
-                        quote_hash=self._hash_text(piece),
-                        metadata=metadata or {},
+                    window = window[: split_at + 1]
+                # Track exactly how much of `remaining` this window consumes
+                # and where the stripped piece sits inside it, so
+                # char_start/char_end stay exact spans into the source text.
+                consumed = len(window)
+                lead = len(window) - len(window.lstrip())
+                piece = window.strip()
+                if piece:
+                    start = offset + lead
+                    end = start + len(piece)
+                    kind = self._classify_long_input_chunk(piece, heading)
+                    chunks.append(
+                        LongInputChunk(
+                            chunk_id=f"chunk_{len(chunks) + 1:04d}_{self._hash_text(piece)[:10]}",
+                            index=len(chunks),
+                            kind=kind,
+                            heading=heading,
+                            text=piece,
+                            char_start=start,
+                            char_end=end,
+                            token_estimate=self._estimate_tokens(piece),
+                            quote_hash=self._hash_text(piece),
+                            metadata=metadata or {},
+                        )
                     )
-                )
-                remaining = remaining[len(piece) :].lstrip()
-                offset = end
+                remaining = remaining[consumed:]
+                offset += consumed
         return chunks
 
     def _extract_chunk_facts(self, chunk: LongInputChunk) -> list[str]:
@@ -550,7 +585,8 @@ class Engram:
             metadata=metadata,
         )
 
-        memory = await self._memory_store.add(
+        # The store inserts and resolves conflict-key supersedes atomically.
+        return await self._memory_store.add(
             MemoryCreate(
                 content=content,
                 main_content=main_content,
@@ -561,15 +597,6 @@ class Engram:
                 metadata=policy_metadata,
             )
         )
-        conflict_key = policy_metadata.get("conflict_key")
-        if conflict_key:
-            await self._memory_store.supersede_conflicts(
-                agent_id=agent_id,
-                user_id=user_id,
-                conflict_key=str(conflict_key),
-                winner_memory_id=memory.memory_id,
-            )
-        return memory
 
     async def add_batch(
         self,
@@ -623,17 +650,8 @@ class Engram:
                 )
             )
 
-        created = await self._memory_store.add_batch(creates)
-        for memory in created:
-            conflict_key = memory.metadata.get("conflict_key")
-            if conflict_key:
-                await self._memory_store.supersede_conflicts(
-                    agent_id=memory.agent_id,
-                    user_id=memory.user_id,
-                    conflict_key=str(conflict_key),
-                    winner_memory_id=memory.memory_id,
-                )
-        return created
+        # The store inserts and resolves conflict-key supersedes atomically.
+        return await self._memory_store.add_batch(creates)
 
     async def add_conversation(
         self,
@@ -689,21 +707,30 @@ class Engram:
 
         # Resolve conversation summary: an explicit arg wins, otherwise load
         # the session's rolling summary (if a known session is provided).
+        # summary_loaded_at is the CAS token for the roll-forward below;
+        # it stays unset (False) when no session snapshot was loaded.
         effective_summary = conversation_summary
+        summary_loaded_at: Any = False
         if effective_summary is None and session_id is not None:
             try:
-                effective_summary = (await self._sessions.get(session_id)).summary
+                sess = await self._sessions.get(session_id)
+                effective_summary = sess.summary
+                summary_loaded_at = sess.summary_updated_at
             except SessionNotFoundError:
                 effective_summary = None
 
         # Retrieve dedup/consolidation candidates per extracted fact, so facts
         # spanning multiple topics each see their own real matches (not just
-        # memories similar to the raw user message).
-        async def _retrieve(fact: str) -> list[tuple[str, str, float]]:
+        # memories similar to the raw user message). The 4th element is raw
+        # cosine similarity for the duplicate check.
+        async def _retrieve(fact: str) -> list[tuple[str, str, float, float]]:
             hits = await self.search(
                 query=fact, agent_id=agent_id, user_id=user_id, limit=search_limit
             )
-            return [(h.memory.memory_id, h.memory.content, h.score) for h in hits]
+            return [
+                (h.memory.memory_id, h.memory.content, h.score, h.semantic_score)
+                for h in hits
+            ]
 
         result = await self._llm.process_for_memory(
             user_message,
@@ -750,24 +777,57 @@ class Engram:
                 )
                 op_metadata["memory_type"] = op_type
                 op_metadata["correction_operation"] = op.operation.value
-                affected.append(
-                    await self.update(
-                        op.target_id,
-                        content=op.content,
-                        metadata=op_metadata,
+                try:
+                    affected.append(
+                        await self.update(
+                            op.target_id,
+                            content=op.content,
+                            metadata=op_metadata,
+                        )
                     )
-                )
+                except DuplicateMemoryError:
+                    # The merged content already exists as another memory's
+                    # fact; nothing new to store.
+                    logger.debug(
+                        f"Merged content for {op.target_id} already stored; skipping"
+                    )
             # NOOP: nothing to store
 
-        # Roll the session's summary forward with this exchange.
+        # Roll the session's summary forward with this exchange. Memories are
+        # already written at this point, so summary maintenance is strictly
+        # best-effort: failing the call here would make callers retry and
+        # double-process a turn whose facts were stored.
         if update_summary and session_id is not None:
             try:
                 new_summary = await self._llm.update_conversation_summary(
                     effective_summary, user_message, assistant_response
                 )
-                await self._sessions.update_summary(session_id, new_summary)
+                if summary_loaded_at is False:
+                    # No session snapshot loaded (explicit summary given):
+                    # plain last-writer update.
+                    await self._sessions.update_summary(session_id, new_summary)
+                else:
+                    # Compare-and-set against the snapshot this summary was
+                    # derived from; on conflict, rebase once on the fresh
+                    # summary so the concurrent turn's information survives.
+                    written = await self._sessions.try_update_summary(
+                        session_id,
+                        new_summary,
+                        expected_updated_at=summary_loaded_at,
+                    )
+                    if written is None:
+                        latest = await self._sessions.get(session_id)
+                        rebased = await self._llm.update_conversation_summary(
+                            latest.summary, user_message, assistant_response
+                        )
+                        await self._sessions.update_summary(session_id, rebased)
             except SessionNotFoundError:
                 logger.debug(f"Session {session_id} not found; skipping summary update")
+            except Exception as e:
+                logger.warning(
+                    f"Summary update failed for session {session_id}; "
+                    f"memories were stored. Error: {e}"
+                )
 
         return affected
 
@@ -911,11 +971,13 @@ class Engram:
         min_score: float = 0.0,
         metadata_filter: Metadata | None = None,
         memory_types: list[MemoryType] | None = None,
+        mode: SearchMode = "hybrid",
     ) -> list[SearchResult]:
-        """Search memories using hybrid search.
+        """Search memories.
 
-        Combines vector similarity, keyword matching, time decay,
-        and importance scoring.
+        The default hybrid mode combines vector similarity, keyword matching,
+        time decay, and importance scoring. "semantic" is pure vector
+        similarity; "keyword" is full-text only.
 
         Args:
             query: The search query text.
@@ -927,6 +989,7 @@ class Engram:
                 whose metadata contains these key/values are returned.
             memory_types: Optional list of memory types to restrict to
                 (e.g. ["episodic"] for events only).
+            mode: "hybrid" (default), "semantic", or "keyword".
 
         Returns:
             List of search results with scores.
@@ -953,6 +1016,7 @@ class Engram:
                 min_score=min_score,
                 metadata_filter=metadata_filter,
                 memory_types=memory_types,
+                mode=mode,
             )
         )
 
@@ -1005,7 +1069,9 @@ class Engram:
                 seen.add(key)
                 unique_queries.append(q)
 
-        result_lists = await asyncio.gather(
+        # Tolerate per-variant failures: one transient error must not discard
+        # the variants that succeeded. Only raise when every variant failed.
+        gathered = await asyncio.gather(
             *[
                 self.search(
                     q,
@@ -1017,8 +1083,20 @@ class Engram:
                     memory_types=memory_types,
                 )
                 for q in unique_queries
-            ]
+            ],
+            return_exceptions=True,
         )
+        result_lists: list[list[SearchResult]] = []
+        errors: list[BaseException] = []
+        for item in gathered:
+            if isinstance(item, BaseException):
+                errors.append(item)
+            else:
+                result_lists.append(item)
+        if errors and not result_lists:
+            raise errors[0]
+        for error in errors:
+            logger.warning(f"deep_search variant failed (kept others): {error}")
 
         # Merge by memory_id, keeping the highest score per memory
         best: dict[str, SearchResult] = {}
@@ -1261,7 +1339,11 @@ class Engram:
         )
 
         if results:
+            # Budget includes already-built sections AND the heading that will
+            # wrap the memory list — otherwise the block overruns max_tokens.
             used = count("\n\n".join(sections)) if sections else 0
+            if header and not group_by_type:
+                used += count(header)
             kept: list[SearchResult] = []
             for r in results:
                 line = f"- {r.memory.content}"
@@ -1502,75 +1584,57 @@ class Engram:
         resolved_session_id = session_id if session_id is not None else task.session_id
         event_metadata = metadata or {}
 
-        events = [
-            await self.record_event(
+        def _create(
+            role: EventRole,
+            event_type: EventType,
+            content: str,
+            payload: dict[str, Any] | None = None,
+        ) -> EventCreate:
+            return EventCreate(
                 task_run_id=task_run_id,
                 session_id=resolved_session_id,
                 agent_id=resolved_agent_id,
                 user_id=resolved_user_id,
-                role="user",
-                event_type="user_message",
-                content=user_message,
+                role=role,
+                event_type=event_type,
+                content=content,
+                payload=payload or {},
                 metadata=event_metadata,
-            ),
-            await self.record_event(
-                task_run_id=task_run_id,
-                session_id=resolved_session_id,
-                agent_id=resolved_agent_id,
-                user_id=resolved_user_id,
-                role="assistant",
-                event_type="assistant_message",
-                content=assistant_response,
-                metadata=event_metadata,
-            ),
+            )
+
+        creates = [
+            _create("user", "user_message", user_message),
+            _create("assistant", "assistant_message", assistant_response),
         ]
-
         for call in tool_calls or []:
-            events.append(
-                await self.record_event(
-                    task_run_id=task_run_id,
-                    session_id=resolved_session_id,
-                    agent_id=resolved_agent_id,
-                    user_id=resolved_user_id,
-                    role="tool",
-                    event_type="tool_call",
-                    content=self._event_item_label(call),
-                    payload=call,
-                    metadata=event_metadata,
-                )
+            creates.append(
+                _create("tool", "tool_call", self._event_item_label(call), call)
             )
-
         for artifact in artifacts or []:
-            events.append(
-                await self.record_event(
-                    task_run_id=task_run_id,
-                    session_id=resolved_session_id,
-                    agent_id=resolved_agent_id,
-                    user_id=resolved_user_id,
-                    role="agent",
-                    event_type="artifact",
-                    content=self._event_item_label(artifact),
-                    payload=artifact,
-                    metadata=event_metadata,
-                )
+            creates.append(
+                _create("agent", "artifact", self._event_item_label(artifact), artifact)
             )
 
-        if enqueue_processing:
-            await self._task_memory.enqueue_job(
-                "turn_ingest",
-                {
-                    "task_run_id": task_run_id,
-                    "agent_id": resolved_agent_id,
-                    "user_id": resolved_user_id,
-                    "session_id": resolved_session_id,
-                    "user_message": user_message,
-                    "assistant_response": assistant_response,
-                    "user_event_id": events[0].event_id,
-                    "assistant_event_id": events[1].event_id,
-                    "event_ids": [event.event_id for event in events],
-                },
-            )
+        def _job_payload(events: list[AgentEvent]) -> dict[str, Any]:
+            return {
+                "task_run_id": task_run_id,
+                "agent_id": resolved_agent_id,
+                "user_id": resolved_user_id,
+                "session_id": resolved_session_id,
+                "user_message": user_message,
+                "assistant_response": assistant_response,
+                "user_event_id": events[0].event_id,
+                "assistant_event_id": events[1].event_id,
+                "event_ids": [event.event_id for event in events],
+            }
 
+        # Events and the ingestion job commit in one transaction: a crash in
+        # between must not leave a recorded turn that never gets ingested.
+        events, _job = await self._task_memory.record_events(
+            creates,
+            job_type="turn_ingest" if enqueue_processing else None,
+            job_payload=_job_payload,
+        )
         return events
 
     async def create_checkpoint(
@@ -1712,9 +1776,11 @@ class Engram:
             facts: list[str] = []
             if extract_with_llm and self._llm is not None:
                 try:
-                    facts = await self._llm.extract_facts(
+                    facts = await self._llm.extract_document_facts(
                         chunk.text,
-                        "Recorded this long-input chunk for future grounded recall.",
+                        kind=chunk.kind,
+                        heading=chunk.heading,
+                        max_facts=max_facts_per_chunk,
                     )
                 except Exception as exc:
                     logger.warning("Long-input LLM extraction failed: %s", exc)
@@ -1834,9 +1900,7 @@ class Engram:
             if event.metadata.get("long_input_chunk")
             or event.payload.get("kind") == "long_input_chunk"
         ]
-        query_terms = {
-            term.lower() for term in re.findall(r"[A-Za-z0-9_-]{4,}", query) if term
-        }
+        query_terms = self._query_terms(query)
 
         def relevance(event: AgentEvent) -> int:
             haystack = f"{event.content} {event.payload}".lower()
