@@ -1,0 +1,50 @@
+{
+  "source": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json",
+  "question_id": "gpt4_2655b836",
+  "question_type": "temporal-reasoning",
+  "question": "What was the first issue I had with my new car after its first service?",
+  "answer": "GPS system not functioning correctly",
+  "question_date": "2023/04/10 (Mon) 23:07",
+  "answer_session_ids": [
+    "answer_4be1b6b4_2",
+    "answer_4be1b6b4_3",
+    "answer_4be1b6b4_1"
+  ],
+  "haystack_turns": [
+    {
+      "session_id": "answer_4be1b6b4_2",
+      "date": "2023/04/10 (Mon) 17:50",
+      "role": "user",
+      "has_answer": true,
+      "content": "I'm thinking of getting my car detailed soon. Do you know any good detailers in the area or have any recommendations? By the way, I just got my car serviced for the first time on March 15th, and it was a great experience."
+    },
+    {
+      "session_id": "answer_4be1b6b4_2",
+      "date": "2023/04/10 (Mon) 17:50",
+      "role": "user",
+      "has_answer": false,
+      "content": "I'll definitely check out those review websites and ask around for referrals. Do you think it's a good idea to get a wax and detailing done every 3-4 months to maintain the car's appearance and protect the paint?"
+    },
+    {
+      "session_id": "answer_4be1b6b4_3",
+      "date": "2023/04/10 (Mon) 14:47",
+      "role": "user",
+      "has_answer": false,
+      "content": "I'm thinking of getting a car wax and detailing done soon. Can you give me some tips on what to look for when choosing a detailer?"
+    },
+    {
+      "session_id": "answer_4be1b6b4_3",
+      "date": "2023/04/10 (Mon) 14:47",
+      "role": "user",
+      "has_answer": true,
+      "content": "I've been doing some research and found a local detailer with great reviews. I was thinking of taking my car there, but I'm also considering other options. By the way, I recently had an issue with my car's GPS system on 3/22, and I had to take it back to the dealership to get it fixed. They replaced the entire system, and now it's working flawlessly. Have you heard of any common issues with GPS systems in newer cars?"
+    },
+    {
+      "session_id": "answer_4be1b6b4_1",
+      "date": "2023/04/10 (Mon) 17:15",
+      "role": "user",
+      "has_answer": false,
+      "content": "I'm thinking of planning a road trip soon and I'm trying to figure out the best route to take. I've got a new car, a silver Honda Civic that I bought on February 10th, and I want to make sure I'm getting the most out of its features, like the GPS system. Can you help me with that?"
+    }
+  ]
+}

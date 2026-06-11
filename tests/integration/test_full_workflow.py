@@ -7,8 +7,10 @@ Run with: pytest tests/integration -v --run-integration
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -195,6 +197,82 @@ class TestSearchFunctionality:
         )
 
         assert len(results) <= 3
+
+
+class TestLongMemEvalSample:
+    """End-to-end recall test using a real LongMemEval oracle sample."""
+
+    @pytest.mark.asyncio
+    async def test_real_temporal_reasoning_sample_retrieves_evidence(
+        self, engram_client, clean_agent
+    ) -> None:
+        """Ingest real LongMemEval turns and retrieve the answer evidence."""
+        sample_path = (
+            Path(__file__).parents[1]
+            / "fixtures"
+            / "longmemeval_oracle_gpt4_2655b836.json"
+        )
+        sample = json.loads(sample_path.read_text())
+
+        session_ids: dict[str, str] = {}
+        for original_session_id in {
+            turn["session_id"] for turn in sample["haystack_turns"]
+        }:
+            async with engram_client.session(
+                agent_id=clean_agent,
+                metadata={
+                    "source": "longmemeval",
+                    "question_id": sample["question_id"],
+                    "original_session_id": original_session_id,
+                },
+            ) as session:
+                session_ids[original_session_id] = session.session_id
+
+        for turn in sample["haystack_turns"]:
+            await engram_client.add(
+                content=turn["content"],
+                main_content=f"[{turn['role'].upper()} {turn['date']}]: "
+                f"{turn['content']}",
+                agent_id=clean_agent,
+                session_id=session_ids[turn["session_id"]],
+                memory_type="episodic",
+                metadata={
+                    "source": "longmemeval",
+                    "question_id": sample["question_id"],
+                    "question_type": sample["question_type"],
+                    "question_date": sample["question_date"],
+                    "original_session_id": turn["session_id"],
+                    "haystack_date": turn["date"],
+                    "has_answer": turn["has_answer"],
+                },
+            )
+
+        results = await engram_client.search(
+            query=sample["question"],
+            agent_id=clean_agent,
+            limit=5,
+            memory_types=["episodic"],
+        )
+        retrieved_text = "\n".join(result.memory.content for result in results)
+        retrieved_sessions = {
+            result.memory.metadata["original_session_id"] for result in results
+        }
+
+        assert "GPS system" in retrieved_text
+        assert "first time on March 15th" in retrieved_text
+        assert {"answer_4be1b6b4_2", "answer_4be1b6b4_3"} <= retrieved_sessions
+
+        context = await engram_client.get_context_block(
+            sample["question"],
+            clean_agent,
+            limit=5,
+            memory_types=["episodic"],
+            group_by_type=True,
+        )
+
+        assert "## Episodic" in context
+        assert "GPS system" in context
+        assert "first time on March 15th" in context
 
 
 class TestGraphOperations:
