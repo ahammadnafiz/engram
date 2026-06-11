@@ -38,7 +38,7 @@ def get_llm_provider(
 
             For "anthropic":
                 - api_key: Anthropic API key (required)
-                - model: Model name (default: "claude-3-haiku-20240307")
+                - model: Model name (default: "claude-haiku-4-5-20251001")
 
             For "ollama":
                 - model: Model name (required)
@@ -67,7 +67,7 @@ def get_llm_provider(
         provider = get_llm_provider(
             "anthropic",
             api_key="sk-ant-...",
-            model="claude-3-haiku-20240307",
+            model="claude-haiku-4-5-20251001",
         )
 
         # Local with Ollama

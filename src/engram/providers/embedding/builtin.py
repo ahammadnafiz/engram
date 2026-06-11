@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from engram.core.exceptions import ConfigurationError, EmbeddingProviderError
 from engram.providers.embedding.protocol import EmbeddingProvider
 from engram.providers.embedding.registry import embedding_registry
+from engram.providers.http_retry import request_with_retries
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
@@ -437,11 +438,12 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
 
     async def embed(self, text: str) -> list[float]:
         try:
-            response = await self._client.post(
-                "/api/embeddings",
-                json={"model": self._model, "prompt": text},
+            response = await request_with_retries(
+                lambda: self._client.post(
+                    "/api/embeddings",
+                    json={"model": self._model, "prompt": text},
+                )
             )
-            response.raise_for_status()
             data = response.json()
             embedding = data["embedding"]
 
@@ -559,11 +561,12 @@ class HuggingFaceEmbeddingProvider(EmbeddingProvider):
 
     async def embed(self, text: str) -> list[float]:
         try:
-            response = await self._client.post(
-                self._api_url,
-                json={"inputs": text, "options": {"wait_for_model": True}},
+            response = await request_with_retries(
+                lambda: self._client.post(
+                    self._api_url,
+                    json={"inputs": text, "options": {"wait_for_model": True}},
+                )
             )
-            response.raise_for_status()
             data = response.json()
 
             # Handle nested response format
@@ -592,11 +595,12 @@ class HuggingFaceEmbeddingProvider(EmbeddingProvider):
             return []
 
         try:
-            response = await self._client.post(
-                self._api_url,
-                json={"inputs": texts, "options": {"wait_for_model": True}},
+            response = await request_with_retries(
+                lambda: self._client.post(
+                    self._api_url,
+                    json={"inputs": texts, "options": {"wait_for_model": True}},
+                )
             )
-            response.raise_for_status()
             data = response.json()
 
             # Parse response - handle nested format [[embedding], [embedding], ...]

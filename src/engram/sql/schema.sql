@@ -46,10 +46,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 
     -- Rolling conversation summary (iteratively updated by add_conversation)
     summary TEXT,
-    summary_updated_at TIMESTAMPTZ,
-
-    -- Indices
-    CONSTRAINT fk_agent FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+    summary_updated_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON agent_sessions(agent_id);

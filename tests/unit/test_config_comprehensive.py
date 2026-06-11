@@ -85,6 +85,50 @@ class TestEngramSettingsValidation:
         )
         assert settings.min_pool_size == settings.max_pool_size
 
+    def test_weight_sum_validated_when_other_weights_default(self) -> None:
+        """Setting only one weight must still trigger the sum check.
+
+        Field validators skip default values, so the cross-field check must
+        run as a model validator to catch e.g. weight_semantic=0.9 with the
+        other weights left at their defaults (sum 1.5).
+        """
+        from pydantic import ValidationError
+
+        from engram.core.config import EngramSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            EngramSettings(weight_semantic=0.9)
+
+        assert "weights must sum to 1.0" in str(exc_info.value).lower()
+
+    def test_text_search_config_rejects_injection(self) -> None:
+        """The config name is interpolated into DDL; restrict it hard."""
+        from pydantic import ValidationError
+
+        from engram.core.config import EngramSettings
+
+        with pytest.raises(ValidationError):
+            EngramSettings(text_search_config="english'; DROP TABLE agents; --")
+
+    def test_text_search_config_accepts_valid_names(self) -> None:
+        from engram.core.config import EngramSettings
+
+        assert EngramSettings(text_search_config="german").text_search_config == (
+            "german"
+        )
+        assert EngramSettings().text_search_config == "english"
+
+    def test_pool_size_validated_when_max_defaults(self) -> None:
+        """min_pool_size above the default max_pool_size must fail."""
+        from pydantic import ValidationError
+
+        from engram.core.config import EngramSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            EngramSettings(min_pool_size=50)  # default max is 20
+
+        assert "max_pool_size" in str(exc_info.value).lower()
+
 
 class TestEmbeddingDimensionCoercion:
     """Tests for embedding dimension coercion."""

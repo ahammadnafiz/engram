@@ -69,8 +69,10 @@ class TestGetContextBlock:
         eg._memory_store.search = AsyncMock(
             return_value=[sr("x" * 40, 0.9), sr("y" * 40, 0.5)]
         )
-        # heuristic = len // 4; each "- " + 40 chars ~ 10 tokens. Budget 12 keeps one.
-        out = await eg.get_context_block("q", "agent", max_tokens=12)
+        # heuristic = len // 4; header ~5 tokens, each "- " + 40 chars ~ 10
+        # tokens. Budget 16 fits header + one line; the second line would
+        # exceed it.
+        out = await eg.get_context_block("q", "agent", max_tokens=16)
         assert "x" * 40 in out
         assert "y" * 40 not in out
 
@@ -97,6 +99,30 @@ class TestGetContextBlock:
         assert "## Episodic — events\n- User went to a concert" in out
 
 
+class TestContextBlockBudget:
+    @pytest.mark.asyncio
+    async def test_header_cost_counts_against_budget(self) -> None:
+        """The rendered block must respect max_tokens including the header."""
+        eg = make_engram()
+        eg._memory_store.search = AsyncMock(
+            return_value=[sr("aaaa", 0.9), sr("bbbb", 0.8)]
+        )
+
+        out = await eg.get_context_block(
+            "q",
+            "agent",
+            header="## H",
+            max_tokens=12,
+            token_counter=len,  # 1 token per char for exact accounting
+        )
+
+        # Header (4) + first line "- aaaa" (6) = 10 fits; adding the second
+        # line would exceed 12. Without header accounting both lines fit and
+        # the block overruns the budget.
+        assert "- aaaa" in out
+        assert "- bbbb" not in out
+
+
 class TestAddConversationSummary:
     def _wire(self, eg, stored_summary):
         from engram.llm.service import ExtractionResult
@@ -108,6 +134,9 @@ class TestAddConversationSummary:
         )
         eg._llm.update_conversation_summary = AsyncMock(return_value="rolled")
         eg._sessions.update_summary = AsyncMock()
+        eg._sessions.try_update_summary = AsyncMock(
+            return_value=session(stored_summary)
+        )
 
     @pytest.mark.asyncio
     async def test_loads_and_persists_session_summary(self) -> None:
@@ -122,7 +151,11 @@ class TestAddConversationSummary:
         eg._llm.update_conversation_summary.assert_awaited_once_with(
             "prev", "hi", "hello"
         )
-        eg._sessions.update_summary.assert_awaited_once_with("s1", "rolled")
+        # Written via CAS against the snapshot the summary was derived from
+        eg._sessions.try_update_summary.assert_awaited_once_with(
+            "s1", "rolled", expected_updated_at=None
+        )
+        eg._sessions.update_summary.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_update_summary_false_skips_roll(self) -> None:
@@ -146,6 +179,64 @@ class TestAddConversationSummary:
             == "explicit"
         )
         eg._sessions.get.assert_not_awaited()  # explicit provided, no load
+
+    @pytest.mark.asyncio
+    async def test_summary_cas_conflict_rebases_on_fresh_summary(self) -> None:
+        """When a concurrent turn updated the summary first, the roll-forward
+        must rebase on the fresh summary instead of overwriting it."""
+        eg = make_engram()
+        self._wire(eg, "prev")
+        eg._llm.update_conversation_summary = AsyncMock(
+            side_effect=["rolled-from-prev", "rolled-from-fresh"]
+        )
+        # CAS loses: another turn updated the summary meanwhile
+        eg._sessions.try_update_summary = AsyncMock(return_value=None)
+        eg._sessions.get = AsyncMock(
+            side_effect=[session("prev"), session("fresh-from-other-turn")]
+        )
+
+        await eg.add_conversation("hi", "hello", "agent", session_id="s1")
+
+        # Regenerated against the fresh summary, then written last-writer
+        second_call = eg._llm.update_conversation_summary.call_args_list[1]
+        assert second_call.args[0] == "fresh-from-other-turn"
+        eg._sessions.update_summary.assert_awaited_once_with("s1", "rolled-from-fresh")
+
+    @pytest.mark.asyncio
+    async def test_summary_failure_does_not_fail_call_after_writes(self) -> None:
+        """Memories are already written when the summary rolls forward; an
+        LLM/provider error there must not surface as a failed call (the
+        caller would retry and double-process the turn)."""
+        from engram.core.exceptions import LLMProviderError
+        from engram.llm.service import (
+            ExtractionResult,
+            MemoryOperation,
+            MemoryOperationType,
+        )
+
+        eg = make_engram()
+        self._wire(eg, "prev")
+        eg._llm.process_for_memory = AsyncMock(
+            return_value=ExtractionResult(
+                facts=["User likes jazz"],
+                operations=[
+                    MemoryOperation(
+                        operation=MemoryOperationType.ADD,
+                        content="User likes jazz",
+                        original_fact="User likes jazz",
+                    )
+                ],
+            )
+        )
+        eg.add = AsyncMock(return_value=mem("User likes jazz", "m1"))
+        eg._llm.update_conversation_summary = AsyncMock(
+            side_effect=LLMProviderError("rate limited", model="x")
+        )
+
+        affected = await eg.add_conversation("hi", "hello", "agent", session_id="s1")
+
+        assert len(affected) == 1  # writes are reported despite summary failure
+        eg._sessions.update_summary.assert_not_awaited()
 
 
 class TestDeepSearch:
@@ -183,6 +274,34 @@ class TestDeepSearch:
         await eg.deep_search("q", "agent")
         eg.search.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_one_failed_variant_does_not_discard_other_results(self) -> None:
+        """A transient failure on one query variant must not throw away the
+        results of the variants that succeeded."""
+        eg = make_engram()
+        eg._llm.expand_query = AsyncMock(return_value=["q2", "q3"])
+
+        async def fake_search(q: str, agent_id: str, **kw):
+            if q == "q2":
+                raise TimeoutError("transient provider blip")
+            if q == "orig":
+                return [sr("A", 0.5)]
+            return [sr("C", 0.6)]
+
+        eg.search = AsyncMock(side_effect=fake_search)
+        out = await eg.deep_search("orig", "agent", limit=10)
+
+        assert {r.memory.content for r in out} == {"A", "C"}
+
+    @pytest.mark.asyncio
+    async def test_all_variants_failing_raises(self) -> None:
+        eg = make_engram()
+        eg._llm.expand_query = AsyncMock(return_value=["q2"])
+        eg.search = AsyncMock(side_effect=TimeoutError("db down"))
+
+        with pytest.raises(TimeoutError):
+            await eg.deep_search("orig", "agent")
+
 
 class TestPolicyRecall:
     @pytest.mark.asyncio
@@ -203,20 +322,14 @@ class TestPolicyRecall:
                 },
             )
         )
-        eg._memory_store.supersede_conflicts = AsyncMock(return_value=1)
-
         out = await eg.add("User is allergic to cashews", "agent", user_id="user")
 
         create = eg._memory_store.add.call_args.args[0]
         assert create.memory_type == "profile"
         assert create.metadata["critical"] is True
         assert create.metadata["critical_slot"] == "profile:allergy:cashews"
-        eg._memory_store.supersede_conflicts.assert_awaited_once_with(
-            agent_id="agent",
-            user_id="user",
-            conflict_key="agent:user:profile:allergy:cashews",
-            winner_memory_id="m_new",
-        )
+        # The store supersedes atomically using this conflict_key
+        assert create.metadata["conflict_key"] == "agent:user:profile:allergy:cashews"
         assert out.memory_id == "m_new"
 
     @pytest.mark.asyncio
@@ -246,14 +359,13 @@ class TestPolicyRecall:
                 },
             )
         )
-        eg._memory_store.supersede_conflicts = AsyncMock(return_value=0)
-
         await eg.add("The account owner is Rina.", "agent", user_id="user")
 
         create = eg._memory_store.add.call_args.args[0]
         assert create.memory_type == "project"
         assert create.metadata["critical_slot"] == "sales:account_owner"
-        eg._memory_store.supersede_conflicts.assert_awaited_once()
+        # Supersede now happens inside the store, driven by this conflict_key
+        assert create.metadata["conflict_key"] == "agent:user:sales:account_owner"
 
     @pytest.mark.asyncio
     async def test_trace_recall_shows_critical_kept_and_superseded(self) -> None:

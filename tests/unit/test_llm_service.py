@@ -7,12 +7,18 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-def make_service(reply: str):
+def make_service(reply: str, finish_reason: str = "stop"):
     from engram.llm.service import LLMService
+    from engram.providers.llm.protocol import LLMResponse
 
     provider = MagicMock()
     provider.model = "test-model"
     provider.complete_text = AsyncMock(return_value=reply)
+    provider.complete = AsyncMock(
+        return_value=LLMResponse(
+            content=reply, model="test-model", finish_reason=finish_reason
+        )
+    )
     return LLMService(provider=provider)
 
 
@@ -49,12 +55,19 @@ class TestProcessForMemoryPerFact:
     @pytest.mark.asyncio
     async def test_retrieve_for_fact_called_per_fact(self) -> None:
         from engram.llm.service import LLMService, MemoryOperationType
+        from engram.providers.llm.protocol import LLMResponse
 
         provider = MagicMock()
         provider.model = "test-model"
         # Extraction returns two facts; with empty candidates each evaluates to ADD
         # without a further LLM call.
-        provider.complete_text = AsyncMock(return_value="Fact one here\nFact two here")
+        provider.complete = AsyncMock(
+            return_value=LLMResponse(
+                content="Fact one here\nFact two here",
+                model="test-model",
+                finish_reason="stop",
+            )
+        )
         svc = LLMService(provider=provider)
 
         seen: list[str] = []
@@ -70,6 +83,135 @@ class TestProcessForMemoryPerFact:
         assert seen == ["Fact one here", "Fact two here"]
         assert len(result.operations) == 2
         assert all(op.operation == MemoryOperationType.ADD for op in result.operations)
+
+
+class TestTruncationHandling:
+    """Truncated LLM output must not store partial facts silently."""
+
+    @pytest.mark.asyncio
+    async def test_truncated_extraction_drops_last_fact(self) -> None:
+        svc = make_service(
+            "User works at AskTuring\nUser lives in Dhaka\nUser is building an AI mem",
+            finish_reason="length",
+        )
+        facts = await svc.extract_facts("msg", "resp")
+
+        assert facts == ["User works at AskTuring", "User lives in Dhaka"]
+
+    @pytest.mark.asyncio
+    async def test_anthropic_max_tokens_reason_also_detected(self) -> None:
+        svc = make_service(
+            "User works at AskTuring\nUser lives in Dh",
+            finish_reason="max_tokens",
+        )
+        facts = await svc.extract_facts("msg", "resp")
+
+        assert facts == ["User works at AskTuring"]
+
+    @pytest.mark.asyncio
+    async def test_complete_extraction_keeps_all_facts(self) -> None:
+        svc = make_service(
+            "User works at AskTuring\nUser lives in Dhaka",
+            finish_reason="stop",
+        )
+        facts = await svc.extract_facts("msg", "resp")
+
+        assert facts == ["User works at AskTuring", "User lives in Dhaka"]
+
+
+class TestDuplicateScoreSpace:
+    """The 0.92 duplicate threshold must compare cosine similarity, not the
+    hybrid combined score (which decays below 0.92 within hours)."""
+
+    @pytest.mark.asyncio
+    async def test_stale_exact_duplicate_detected_via_semantic_score(self) -> None:
+        from engram.llm.service import MemoryOperationType
+
+        # Single LLM call: extraction. If dup detection fails, a second call
+        # (evaluate_memory_operation, via complete_text) would happen.
+        svc = make_service("User works at AskTuring")
+
+        async def retrieve(fact: str):
+            # Memory last accessed a day ago: combined hybrid score sags to
+            # 0.80, but cosine similarity is still 0.99.
+            return [("m1", "User works at AskTuring", 0.80, 0.99)]
+
+        result = await svc.process_for_memory(
+            "I work at AskTuring", "Nice!", [], retrieve_for_fact=retrieve
+        )
+
+        assert len(result.operations) == 1
+        assert result.operations[0].operation == MemoryOperationType.NOOP
+        svc._provider.complete_text.assert_not_awaited()  # no evaluate call
+
+    @pytest.mark.asyncio
+    async def test_three_tuples_still_supported(self) -> None:
+        from engram.llm.service import MemoryOperationType
+
+        svc = make_service("User works at AskTuring")
+
+        async def retrieve(fact: str):
+            return [("m1", "User works at AskTuring", 0.95)]
+
+        result = await svc.process_for_memory(
+            "I work at AskTuring", "Nice!", [], retrieve_for_fact=retrieve
+        )
+
+        assert result.operations[0].operation == MemoryOperationType.NOOP
+
+
+class TestEvaluateMemoryOperation:
+    """Tests for evaluate_memory_operation() target resolution."""
+
+    @pytest.mark.asyncio
+    async def test_update_with_unresolvable_target_falls_back_to_add(self) -> None:
+        """An UPDATE/DELETE whose TARGET can't be resolved must not drop the
+        fact: the safe fallback is ADD (per the prompt's own default rule)."""
+        from engram.llm.service import MemoryOperationType
+
+        svc = make_service(
+            "OPERATION: UPDATE\nTARGET: 1 or 2\nMERGED: merged text\nREASON: unsure"
+        )
+        op = await svc.evaluate_memory_operation(
+            "User moved to Berlin",
+            [("mem_a", "User lives in Dhaka"), ("mem_b", "User likes tea")],
+        )
+
+        # "1 or 2" parses to digits "12" -> index 11 -> out of range -> no target
+        assert op.operation == MemoryOperationType.ADD
+        assert op.content == "User moved to Berlin"
+        assert op.target_id is None
+
+    @pytest.mark.asyncio
+    async def test_delete_with_no_target_falls_back_to_add(self) -> None:
+        from engram.llm.service import MemoryOperationType
+
+        svc = make_service(
+            "OPERATION: DELETE\nTARGET: none\nMERGED: none\nREASON: contradiction"
+        )
+        op = await svc.evaluate_memory_operation(
+            "User switched to BRAC Bank",
+            [("mem_a", "User banks at City Bank")],
+        )
+
+        assert op.operation == MemoryOperationType.ADD
+        assert op.content == "User switched to BRAC Bank"
+
+    @pytest.mark.asyncio
+    async def test_update_with_valid_target_stays_update(self) -> None:
+        from engram.llm.service import MemoryOperationType
+
+        svc = make_service(
+            "OPERATION: UPDATE\nTARGET: 2\nMERGED: merged fact text\nREASON: detail"
+        )
+        op = await svc.evaluate_memory_operation(
+            "Nadia lives in Toronto",
+            [("mem_a", "irrelevant"), ("mem_b", "User's sister is Nadia")],
+        )
+
+        assert op.operation == MemoryOperationType.UPDATE
+        assert op.target_id == "mem_b"
+        assert op.content == "merged fact text"
 
 
 class TestClassifyFacts:
@@ -92,15 +234,29 @@ class TestClassifyFacts:
         assert await svc.classify_facts([]) == []
 
     @pytest.mark.asyncio
+    async def test_compound_type_resolves_deterministically(self) -> None:
+        """ "task/decision" contains two valid types; resolution must use a
+        fixed priority order, not set iteration order."""
+        svc = make_service("1: task/decision")
+        out = await svc.classify_facts(["The team decided to ship"])
+        assert out == ["decision"]  # longest match wins, deterministically
+
+    @pytest.mark.asyncio
     async def test_classify_types_tags_operations(self) -> None:
         from engram.llm.service import LLMService
+        from engram.providers.llm.protocol import LLMResponse
+
+        def resp(content: str) -> LLMResponse:
+            return LLMResponse(
+                content=content, model="test-model", finish_reason="stop"
+            )
 
         provider = MagicMock()
         provider.model = "test-model"
-        provider.complete_text = AsyncMock(
+        provider.complete = AsyncMock(
             side_effect=[
-                "User attended a concert\nUser likes jazz",  # extraction
-                "1: episodic\n2: semantic",  # classification
+                resp("User attended a concert\nUser likes jazz"),  # extraction
+                resp("1: episodic\n2: semantic"),  # classification
             ]
         )
         svc = LLMService(provider=provider)

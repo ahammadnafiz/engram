@@ -6,6 +6,7 @@ for multi-hop reasoning across memory relations.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -14,6 +15,7 @@ from engram.core.exceptions import (
     GraphError,
     MemoryNotFoundError,
 )
+from engram.core.serialization import json_dumps
 from engram.graph.models import (
     MemoryRelation,
     RelationCreate,
@@ -181,7 +183,7 @@ class GraphTraversal:
                 target_id,
                 relation_type,
                 weight,
-                json.dumps(metadata or {}),
+                json_dumps(metadata or {}),
             )
 
             relation = MemoryRelation(
@@ -271,7 +273,7 @@ class GraphTraversal:
                         r.target_memory_id,
                         r.relation_type,
                         r.weight,
-                        json.dumps(r.metadata),
+                        json_dumps(r.metadata),
                     )
                     for r in relations
                 ],
@@ -409,10 +411,10 @@ class GraphTraversal:
         if not seen_seeds:
             return []
 
-        by_memory: dict[MemoryId, TraversalResult] = {}
-        for memory_id in seen_seeds:
-            try:
-                results = await self.traverse(
+        # Per-seed traversals are independent reads; run them concurrently.
+        gathered = await asyncio.gather(
+            *[
+                self.traverse(
                     TraversalQuery(
                         start_memory_id=memory_id,
                         max_depth=max_depth,
@@ -422,10 +424,20 @@ class GraphTraversal:
                         limit=limit_per_seed,
                     )
                 )
-            except MemoryNotFoundError:
+                for memory_id in seen_seeds
+            ],
+            return_exceptions=True,
+        )
+
+        by_memory: dict[MemoryId, TraversalResult] = {}
+        for item in gathered:
+            if isinstance(item, MemoryNotFoundError):
                 if skip_missing:
                     continue
-                raise
+                raise item
+            if isinstance(item, BaseException):
+                raise item
+            results = item
 
             for result in results:
                 current = by_memory.get(result.memory_id)

@@ -11,10 +11,12 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from engram.core.exceptions import SessionNotFoundError, StorageError
+from engram.core.serialization import json_dumps
 from engram.session.models import Session, SessionCreate
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from datetime import datetime
 
     from engram.core._types import AgentId, SessionId, UserId
     from engram.storage.postgres import PostgresStorage
@@ -112,7 +114,7 @@ class SessionManager:
                 session.agent_id,
                 session.user_id,
                 session.started_at,
-                json.dumps(session.metadata),
+                json_dumps(session.metadata),
             )
 
             logger.debug(f"Created session {session.session_id}")
@@ -210,6 +212,58 @@ class SessionManager:
 
         logger.debug(f"Updated summary for session {session_id}")
         return self._row_to_session(row)
+
+    async def try_update_summary(
+        self,
+        session_id: SessionId,
+        summary: str,
+        *,
+        expected_updated_at: datetime | None,
+    ) -> Session | None:
+        """Compare-and-set update of the rolling summary.
+
+        Writes only if summary_updated_at still equals expected_updated_at
+        (None = no summary written yet). Two concurrent turns both roll the
+        summary forward from the same snapshot; without this guard the
+        second write silently discards the first turn's information.
+
+        Args:
+            session_id: The session to update.
+            summary: The new summary text.
+            expected_updated_at: The summary_updated_at value the new summary
+                was derived from.
+
+        Returns:
+            The updated session, or None when a concurrent writer won.
+
+        Raises:
+            SessionNotFoundError: If session doesn't exist.
+        """
+        row = await self._storage.fetchone(
+            """
+            UPDATE agent_sessions
+            SET summary = $2, summary_updated_at = NOW()
+            WHERE session_id = $1
+              AND summary_updated_at IS NOT DISTINCT FROM $3
+            RETURNING
+                session_id, agent_id, user_id,
+                started_at, ended_at, summary, summary_updated_at, metadata
+            """,
+            session_id,
+            summary,
+            expected_updated_at,
+        )
+        if row is not None:
+            logger.debug(f"Updated summary for session {session_id} (CAS)")
+            return self._row_to_session(row)
+
+        exists = await self._storage.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM agent_sessions WHERE session_id = $1)",
+            session_id,
+        )
+        if not exists:
+            raise SessionNotFoundError(session_id)
+        return None
 
     async def list_active(
         self,

@@ -121,6 +121,66 @@ class TestEmbeddingServiceLRUCache:
         assert len(service._cache) == 0
 
 
+class TestEmbeddingInputLengthGuard:
+    """Overlong inputs are truncated instead of erroring at the provider."""
+
+    @pytest.fixture
+    def mock_provider(self) -> MagicMock:
+        provider = MagicMock()
+        provider.dimension = 8
+        provider.model = "test-model"
+        provider.embed = AsyncMock(return_value=[0.0] * 8)
+        provider.embed_batch = AsyncMock(side_effect=lambda ts: [[0.0] * 8 for _ in ts])
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_embed_truncates_overlong_text(
+        self, mock_provider: MagicMock
+    ) -> None:
+        from engram.embedding.service import EmbeddingService
+
+        service = EmbeddingService(
+            provider=mock_provider, cache_size=0, max_input_chars=100
+        )
+
+        await service.embed("x" * 500)
+
+        sent = mock_provider.embed.call_args.args[0]
+        assert len(sent) == 100
+
+    @pytest.mark.asyncio
+    async def test_embed_batch_truncates_each_text(
+        self, mock_provider: MagicMock
+    ) -> None:
+        from engram.embedding.service import EmbeddingService
+
+        service = EmbeddingService(
+            provider=mock_provider, cache_size=0, max_input_chars=100
+        )
+
+        await service.embed_batch(["short", "y" * 500])
+
+        sent = mock_provider.embed_batch.call_args.args[0]
+        assert sent[0] == "short"
+        assert len(sent[1]) == 100
+
+    @pytest.mark.asyncio
+    async def test_truncated_text_shares_cache_entry(
+        self, mock_provider: MagicMock
+    ) -> None:
+        """Two inputs identical after truncation must hit the same cache key."""
+        from engram.embedding.service import EmbeddingService
+
+        service = EmbeddingService(
+            provider=mock_provider, cache_size=10, max_input_chars=100
+        )
+
+        await service.embed("z" * 500)
+        await service.embed("z" * 600)  # same first 100 chars
+
+        assert mock_provider.embed.call_count == 1
+
+
 class TestEmbeddingServiceBatchValidation:
     """Tests for batch embedding validation and error handling."""
 
