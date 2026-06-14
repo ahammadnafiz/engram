@@ -192,16 +192,16 @@ class SentenceTransformersEmbeddingProvider(EmbeddingProvider):
         # sentence-transformers >=5 renamed get_sentence_embedding_dimension()
         # to get_embedding_dimension(); support both.
         if hasattr(self._st_model, "get_embedding_dimension"):
-            self._dimension = self._st_model.get_embedding_dimension()
+            self._dimension = int(self._st_model.get_embedding_dimension())
         else:
-            self._dimension = self._st_model.get_sentence_embedding_dimension()
+            self._dimension = int(self._st_model.get_sentence_embedding_dimension())
         self._executor = ThreadPoolExecutor(max_workers=1)
 
         logger.info(f"Loaded {model} ({self._dimension}d) on {self._st_model.device}")
 
     @property
     def dimension(self) -> int:
-        return self._dimension  # type: ignore[return-value]
+        return self._dimension
 
     @property
     def model(self) -> str:

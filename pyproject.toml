@@ -62,6 +62,12 @@ litellm = [
 sentence-transformers = [
     "sentence-transformers>=2.2.0",
 ]
+rerank = [
+    "sentence-transformers>=2.2.0",
+]
+rerank-onnx = [
+    "sentence-transformers[onnx]>=3.0.0",
+]
 examples = [
     "python-dotenv>=1.0.0",
 ]
@@ -180,6 +186,8 @@ pretty = true
 [[tool.mypy.overrides]]
 module = [
     "asyncpg.*",
+    "cohere.*",
+    "litellm.*",
     "sentence_transformers.*",
 ]
 ignore_missing_imports = true

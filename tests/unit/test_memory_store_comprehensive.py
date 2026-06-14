@@ -192,7 +192,10 @@ class TestMemoryStoreAdd:
         )
 
         assert memory.memory_id == "dup_1"
-        mock_storage.execute.assert_not_called()  # short-circuits before insert
+        assert not any(
+            "INSERT INTO agent_memory" in str(call)
+            for call in mock_storage.fetchone.call_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_add_persists_memory_type(
@@ -402,6 +405,38 @@ class TestMemoryStoreReinforce:
 
         with pytest.raises(MemoryNotFoundError):
             await store.reinforce("nonexistent_mem")
+
+
+class TestMemoryStoreListRecent:
+    @pytest.mark.asyncio
+    async def test_list_recent_excludes_superseded_for_agent_scope(self) -> None:
+        from engram.memory.store import MemoryStore
+
+        storage = MagicMock()
+        storage.fetchall = AsyncMock(return_value=[])
+        embedding = MagicMock()
+        store = MemoryStore(storage=storage, embedding_service=embedding)
+
+        await store.list_recent("agent_1")
+
+        sql = storage.fetchall.await_args.args[0]
+        assert "metadata->>'status'" in sql
+        assert "<> 'superseded'" in sql
+
+    @pytest.mark.asyncio
+    async def test_list_recent_excludes_superseded_for_user_scope(self) -> None:
+        from engram.memory.store import MemoryStore
+
+        storage = MagicMock()
+        storage.fetchall = AsyncMock(return_value=[])
+        embedding = MagicMock()
+        store = MemoryStore(storage=storage, embedding_service=embedding)
+
+        await store.list_recent("agent_1", user_id="user_1")
+
+        sql = storage.fetchall.await_args.args[0]
+        assert "metadata->>'status'" in sql
+        assert "<> 'superseded'" in sql
 
 
 class TestMemoryStoreSearch:

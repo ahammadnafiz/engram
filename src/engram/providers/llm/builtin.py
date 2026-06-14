@@ -110,21 +110,39 @@ class OpenAILLMProvider(LLMProvider):
                 call_kwargs["temperature"] = temperature
             call_kwargs.update(kwargs)
 
-            # Newer OpenAI models require max_completion_tokens; legacy models
-            # use max_tokens. Send the modern parameter, fall back on rejection.
+            # Model-compatibility fallbacks. Newer/reasoning models require
+            # max_completion_tokens (not max_tokens) and may reject an explicit
+            # temperature (they only allow the default). Swap or drop the
+            # offending parameter on a BadRequestError and retry, so one config
+            # works across gpt-4o and reasoning models without special-casing.
             if max_tokens is not None:
+                call_kwargs["max_completion_tokens"] = max_tokens
+            response = None
+            for _ in range(3):
                 try:
                     response = await self._client.chat.completions.create(
-                        **call_kwargs, max_completion_tokens=max_tokens
+                        **call_kwargs
                     )
+                    break
                 except self._openai.BadRequestError as e:
-                    if "max_completion_tokens" not in str(e):
-                        raise
-                    response = await self._client.chat.completions.create(
-                        **call_kwargs, max_tokens=max_tokens
-                    )
-            else:
-                response = await self._client.chat.completions.create(**call_kwargs)
+                    msg = str(e)
+                    if (
+                        "max_completion_tokens" in msg
+                        and "max_completion_tokens" in call_kwargs
+                    ):
+                        call_kwargs["max_tokens"] = call_kwargs.pop(
+                            "max_completion_tokens"
+                        )
+                        continue
+                    if "temperature" in msg and "temperature" in call_kwargs:
+                        call_kwargs.pop("temperature")
+                        continue
+                    raise
+            if response is None:
+                raise LLMProviderError(
+                    "OpenAI request failed after parameter fallbacks",
+                    model=self._model,
+                )
 
             return LLMResponse(
                 content=response.choices[0].message.content or "",
@@ -137,6 +155,19 @@ class OpenAILLMProvider(LLMProvider):
                     if response.usage
                     else 0,
                     "total_tokens": response.usage.total_tokens
+                    if response.usage
+                    else 0,
+                    # Cached prefix tokens billed at a discount. Non-zero here
+                    # confirms automatic prompt caching is firing across the
+                    # repeated memory-context prefix of the multi-call reader.
+                    "cached_tokens": (
+                        getattr(
+                            getattr(response.usage, "prompt_tokens_details", None),
+                            "cached_tokens",
+                            0,
+                        )
+                        or 0
+                    )
                     if response.usage
                     else 0,
                 },
@@ -243,6 +274,14 @@ class AnthropicLLMProvider(LLMProvider):
                     "output_tokens": response.usage.output_tokens,
                     "total_tokens": response.usage.input_tokens
                     + response.usage.output_tokens,
+                    "cache_read_tokens": getattr(
+                        response.usage, "cache_read_input_tokens", 0
+                    )
+                    or 0,
+                    "cache_creation_tokens": getattr(
+                        response.usage, "cache_creation_input_tokens", 0
+                    )
+                    or 0,
                 },
                 finish_reason=response.stop_reason,
                 raw=response,
@@ -547,6 +586,19 @@ class LiteLLMLLMProvider(LLMProvider):
                     if response.usage
                     else 0,
                     "total_tokens": response.usage.total_tokens
+                    if response.usage
+                    else 0,
+                    # Cached prefix tokens billed at a discount. Non-zero here
+                    # confirms automatic prompt caching is firing across the
+                    # repeated memory-context prefix of the multi-call reader.
+                    "cached_tokens": (
+                        getattr(
+                            getattr(response.usage, "prompt_tokens_details", None),
+                            "cached_tokens",
+                            0,
+                        )
+                        or 0
+                    )
                     if response.usage
                     else 0,
                 },

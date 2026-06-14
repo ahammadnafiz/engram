@@ -102,3 +102,16 @@ class TestVectorDimensionGuard:
             await storage.connect()
 
         assert "supersecretpw" not in str(exc_info.value)
+
+
+class TestSchemaFiles:
+    def test_docker_init_unique_fact_index_uses_hash(self) -> None:
+        from pathlib import Path
+
+        root = Path(__file__).parents[2]
+        docker_schema = root / "docker" / "init-db" / "02-schema.sql"
+        sql = docker_schema.read_text()
+
+        assert "idx_unique_memory_fact" in sql
+        assert "md5(fact)" in sql
+        assert "COALESCE(user_id, ''), fact)" not in sql

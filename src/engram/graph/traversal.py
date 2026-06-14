@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from engram.core.exceptions import (
     GraphError,
@@ -25,6 +25,7 @@ from engram.graph.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+    from datetime import datetime
 
     from engram.core._types import MemoryId, Metadata, RelationType
     from engram.storage.postgres import PostgresStorage
@@ -107,30 +108,42 @@ class GraphTraversal:
 
     def _row_to_relation(self, row: object) -> MemoryRelation:
         return MemoryRelation(
-            source_memory_id=self._row_value(row, "source_memory_id"),
-            target_memory_id=self._row_value(row, "target_memory_id"),
-            relation_type=self._row_value(row, "relation_type") or "related_to",
-            weight=self._row_value(row, "weight") or 1.0,
+            source_memory_id=cast("str", self._row_value(row, "source_memory_id")),
+            target_memory_id=cast("str", self._row_value(row, "target_memory_id")),
+            relation_type=cast(
+                "RelationType",
+                self._row_value(row, "relation_type") or "related_to",
+            ),
+            weight=float(cast("int | float", self._row_value(row, "weight") or 1.0)),
             metadata=self._json(self._row_value(row, "metadata"), {}),
-            created_at=self._row_value(row, "created_at"),
+            created_at=cast("datetime", self._row_value(row, "created_at")),
         )
 
     def _row_to_traversal_result(self, row: object) -> TraversalResult:
         return TraversalResult(
-            memory_id=self._row_value(row, "memory_id"),
-            content=self._row_value(row, "content") or "",
-            fact=self._row_value(row, "fact"),
-            main_content=self._row_value(row, "main_content"),
-            importance=self._row_value(row, "importance") or 0.0,
+            memory_id=cast("str", self._row_value(row, "memory_id")),
+            content=cast("str", self._row_value(row, "content") or ""),
+            fact=cast("str | None", self._row_value(row, "fact")),
+            main_content=cast("str | None", self._row_value(row, "main_content")),
+            importance=float(
+                cast("int | float", self._row_value(row, "importance") or 0.0)
+            ),
             metadata=self._json(self._row_value(row, "metadata"), {}),
-            created_at=self._row_value(row, "created_at"),
-            last_accessed_at=self._row_value(row, "last_accessed_at"),
-            access_count=self._row_value(row, "access_count", 0) or 0,
-            depth=self._row_value(row, "depth") or 0,
-            path=self._row_value(row, "path", []) or [],
-            relation_type=self._row_value(row, "relation_type"),
-            path_weight=self._row_value(row, "path_weight") or 0.0,
-            score=self._row_value(row, "score") or 0.0,
+            created_at=cast("datetime", self._row_value(row, "created_at")),
+            last_accessed_at=cast(
+                "datetime",
+                self._row_value(row, "last_accessed_at"),
+            ),
+            access_count=int(
+                cast("int", self._row_value(row, "access_count", 0) or 0)
+            ),
+            depth=int(cast("int", self._row_value(row, "depth") or 0)),
+            path=cast("list[str]", self._row_value(row, "path", []) or []),
+            relation_type=cast("str | None", self._row_value(row, "relation_type")),
+            path_weight=float(
+                cast("int | float", self._row_value(row, "path_weight") or 0.0)
+            ),
+            score=float(cast("int | float", self._row_value(row, "score") or 0.0)),
         )
 
     async def relate(
@@ -139,7 +152,7 @@ class GraphTraversal:
         target_id: MemoryId,
         relation_type: RelationType = "related_to",
         weight: float = 1.0,
-        metadata: dict | None = None,
+        metadata: Metadata | None = None,
     ) -> MemoryRelation:
         """Create a relation between two memories.
 

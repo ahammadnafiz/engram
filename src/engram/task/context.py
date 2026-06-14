@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from engram.graph.models import TraversalResult
     from engram.memory.models import SearchResult
     from engram.task.manager import TaskMemoryManager
+    from engram.task.models import TaskCheckpoint
 
 SearchFn = Callable[..., Awaitable[list["SearchResult"]]]
 TraverseFn = Callable[..., Awaitable[list["TraversalResult"]]]
@@ -155,7 +156,7 @@ class ContextBuilder:
             if event.content
         )
 
-    def _render_checkpoints(self, checkpoints: list) -> str:
+    def _render_checkpoints(self, checkpoints: list[TaskCheckpoint]) -> str:
         lines: list[str] = []
         for checkpoint in checkpoints:
             lines.append(f"- {checkpoint.summary}")
@@ -165,7 +166,11 @@ class ContextBuilder:
                 lines.append(f"  blocker: {item}")
         return "\n".join(lines)
 
-    def _render_decisions(self, checkpoints: list, events: list[AgentEvent]) -> str:
+    def _render_decisions(
+        self,
+        checkpoints: list[TaskCheckpoint],
+        events: list[AgentEvent],
+    ) -> str:
         lines: list[str] = []
         for checkpoint in checkpoints:
             lines.extend(f"- {item}" for item in checkpoint.decisions[:10])

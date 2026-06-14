@@ -60,8 +60,9 @@ END $$;
 DROP INDEX IF EXISTS idx_unique_memory_content;
 
 -- Create new fact-based constraint if it doesn't exist
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_memory_fact 
-    ON agent_memory(agent_id, COALESCE(user_id, ''), fact);
+-- (md5(fact) keeps entries under the btree row-size limit for long facts)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_memory_fact
+    ON agent_memory(agent_id, COALESCE(user_id, ''), md5(fact));
 
 -- Step 6: Update text search indexes
 DROP INDEX IF EXISTS idx_memory_content_tsv;

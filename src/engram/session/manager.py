@@ -315,7 +315,7 @@ class SessionManager:
         self,
         agent_id: AgentId,
         user_id: UserId | None = None,
-        metadata: dict | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[Session]:
         """Context manager for automatic session lifecycle.
 

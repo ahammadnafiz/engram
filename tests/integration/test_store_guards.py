@@ -121,6 +121,74 @@ class TestNearDuplicateGuard:
         assert new.metadata.get("status") != "superseded"
 
     @pytest.mark.asyncio
+    async def test_reasserting_exact_superseded_fact_reactivates_it(
+        self, store_env
+    ) -> None:
+        """Re-asserting the *exact* text of a superseded fact must reactivate
+        the same row, not leave it hidden. The exact-text unique index makes
+        this hit ON CONFLICT (the near-dup guard ignores superseded rows), so
+        the conflict path must clear the supersede markers."""
+        from engram.memory.models import MemoryCreate
+
+        store, storage, embedding, agent_id = store_env
+
+        text = "User's favorite color is blue"
+        embedding.set_vector(text, axis=3)
+
+        original = await store.add(MemoryCreate(content=text, agent_id=agent_id))
+        # Hide it the way conflict resolution would, including the markers.
+        await storage.execute(
+            """
+            UPDATE agent_memory
+            SET metadata = metadata || jsonb_build_object(
+                'status', 'superseded',
+                'superseded_by', 'some-other-id',
+                'superseded_at', NOW()::text
+            )
+            WHERE memory_id = $1
+            """,
+            original.memory_id,
+        )
+
+        revived = await store.add(MemoryCreate(content=text, agent_id=agent_id))
+
+        # Same row (exact-text conflict), but active again with markers cleared.
+        assert revived.memory_id == original.memory_id
+        assert revived.metadata.get("status") == "active"
+        assert "superseded_by" not in revived.metadata
+        assert "superseded_at" not in revived.metadata
+
+    @pytest.mark.asyncio
+    async def test_concurrent_near_duplicate_adds_collapse_to_one(
+        self, store_env
+    ) -> None:
+        """Two concurrent adds of vector-near-identical (but textually
+        different) facts must not both insert. The per-scope advisory lock
+        serializes the near-dup check + insert so the second resolves to the
+        first instead of slipping a twin in between check and insert."""
+        import asyncio
+
+        from engram.memory.models import MemoryCreate
+
+        store, storage, embedding, agent_id = store_env
+
+        text_a = "User reports to Priya"
+        text_b = "User's manager is Priya"  # different md5, same vector
+        embedding.set_vector(text_a, axis=5)
+        embedding.set_vector(text_b, axis=5)
+
+        await asyncio.gather(
+            store.add(MemoryCreate(content=text_a, agent_id=agent_id)),
+            store.add(MemoryCreate(content=text_b, agent_id=agent_id)),
+        )
+
+        count = await storage.fetchval(
+            "SELECT COUNT(*) FROM agent_memory WHERE agent_id = $1",
+            agent_id,
+        )
+        assert count == 1
+
+    @pytest.mark.asyncio
     async def test_agent_scoped_add_not_deduped_against_user_memory(
         self, store_env
     ) -> None:
@@ -454,3 +522,52 @@ class TestSupersedeAtomicity:
         assert old.metadata.get("status") == "superseded"
         assert old.metadata.get("superseded_by") == second.memory_id
         assert new.metadata.get("status") == "active"
+
+
+class TestLongFactIndex:
+    """The unique fact index must accept facts beyond the btree row limit."""
+
+    @pytest.mark.asyncio
+    async def test_fact_larger_than_btree_row_limit_inserts(self, store_env) -> None:
+        """Facts over ~2704 bytes used to fail with 'index row size exceeds
+        btree maximum'; the md5 expression index must accept them."""
+        from engram.memory.models import MemoryCreate
+
+        store, _storage, _embedding, agent_id = store_env
+
+        long_fact = "memory benchmark evidence " * 200  # ~5200 bytes
+        memory = await store.add(MemoryCreate(content=long_fact, agent_id=agent_id))
+
+        assert memory.content == long_fact
+
+        # Exact re-insert still dedupes through the md5 conflict target.
+        again = await store.add(MemoryCreate(content=long_fact, agent_id=agent_id))
+        assert again.memory_id == memory.memory_id
+
+
+class TestListMemories:
+    """Plain filtered reads must return full groups without ranking."""
+
+    @pytest.mark.asyncio
+    async def test_metadata_filter_returns_group_in_insert_order(
+        self, store_env
+    ) -> None:
+        from engram.memory.models import MemoryCreate
+
+        store, _storage, _embedding, agent_id = store_env
+
+        for session, turn in (("s1", 0), ("s1", 1), ("s2", 0)):
+            await store.add(
+                MemoryCreate(
+                    content=f"turn {turn} of {session}",
+                    agent_id=agent_id,
+                    metadata={"original_session_id": session, "turn_index": turn},
+                )
+            )
+
+        memories = await store.list_memories(
+            agent_id, metadata_filter={"original_session_id": "s1"}
+        )
+
+        assert [m.metadata["turn_index"] for m in memories] == [0, 1]
+        assert all(m.metadata["original_session_id"] == "s1" for m in memories)

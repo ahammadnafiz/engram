@@ -154,6 +154,6 @@ class HealthChecker:
         """
         try:
             result = await self._storage.fetchval("SELECT 1")
-            return result == 1
+            return bool(result == 1)
         except Exception:
             return False

@@ -22,9 +22,11 @@
 --      LIMIT so qualifying matches beyond the first page are not lost)
 -- $14: text_search_config (TEXT) - Text search configuration name (must match
 --      the configuration of the generated fact_tsv column)
+-- $15: candidate_multiplier (INTEGER) - Overfetch factor per branch before
+--      rank fusion (default: 5). Higher improves recall completeness.
 
 WITH 
--- Semantic search on fact embeddings (2x overfetch for RRF, minimum 20)
+-- Semantic search on fact embeddings (overfetch for RRF, minimum 20)
 semantic_search AS (
     SELECT
         memory_id,
@@ -49,10 +51,10 @@ semantic_search AS (
         AND COALESCE(metadata->>'status', 'active') <> 'superseded'
         AND embedding IS NOT NULL
     ORDER BY embedding <=> $1::vector
-    LIMIT GREATEST($5 * 2, 20)
+    LIMIT GREATEST($5::int * $15::int, 20)
 ),
 
--- Keyword search on fact_tsv (2x overfetch for RRF)
+-- Keyword search on fact_tsv (overfetch for RRF)
 -- ts_rank with normalization flag 32 is faster than ts_rank_cd
 keyword_search AS (
     SELECT 
@@ -68,7 +70,7 @@ keyword_search AS (
         AND COALESCE(metadata->>'status', 'active') <> 'superseded'
         AND fact_tsv @@ query
     ORDER BY keyword_score_raw DESC
-    LIMIT GREATEST($5 * 2, 20)
+    LIMIT GREATEST($5::int * $15::int, 20)
 ),
 
 -- Optimized combination: LEFT JOIN + UNION ALL (faster than FULL OUTER JOIN)

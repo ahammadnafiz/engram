@@ -158,9 +158,10 @@ CREATE INDEX IF NOT EXISTS idx_memory_last_accessed ON agent_memory(last_accesse
 CREATE INDEX IF NOT EXISTS idx_memory_metadata ON agent_memory USING GIN (metadata);
 
 -- Prevent duplicate facts per agent+user
--- This ensures the same fact isn't stored twice
+-- This ensures the same fact isn't stored twice.
+-- md5(fact) keeps the index entry small for long facts.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_memory_fact 
-    ON agent_memory(agent_id, COALESCE(user_id, ''), fact);
+    ON agent_memory(agent_id, COALESCE(user_id, ''), md5(fact));
 
 -- ============================================================================
 -- Memory Relations Table

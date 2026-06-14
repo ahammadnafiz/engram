@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -32,6 +33,22 @@ from urllib.request import urlretrieve
 
 from engram import Engram
 from engram.core.config import get_settings
+from engram.policy import MemoryPolicy
+
+# Benchmark policy: do NOT retype memories. LongMemEval turns are pure
+# conversation events (episodic by nature); the default policy reclassifies
+# casual language ("don't" -> constraint, "project" -> project), which then
+# (a) gets filtered out by episodic retrieval, (b) earns critical/conflict
+# slots that can supersede and hide sibling evidence, and (c) injects
+# non-episodic distractors into retrieval. Keeping every turn episodic with no
+# slots is the faithful representation for this benchmark. (Disclosed in
+# summary.json as memory_policy="benchmark-no-retype".)
+BENCHMARK_POLICY = MemoryPolicy(
+    name="benchmark-no-retype",
+    type_rules=(),
+    slot_rules=(),
+    generic_critical_slots=False,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -156,8 +173,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-context-tokens",
         type=int,
-        default=1600,
-        help="Approximate token budget for get_context_block().",
+        default=4000,
+        help="Approximate token budget for answer context construction.",
     )
     parser.add_argument(
         "--max-memory-chars",
@@ -205,6 +222,96 @@ def parse_args() -> argparse.Namespace:
         "--keep-memories",
         action="store_true",
         help="Do not purge per-sample benchmark memories after each question.",
+    )
+    parser.add_argument(
+        "--reuse-store",
+        action="store_true",
+        help=(
+            "Reuse a previously ingested store across runs. Agent IDs become "
+            "deterministic (keyed on data file + ingestion settings), ingestion "
+            "is skipped when the agent already holds the full memory set, and "
+            "memories are never purged. Pay ingestion cost once, iterate on "
+            "retrieval/reading for free. Re-ingests automatically if the data "
+            "path, memory unit, or max memory chars change."
+        ),
+    )
+    parser.add_argument(
+        "--rerank",
+        action="store_true",
+        help="Re-order search candidates with Engram's local cross-encoder.",
+    )
+    parser.add_argument(
+        "--deep-search",
+        action="store_true",
+        help=(
+            "Use Engram.search_evidence_set() with multi-query deep search "
+            "(LLM query expansion + merged hybrid searches) instead of "
+            "single-query search. Improves recall for questions whose "
+            "evidence spans sessions."
+        ),
+    )
+    parser.add_argument(
+        "--preferred-role",
+        choices=("none", "user", "assistant"),
+        default="none",
+        help=(
+            "Optional turn-role preference for Engram.search_evidence_set(). "
+            "Use 'user' for user-memory questions, 'assistant' for "
+            "assistant-memory questions, or 'none' for neutral ranking."
+        ),
+    )
+    parser.add_argument(
+        "--reading",
+        choices=("direct", "con"),
+        default="direct",
+        help=(
+            "Answer generation style, applied uniformly to every question "
+            "(no per-question-type branching): 'direct' single-shot, or 'con' "
+            "(generic chain-of-note). Whichever is chosen must be held constant "
+            "across any systems being compared."
+        ),
+    )
+    parser.add_argument(
+        "--context-strategy",
+        choices=("window", "session", "block"),
+        default="window",
+        help=(
+            "How to build the answer context: 'window' expands retrieved turns "
+            "with nearby turns from the same session, 'session' expands full "
+            "top sessions, and 'block' uses Engram.get_context_block()."
+        ),
+    )
+    parser.add_argument(
+        "--evidence-window-size",
+        type=int,
+        default=2,
+        metavar="N",
+        help=(
+            "For --context-strategy window, include N turns before and after "
+            "each retrieved turn from the same LongMemEval session."
+        ),
+    )
+    parser.add_argument(
+        "--prior-user-turns",
+        type=int,
+        default=2,
+        metavar="N",
+        help=(
+            "For --context-strategy window, include up to N earlier user turns "
+            "from the same session as each retrieved hit. This preserves "
+            "linked evidence established earlier in a conversation."
+        ),
+    )
+    parser.add_argument(
+        "--expand-sessions",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "For --context-strategy session, build the answer context from "
+            "the full content of the top N retrieved sessions fetched back "
+            "from Engram. 0 uses --limit sessions."
+        ),
     )
     parser.add_argument(
         "--generate-answers",
@@ -267,7 +374,20 @@ def load_samples(path: Path, args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 def normalize(text: Any) -> str:
-    return " ".join(WORD_RE.findall(str(text).lower()))
+    return " ".join(normalized_tokens(text))
+
+
+def normalized_tokens(text: Any) -> list[str]:
+    return WORD_RE.findall(str(text).lower())
+
+
+def contains_normalized_phrase(needle: Any, haystack: Any) -> bool:
+    phrase = normalized_tokens(needle)
+    if not phrase:
+        return False
+    tokens = normalized_tokens(haystack)
+    size = len(phrase)
+    return any(tokens[start : start + size] == phrase for start in range(len(tokens)))
 
 
 def content_words(text: Any) -> set[str]:
@@ -308,7 +428,10 @@ def iter_memories(
         session_ids, dates, sessions, strict=True
     ):
         if memory_unit == "session":
-            has_answer = any(bool(turn.get("has_answer")) for turn in session)
+            # NOTE: the gold ``has_answer`` flag is deliberately NOT stored in
+            # memory metadata. Putting the answer label inside the retrievable
+            # store is a leakage risk; evidence-recall metrics recompute it from
+            # the raw sample at scoring time instead (see recall_metrics).
             content = bounded_text(render_session(session, date), max_memory_chars)
             memories.append(
                 {
@@ -323,7 +446,6 @@ def iter_memories(
                         "question_date": sample.get("question_date"),
                         "original_session_id": original_session_id,
                         "haystack_date": date,
-                        "has_answer": has_answer,
                         "memory_unit": "session",
                     },
                 }
@@ -347,7 +469,6 @@ def iter_memories(
                         "haystack_date": date,
                         "turn_index": turn_index,
                         "turn_role": turn.get("role"),
-                        "has_answer": bool(turn.get("has_answer")),
                         "memory_unit": "turn",
                     },
                 }
@@ -375,6 +496,31 @@ def recall_metrics(
         if item.get("metadata", {}).get("original_session_id") is not None
     }
     recalled_sessions = expected_sessions & retrieved_sessions
+
+    # Recompute the gold-evidence keys from the raw sample rather than reading a
+    # stored ``has_answer`` flag — the answer label is intentionally kept out of
+    # the retrievable store. Match retrieved memories back to gold turns (turn
+    # unit) or gold sessions (session unit).
+    gold_turn_keys: set[tuple[str, int]] = set()
+    gold_answer_sessions: set[str] = set()
+    for sid, session in zip(
+        sample.get("haystack_session_ids", []),
+        sample.get("haystack_sessions", []),
+        strict=False,
+    ):
+        for ti, turn in enumerate(session):
+            if turn.get("has_answer"):
+                gold_turn_keys.add((str(sid), ti))
+                gold_answer_sessions.add(str(sid))
+
+    def _is_answer_memory(item: dict[str, Any]) -> bool:
+        meta = item.get("metadata", {})
+        sid = str(meta.get("original_session_id"))
+        ti = meta.get("turn_index")
+        if ti is not None:
+            return (sid, int(ti)) in gold_turn_keys
+        return sid in gold_answer_sessions
+
     answer = str(sample.get("answer", ""))
     answer_words = content_words(answer)
     context_words = content_words(context)
@@ -393,11 +539,11 @@ def recall_metrics(
         if expected_sessions
         else False,
         "any_answer_memory_retrieved": any(
-            bool(item.get("metadata", {}).get("has_answer")) for item in retrieved
+            _is_answer_memory(item) for item in retrieved
         ),
-        "answer_exact_in_context": normalize(answer) in normalize(context),
+        "answer_exact_in_context": contains_normalized_phrase(answer, context),
         "answer_exact_in_hypothesis": bool(hypothesis)
-        and normalize(answer) in normalize(hypothesis),
+        and contains_normalized_phrase(answer, hypothesis),
         "answer_word_coverage_in_context": (
             len(answer_words & context_words) / len(answer_words)
             if answer_words
@@ -411,27 +557,130 @@ def recall_metrics(
     }
 
 
+async def build_expanded_context(
+    engram: Engram,
+    *,
+    agent_id: str,
+    retrieved: Sequence[dict[str, Any]],
+    n_sessions: int,
+    max_tokens: int,
+) -> str:
+    """Render the full content of the top retrieved sessions, oldest first.
+
+    Retrieved turns point at their source session; the complete sessions are
+    fetched back from Engram so the reader sees each evidence turn with its
+    surrounding conversation instead of an isolated snippet.
+    """
+    session_best_rank: dict[str, int] = {}
+    for rank, item in enumerate(retrieved):
+        session_id = item.get("metadata", {}).get("original_session_id")
+        if session_id is not None and session_id not in session_best_rank:
+            session_best_rank[str(session_id)] = rank
+    top_sessions = sorted(session_best_rank, key=lambda s: session_best_rank[s])
+    expanded = set(top_sessions[:n_sessions])
+
+    blocks: list[str] = []
+    for session_id in top_sessions[:n_sessions]:
+        memories = await engram.get_memories(
+            agent_id,
+            metadata_filter={"original_session_id": session_id},
+        )
+        memories.sort(key=lambda m: m.metadata.get("turn_index", 0))
+        if memories:
+            blocks.append("\n".join(m.content for m in memories))
+
+    # Depth + breadth: retrieved turns from sessions beyond the expanded
+    # top-N stay in the context as individual lines, so widening one part
+    # of the evidence never silently drops another.
+    leftover = [
+        item["content"]
+        for item in retrieved
+        if str(item.get("metadata", {}).get("original_session_id")) not in expanded
+    ]
+    if leftover:
+        blocks.append("Other relevant memories:\n" + "\n".join(leftover))
+
+    context = "\n\n".join(blocks)
+    max_chars = max_tokens * 4  # same heuristic as get_context_block
+    if len(context) > max_chars:
+        context = context[:max_chars]
+    return context
+
+
 async def maybe_generate_answer(
     engram: Engram,
     *,
     question: str,
+    question_date: str | None,
     context: str,
     max_tokens: int,
+    reading: str = "direct",
 ) -> str:
-    if engram.llm is None:
-        return ""
-
-    system = (
-        "Answer the user's question using only the supplied memory context. "
-        "If the context is insufficient, say you do not know. Keep the answer concise."
-    )
-    prompt = f"Memory context:\n{context}\n\nQuestion: {question}\nAnswer:"
-    return await engram.llm.complete(
-        prompt,
-        system=system,
+    """Generate an answer from retrieved context through public Engram APIs."""
+    return await engram.answer_from_evidence(
+        question=question,
+        question_date=question_date,
+        context=context,
         max_tokens=max_tokens,
-        temperature=0.0,
+        reading=reading,
     )
+
+
+async def database_vector_dimension(engram: Engram) -> int | None:
+    storage = getattr(engram, "_storage", None)
+    if storage is None:
+        return None
+    return await storage.fetchval(
+        """
+        SELECT atttypmod
+        FROM pg_attribute
+        WHERE attrelid = 'agent_memory'::regclass
+            AND attname = 'embedding'
+        """
+    )
+
+
+async def assert_vector_dimension_matches(engram: Engram, *, label: str) -> int | None:
+    embedding = getattr(engram, "_embedding", None)
+    expected = getattr(embedding, "dimension", None)
+    actual = await database_vector_dimension(engram)
+    # atttypmod is the pgvector dimension directly; -1 means an unbounded
+    # vector column (no fixed dimension), which accepts any width, so only a
+    # positive, differing dimension is a genuine mismatch.
+    if (
+        expected is not None
+        and actual is not None
+        and actual > 0
+        and actual != expected
+    ):
+        settings = getattr(engram, "_settings", None)
+        provider = getattr(settings, "embedding_provider", "unknown")
+        model = getattr(settings, "embedding_model", "unknown")
+        raise RuntimeError(
+            f"Embedding dimension mismatch {label}: database "
+            f"agent_memory.embedding is vector({actual}) but configured "
+            f"{provider}/{model} emits {expected}-dimensional vectors. "
+            "Use a clean database/schema for the benchmark, or run with the "
+            "same embedding provider/model that created the existing schema."
+        )
+    return actual
+
+
+def store_fingerprint(args: argparse.Namespace) -> str:
+    """Short hash of the settings that determine what gets ingested.
+
+    Reused agent IDs must change whenever the ingested content would differ, so
+    a stale store is never silently served. Data path, memory unit, and the
+    per-memory char cap all change the stored rows.
+    """
+    raw = "|".join(
+        [
+            Path(resolve_data_path(args)).name,
+            str(args.memory_unit),
+            str(args.max_memory_chars),
+        ]
+    )
+    return hashlib.md5(raw.encode()).hexdigest()[:10]
 
 
 async def run_sample(
@@ -442,7 +691,10 @@ async def run_sample(
     run_id: str,
 ) -> dict[str, Any]:
     question_id = str(sample["question_id"])
-    agent_id = f"{args.agent_prefix}-{run_id}-{question_id}"
+    if args.reuse_store:
+        agent_id = f"{args.agent_prefix}-store-{store_fingerprint(args)}-{question_id}"
+    else:
+        agent_id = f"{args.agent_prefix}-{run_id}-{question_id}"
     start = time.perf_counter()
     memories = iter_memories(
         sample,
@@ -452,17 +704,40 @@ async def run_sample(
     )
 
     try:
-        for batch in chunks(memories, args.ingest_batch_size):
-            await engram.add_batch(batch)
+        ingested = True
+        if args.reuse_store and memories:
+            existing = await engram.get_memories(agent_id, limit=len(memories) + 1)
+            if len(existing) >= len(memories):
+                ingested = False  # store already complete; skip ingestion cost
+            elif existing:
+                # Partial store from an interrupted run: rebuild from scratch.
+                await engram.purge(agent_id=agent_id)
+        if ingested:
+            for batch in chunks(memories, args.ingest_batch_size):
+                await engram.add_batch(batch)
 
-        results = await engram.search(
-            query=sample["question"],
-            agent_id=agent_id,
-            limit=args.limit,
-            min_score=args.min_score,
-            memory_types=["episodic"],
-            mode=args.mode,
-        )
+        if args.deep_search:
+            results = await engram.search_evidence_set(
+                query=sample["question"],
+                agent_id=agent_id,
+                limit=args.limit,
+                min_score=args.min_score,
+                mode=args.mode,
+                rerank=args.rerank,
+                use_deep_search=True,
+                preferred_role=(
+                    None if args.preferred_role == "none" else args.preferred_role
+                ),
+            )
+        else:
+            results = await engram.search(
+                query=sample["question"],
+                agent_id=agent_id,
+                limit=args.limit,
+                min_score=args.min_score,
+                mode=args.mode,
+                rerank=args.rerank,
+            )
         retrieved = [
             {
                 "memory_id": result.memory.memory_id,
@@ -476,22 +751,47 @@ async def run_sample(
             for result in results
         ]
 
-        context = await engram.get_context_block(
-            sample["question"],
-            agent_id,
-            limit=args.limit,
-            min_score=args.min_score,
-            max_tokens=args.max_context_tokens,
-            memory_types=["episodic"],
-            group_by_type=True,
-        )
+        context_sources: list[dict[str, Any]] = []
+        effective_context_strategy = args.context_strategy
+        if effective_context_strategy == "session":
+            context = await build_expanded_context(
+                engram,
+                agent_id=agent_id,
+                retrieved=retrieved,
+                n_sessions=args.expand_sessions or args.limit,
+                max_tokens=args.max_context_tokens,
+            )
+        elif effective_context_strategy == "window":
+            context, context_sources = await engram.get_neighboring_context_block(
+                results,
+                agent_id,
+                before=args.evidence_window_size,
+                after=args.evidence_window_size,
+                include_session_start=True,
+                max_tokens=args.max_context_tokens,
+                prior_user_turns=args.prior_user_turns,
+                context_order="relevance",
+            )
+        else:
+            context = await engram.get_context_block(
+                sample["question"],
+                agent_id,
+                limit=args.limit,
+                min_score=args.min_score,
+                max_tokens=args.max_context_tokens,
+                group_by_type=True,
+                rerank=args.rerank,
+            )
         hypothesis = ""
+        effective_reading = args.reading
         if args.generate_answers:
             hypothesis = await maybe_generate_answer(
                 engram,
                 question=sample["question"],
+                question_date=sample.get("question_date"),
                 context=context,
                 max_tokens=args.answer_max_tokens,
+                reading=args.reading,
             )
 
         metrics = recall_metrics(sample, retrieved, context, hypothesis)
@@ -503,14 +803,18 @@ async def run_sample(
             "hypothesis": hypothesis,
             "agent_id": agent_id,
             "memory_count": len(memories),
+            "ingested": ingested,
             "retrieved": retrieved,
             "context": context,
+            "context_strategy": effective_context_strategy,
+            "context_sources": context_sources,
+            "reading": effective_reading,
             "metrics": metrics,
             "elapsed_seconds": round(time.perf_counter() - start, 3),
             "error": None,
         }
     finally:
-        if not args.keep_memories:
+        if not args.keep_memories and not args.reuse_store:
             await engram.purge(agent_id=agent_id)
 
 
@@ -560,6 +864,7 @@ def summarize(traces: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "total": len(traces),
         "completed": len(completed),
         "errors": len(errored),
+        "errored_question_ids": [trace.get("question_id") for trace in errored],
         "answer_session_recall": avg_metric("answer_session_recall"),
         "all_answer_sessions_recalled_rate": rate_metric(
             "all_answer_sessions_recalled"
@@ -603,8 +908,15 @@ async def run(args: argparse.Namespace) -> None:
         settings_update["allow_embedding_dimension_change"] = True
     settings = settings.model_copy(update=settings_update)
 
-    engram = Engram(settings=settings, database_url=args.database_url)
+    engram = Engram(
+        settings=settings,
+        database_url=args.database_url,
+        memory_policy=BENCHMARK_POLICY,
+    )
     await engram.connect()
+    startup_vector_dimension = await assert_vector_dimension_matches(
+        engram, label="at startup"
+    )
     traces: list[dict[str, Any]] = []
     try:
         with (
@@ -614,6 +926,7 @@ async def run(args: argparse.Namespace) -> None:
             for index, sample in enumerate(samples, start=1):
                 label = f"{index}/{len(samples)} {sample.get('question_id')}"
                 print(f"Running {label}")
+                await assert_vector_dimension_matches(engram, label=f"before {label}")
                 try:
                     trace = await run_sample(
                         engram,
@@ -622,6 +935,12 @@ async def run(args: argparse.Namespace) -> None:
                         run_id=run_id,
                     )
                 except Exception as exc:
+                    # Dimension mismatches are already caught fatally by the
+                    # proactive pg_attribute check above, so any error here is a
+                    # genuine per-sample failure. Abort on --fail-fast; otherwise
+                    # record it for forensics but never let it reach the scored
+                    # file as a blank hypothesis (an infra failure must not be
+                    # graded as a wrong model answer).
                     if args.fail_fast:
                         raise
                     trace = {
@@ -640,17 +959,23 @@ async def run(args: argparse.Namespace) -> None:
                 traces.append(trace)
                 traces_file.write(json.dumps(trace, ensure_ascii=False) + "\n")
                 traces_file.flush()
-                hypotheses_file.write(
-                    json.dumps(
-                        {
-                            "question_id": trace["question_id"],
-                            "hypothesis": trace.get("hypothesis", ""),
-                        },
-                        ensure_ascii=False,
+                # A sample that errored never ran; it must not appear in the
+                # scored hypotheses file. The external LongMemEval scorer keys on
+                # question_id and simply won't grade what isn't there, instead of
+                # counting a blank as a model miss. summary.json's
+                # errored_question_ids records what was skipped.
+                if trace.get("error") is None:
+                    hypotheses_file.write(
+                        json.dumps(
+                            {
+                                "question_id": trace["question_id"],
+                                "hypothesis": trace.get("hypothesis", ""),
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
-                hypotheses_file.flush()
+                    hypotheses_file.flush()
 
         summary = summarize(traces)
         summary["data_path"] = str(data_path)
@@ -658,6 +983,27 @@ async def run(args: argparse.Namespace) -> None:
         summary["search_mode"] = args.mode
         summary["limit"] = args.limit
         summary["generated_answers"] = bool(args.generate_answers)
+        summary["rerank"] = bool(args.rerank)
+        summary["context_strategy"] = args.context_strategy
+        summary["evidence_window_size"] = args.evidence_window_size
+        summary["prior_user_turns"] = args.prior_user_turns
+        summary["max_context_tokens"] = args.max_context_tokens
+        summary["answer_max_tokens"] = args.answer_max_tokens
+        summary["expand_sessions"] = args.expand_sessions
+        summary["deep_search"] = bool(args.deep_search)
+        summary["evidence_set"] = bool(args.deep_search)
+        summary["preferred_role"] = args.preferred_role
+        summary["reading"] = args.reading
+        summary["llm_provider"] = settings.llm_provider
+        summary["llm_model"] = settings.llm_model
+        summary["embedding_provider"] = settings.embedding_provider
+        summary["embedding_model"] = settings.embedding_model
+        summary["embedding_dimension"] = settings.embedding_dimension
+        summary["database_vector_dimension"] = startup_vector_dimension
+        summary["near_duplicate_threshold"] = settings.near_duplicate_threshold
+        summary["max_memory_chars"] = args.max_memory_chars
+        summary["min_score"] = args.min_score
+        summary["memory_policy"] = BENCHMARK_POLICY.name
         summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
         print(json.dumps(summary, indent=2, ensure_ascii=False))
         print(f"Wrote {traces_path}")
@@ -673,6 +1019,12 @@ def main() -> None:
         raise SystemExit("--ingest-batch-size must be >= 1")
     if args.max_memory_chars < 1:
         raise SystemExit("--max-memory-chars must be >= 1")
+    if args.max_context_tokens < 1:
+        raise SystemExit("--max-context-tokens must be >= 1")
+    if args.evidence_window_size < 0:
+        raise SystemExit("--evidence-window-size must be >= 0")
+    if args.prior_user_turns < 0:
+        raise SystemExit("--prior-user-turns must be >= 0")
     if args.generate_answers and not os.getenv("ENGRAM_LLM_PROVIDER"):
         print(
             "Warning: --generate-answers was set but ENGRAM_LLM_PROVIDER is not set; "

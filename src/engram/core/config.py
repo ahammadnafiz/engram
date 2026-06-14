@@ -19,7 +19,7 @@ import re
 from functools import lru_cache
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -155,8 +155,34 @@ class EngramSettings(BaseSettings):
     weight_decay: float = Field(default=0.25, ge=0, le=1)
     weight_importance: float = Field(default=0.15, ge=0, le=1)
     decay_rate: float = Field(default=0.995, gt=0, lt=1)
+    search_candidate_multiplier: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description=(
+            "Hybrid search fetches limit * this many candidates per branch "
+            "(semantic/keyword) before rank fusion. Higher values improve "
+            "recall completeness at a small latency cost."
+        ),
+    )
     default_search_limit: int = Field(default=10, ge=1, le=100)
     max_search_limit: int = Field(default=100, ge=1, le=1000)
+    reranker_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        description=(
+            "Cross-encoder model used when search(rerank=True) is requested. "
+            "Requires the optional sentence-transformers dependency."
+        ),
+    )
+    reranker_backend: str = Field(
+        default="torch",
+        pattern="^(torch|onnx|openvino)$",
+        description=(
+            "Inference backend for the reranker. 'onnx' is 2-3x faster on "
+            "CPU and avoids the heavy torch dependency, but requires the "
+            "optional optimum and onnxruntime packages."
+        ),
+    )
     near_duplicate_threshold: float = Field(
         default=0.95,
         ge=0.0,
@@ -216,7 +242,7 @@ class EngramSettings(BaseSettings):
 
     @field_validator("max_pool_size")
     @classmethod
-    def validate_pool_sizes(cls, v: int, info: dict) -> int:  # type: ignore[type-arg]
+    def validate_pool_sizes(cls, v: int, info: ValidationInfo) -> int:
         """Ensure max_pool_size >= min_pool_size."""
         min_size = info.data.get("min_pool_size", 5)
         if v < min_size:
@@ -226,7 +252,7 @@ class EngramSettings(BaseSettings):
 
     @field_validator("weight_importance")
     @classmethod
-    def validate_weights_sum(cls, v: float, info: dict) -> float:  # type: ignore[type-arg]
+    def validate_weights_sum(cls, v: float, info: ValidationInfo) -> float:
         """Ensure all search weights sum to approximately 1.0."""
         total = (
             info.data.get("weight_semantic", 0.40)

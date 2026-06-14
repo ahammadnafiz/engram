@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -281,7 +281,7 @@ class PostgresStorage:
             List of records.
         """
         async with self.acquire() as conn:
-            return await conn.fetch(query, *args)
+            return cast("list[asyncpg.Record]", await conn.fetch(query, *args))
 
     async def fetchval(self, query: str, *args: Any, column: int = 0) -> Any:
         """Fetch a single value.
@@ -370,6 +370,20 @@ class PostgresStorage:
             "CREATE INDEX IF NOT EXISTS idx_memory_agent_type "
             "ON agent_memory(agent_id, memory_type);"
         )
+
+        # Upgrade pre-existing unique fact indexes to the md5 form (raw-fact
+        # entries fail for facts larger than the ~2704-byte btree row limit).
+        unique_fact_def = await self.fetchval(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE indexname = 'idx_unique_memory_fact'"
+        )
+        if unique_fact_def is not None and "md5" not in unique_fact_def:
+            logger.info("Rebuilding idx_unique_memory_fact on md5(fact)")
+            await self.execute("DROP INDEX idx_unique_memory_fact;")
+            await self.execute(
+                "CREATE UNIQUE INDEX idx_unique_memory_fact "
+                "ON agent_memory(agent_id, COALESCE(user_id, ''), md5(fact));"
+            )
         logger.info("Database schema initialized")
 
         # Align the generated tsvector columns with the configured language
@@ -465,7 +479,7 @@ class PostgresStorage:
         try:
             result = await self.fetchval(query)
             if result is not None and result > 0:
-                return result
+                return int(result)
             return None
         except Exception as e:
             # Log the error but return None since this is a probing query

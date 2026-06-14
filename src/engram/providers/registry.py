@@ -6,7 +6,7 @@ This module provides a generic registry for pluggable providers.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -61,6 +61,24 @@ class ProviderRegistry(Generic[T]):
     def available_providers(self) -> list[str]:
         """Get list of all registered provider names."""
         return list(self._providers.keys())
+
+    @overload
+    def register(
+        self,
+        name: str,
+        provider_cls: None = None,
+        *,
+        aliases: list[str] | None = None,
+    ) -> Callable[[type[T]], type[T]]: ...
+
+    @overload
+    def register(
+        self,
+        name: str,
+        provider_cls: type[T],
+        *,
+        aliases: list[str] | None = None,
+    ) -> type[T]: ...
 
     def register(
         self,
