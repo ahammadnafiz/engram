@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,10 +16,41 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 # Set test environment variables before importing engram
-os.environ.setdefault("ENGRAM_DATABASE_URL", "postgresql://localhost:5432/engram_test")
+DEFAULT_TEST_DATABASE_URL = "postgresql://localhost:5432/engram_test"
+
+os.environ.setdefault("ENGRAM_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
 os.environ.setdefault("ENGRAM_EMBEDDING_PROVIDER", "sentence-transformers")
 os.environ.setdefault("ENGRAM_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 os.environ.setdefault("ENGRAM_EMBEDDING_DIMENSION", "384")
+
+
+def configure_integration_environment(
+    *,
+    local_embeddings: bool = False,
+    env_path: Path | None = None,
+) -> str:
+    """Prepare deterministic integration-test env without overriding caller env."""
+    from dotenv import load_dotenv
+
+    if env_path is None:
+        env_path = Path(__file__).parent.parent / ".env"
+    load_dotenv(env_path, override=False)
+
+    database_url = os.environ.get("ENGRAM_TEST_DATABASE_URL") or os.environ.get(
+        "ENGRAM_DATABASE_URL", DEFAULT_TEST_DATABASE_URL
+    )
+    os.environ["ENGRAM_DATABASE_URL"] = database_url
+    os.environ["ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE"] = "false"
+
+    if local_embeddings:
+        os.environ["ENGRAM_EMBEDDING_PROVIDER"] = "sentence-transformers"
+        os.environ["ENGRAM_EMBEDDING_MODEL"] = "all-MiniLM-L6-v2"
+        os.environ["ENGRAM_EMBEDDING_DIMENSION"] = "384"
+
+    from engram.core.config import clear_settings_cache
+
+    clear_settings_cache()
+    return database_url
 
 
 @pytest.fixture(scope="session")

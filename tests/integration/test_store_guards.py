@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import os
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -51,16 +50,14 @@ class FakeEmbedding:
 @pytest.fixture
 async def store_env():
     """Connected MemoryStore + storage + fake embedding on a unique agent."""
-    from dotenv import load_dotenv
-
+    from conftest import configure_integration_environment
     from engram.core.config import EngramSettings
     from engram.memory.store import MemoryStore
     from engram.storage.postgres import PostgresStorage
 
-    env_path = Path(__file__).parent.parent.parent / ".env"
-    load_dotenv(env_path, override=True)
+    database_url = configure_integration_environment()
 
-    settings = EngramSettings(database_url=os.environ["ENGRAM_DATABASE_URL"])
+    settings = EngramSettings(database_url=database_url)
     storage = PostgresStorage(settings)
     await storage.connect()
     await storage.init_schema(embedding_dimension=DIMENSION)

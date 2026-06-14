@@ -5,9 +5,7 @@ Run with: pytest tests/integration/test_task_guards.py -v --run-integration
 
 from __future__ import annotations
 
-import os
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -17,16 +15,14 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 async def task_env():
     """Connected TaskMemoryManager on a unique agent."""
-    from dotenv import load_dotenv
-
+    from conftest import configure_integration_environment
     from engram.core.config import EngramSettings
     from engram.storage.postgres import PostgresStorage
     from engram.task.manager import TaskMemoryManager
 
-    env_path = Path(__file__).parent.parent.parent / ".env"
-    load_dotenv(env_path, override=True)
+    database_url = configure_integration_environment()
 
-    settings = EngramSettings(database_url=os.environ["ENGRAM_DATABASE_URL"])
+    settings = EngramSettings(database_url=database_url)
     storage = PostgresStorage(settings)
     await storage.connect()
     await storage.init_schema()

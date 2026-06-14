@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import uuid
 from pathlib import Path
 
@@ -21,23 +20,9 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 async def engram_client():
     """Create Engram client for integration tests."""
-    from pathlib import Path
+    from conftest import configure_integration_environment
 
-    from dotenv import load_dotenv
-
-    # Load .env file to get actual database credentials (override existing)
-    env_path = Path(__file__).parent.parent.parent / ".env"
-    load_dotenv(env_path, override=True)
-
-    # Use sentence-transformers for local testing (no API key needed)
-    os.environ["ENGRAM_EMBEDDING_PROVIDER"] = "sentence-transformers"
-    os.environ["ENGRAM_EMBEDDING_MODEL"] = "all-MiniLM-L6-v2"
-    os.environ["ENGRAM_EMBEDDING_DIMENSION"] = "384"
-
-    # Clear cached settings to pick up new env vars
-    from engram.core.config import clear_settings_cache
-
-    clear_settings_cache()
+    configure_integration_environment(local_embeddings=True)
 
     from engram import Engram
 
