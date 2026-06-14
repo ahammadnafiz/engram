@@ -1,858 +1,353 @@
 #!/usr/bin/env python3
-"""
-Engram Comprehensive Demo
-=========================
+"""End-to-end Engram API tour.
 
-Advanced demo showcasing Engram's full capabilities with realistic content,
-complex relationships, and thorough testing of all API operations.
-
-Two-Column Memory System:
-    Engram uses a cost-effective two-column approach:
-    - `content` (fact): The extracted fact - EMBEDDED for hybrid search
-    - `main_content`: Full conversation context - NOT embedded (free storage)
-
-    This preserves full context without increasing embedding API costs.
-
-This demo uses sentence-transformers (local, free embeddings) by default,
-but works with ANY provider thanks to Engram's pluggable architecture.
-
-Provider Options:
-    # Local (free) - Default for this demo
-    ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
-    ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
-
-    # OpenAI (cloud)
-    ENGRAM_EMBEDDING_PROVIDER=openai
-    ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
-    ENGRAM_OPENAI_API_KEY=sk-...
-
-    # Cohere
-    ENGRAM_EMBEDDING_PROVIDER=cohere
-    ENGRAM_EMBEDDING_MODEL=embed-english-v3.0
-    ENGRAM_COHERE_API_KEY=...
-
-    # Ollama (local)
-    ENGRAM_EMBEDDING_PROVIDER=ollama
-    ENGRAM_EMBEDDING_MODEL=nomic-embed-text
-
-Usage:
-    # Default (sentence-transformers)
+Run:
     python examples/basic_usage.py
 
-    # With OpenAI
-    ENGRAM_EMBEDDING_PROVIDER=openai python examples/basic_usage.py
+Local setup:
+    docker compose up -d postgres
+    export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
+    export ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
+    export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
 
-Operations Demonstrated:
-    - health_check()  - System health verification
-    - add()           - Individual memory storage (with main_content)
-    - add_batch()     - Bulk memory insertion
-    - search()        - Hybrid semantic + keyword search
-    - get()           - Retrieve by ID
-    - list_recent()   - Chronological listing
-    - update()        - Modify existing memories
-    - reinforce()     - Boost importance scores
-    - relate()        - Create knowledge graph edges
-    - traverse()      - Multi-hop graph exploration
-    - traverse_many() - Multi-seed graph expansion for prompts
-    - start_task()    - Durable long-running task memory
-    - record_turn()   - Append user/assistant events to a task ledger
-    - build_context() - Assemble task + memory context for prompts
-    - process_memory_jobs() - Derive facts/checkpoints from queued turns
-    - session()       - Scoped conversation context
-    - forget()        - Delete single memory
-    - purge()         - Bulk delete by agent
+This script keeps LLM-backed calls optional. If no LLM provider is configured,
+conversation extraction and answer_from_evidence are skipped or return an empty
+answer, while the rest of the API still runs.
 """
+
+from __future__ import annotations
 
 import asyncio
 import os
+import uuid
+from pathlib import Path
+from typing import Any
 
-# Default to local embeddings (no API key required)
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent.parent / ".env", override=False)
+os.environ.setdefault(
+    "ENGRAM_DATABASE_URL",
+    "postgresql://engram:engram_secret@localhost:5432/engram",
+)
 os.environ.setdefault("ENGRAM_EMBEDDING_PROVIDER", "sentence-transformers")
 os.environ.setdefault("ENGRAM_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
-# Load .env if exists (allows overriding with any provider)
-from pathlib import Path
 
-env_file = Path(__file__).parent.parent / ".env"
-if env_file.exists():
-    for line in env_file.read_text().splitlines():
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+def section(title: str) -> None:
+    print(f"\n{'=' * 72}\n{title}\n{'=' * 72}")
 
 
-def print_header(title: str, emoji: str = "📌"):
-    """Print a formatted section header."""
-    print(f"\n{'=' * 60}")
-    print(f"{emoji} {title}")
-    print("=" * 60)
+def item(label: str, value: Any) -> None:
+    print(f"{label:<24} {value}")
 
 
-def print_subheader(title: str):
-    """Print a formatted subsection header."""
-    print(f"\n  ▶ {title}")
-    print("  " + "-" * 40)
+def preview(text: str, limit: int = 180) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else f"{text[:limit]}..."
 
 
-async def main():
+async def main() -> None:
     from engram import Engram
 
-    print_header("🧠 Engram Comprehensive Demo", "🚀")
+    run_id = uuid.uuid4().hex[:8]
+    agent_id = f"api-tour-{run_id}"
+    user_id = "sarah"
 
-    # Show which provider is being used
-    provider = os.environ.get("ENGRAM_EMBEDDING_PROVIDER", "sentence-transformers")
-    model = os.environ.get("ENGRAM_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-    print(f"""
-    Provider: {provider}
-    Model:    {model}
+    async with Engram(memory_policy="coding_agent") as engram:
+        section("1. Health And Setup")
+        health = await engram.health_check()
+        item("status", health.get("status"))
+        item("agent_id", agent_id)
+        item("llm_enabled", engram.llm is not None)
 
-    This demo simulates an AI assistant learning about a user
-    over multiple conversations, building a knowledge graph,
-    and retrieving relevant context for conversations.
-    """)
-
-    async with Engram() as memory:
-        agent_id = "personal-assistant"
-        user_id = "sarah_chen"
-
-        # ================================================================
-        # PHASE 1: HEALTH CHECK
-        # ================================================================
-        print_header("Health Check", "🏥")
-        status = await memory.health_check()
-        components = status.get("components", {})
-        db_status = components.get("database", {})
-        emb_status = components.get("embedding", {})
-        print(f"  Overall:    {status.get('status', 'unknown')}")
-        print(f"  Database:   {db_status.get('status', 'unknown')}")
-        print(f"  Embeddings: {emb_status.get('status', 'unknown')}")
-        print(f"  Dimension:  {emb_status.get('dimension', 'unknown')}")
-        print(f"  Version:    {status.get('version', 'unknown')}")
-
-        # ================================================================
-        # PHASE 2: BUILDING USER PROFILE (Complex Content)
-        # ================================================================
-        print_header("Building User Profile", "👤")
-
-        # Personal Information
-        # Demonstrating the TWO-COLUMN MEMORY SYSTEM:
-        #   - content: The fact (EMBEDDED for search)
-        #   - main_content: Full conversation context (NOT embedded, preserved for context)
-        print_subheader("Personal Details (Two-Column System)")
-        personal_memories = []
-
-        personal_memories.append(
-            await memory.add(
-                content="Sarah Chen is a 32-year-old software architect living in Seattle",
-                main_content="[USER]: I'm Sarah Chen, 32, and I work as a software architect. I moved to Seattle from San Francisco in 2022.\n[AI]: Welcome to Seattle! That's an exciting career move.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={"category": "personal", "confidence": 0.95},
-            )
+        section("2. Add, Batch Add, And Policy Metadata")
+        allergy = await engram.add(
+            "User is allergic to shellfish",
+            agent_id,
+            user_id=user_id,
+            main_content="[USER]: Shellfish makes me sick.\n[AI]: I will avoid it.",
+            metadata={"category": "health"},
         )
-        print("  ✓ Added: Personal background (with context)")
-
-        personal_memories.append(
-            await memory.add(
-                content="Sarah has a golden retriever named Apollo who is 4 years old",
-                main_content="[USER]: I have a golden retriever named Apollo, he's 4. Adopted him from a shelter!\n[AI]: Apollo sounds wonderful! Rescue dogs are the best.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={"category": "personal", "subcategory": "pets"},
-            )
+        repo_rule = await engram.add(
+            "Repo constraint: never revert user changes without approval",
+            agent_id,
+            user_id=user_id,
         )
-        print("  ✓ Added: Pet information (with context)")
-
-        personal_memories.append(
-            await memory.add(
-                content="Sarah is allergic to shellfish - discovered during Maine trip at age 25",
-                main_content="[USER]: I'm allergic to shellfish. Found out the hard way in Maine when I was 25.\n[AI]: That's important to know. I'll remember to avoid seafood recommendations.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={"category": "health", "severity": "high"},
-            )
-        )
-        print("  ✓ Added: Health/allergy info (with context)")
-
-        # Professional Information
-        print_subheader("Professional Details")
-        work_memories = []
-
-        work_memories.append(
-            await memory.add(
-                content="Sarah works as a Principal Software Architect at CloudScale Inc, focusing on distributed systems and microservices architecture. She leads a team of 8 engineers.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={"category": "work", "company": "CloudScale Inc"},
-            )
-        )
-        print("  ✓ Added: Current job")
-
-        work_memories.append(
-            await memory.add(
-                content="Sarah is an expert in Python, Go, and Rust. She prefers Rust for performance-critical systems but uses Python for rapid prototyping and data analysis scripts.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={"category": "skills", "type": "programming"},
-            )
-        )
-        print("  ✓ Added: Programming skills")
-
-        work_memories.append(
-            await memory.add(
-                content="Sarah is currently working on a project called 'Project Aurora' - a real-time data streaming platform that needs to handle 10 million events per second with sub-millisecond latency.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={"category": "work", "project": "Aurora", "priority": "high"},
-            )
-        )
-        print("  ✓ Added: Current project")
-
-        work_memories.append(
-            await memory.add(
-                content="Sarah mentioned she's frustrated with her current CI/CD pipeline - builds take over 45 minutes and the flaky tests are causing deployment delays. She's considering migrating to Bazel.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={
-                    "category": "work",
-                    "sentiment": "frustrated",
-                    "topic": "devops",
+        batch = await engram.add_batch(
+            [
+                {
+                    "content": "Project Atlas checkout rollback owner is Priya",
+                    "agent_id": agent_id,
+                    "user_id": user_id,
+                    "memory_type": "project",
+                    "metadata": {
+                        "project": "atlas_checkout",
+                        "original_session_id": "demo-session-1",
+                        "turn_index": 0,
+                        "turn_role": "user",
+                    },
                 },
-            )
+                {
+                    "content": "Tool result: pytest tests/unit -q passed",
+                    "agent_id": agent_id,
+                    "user_id": user_id,
+                    "memory_type": "tool_result",
+                    "metadata": {
+                        "project": "atlas_checkout",
+                        "original_session_id": "demo-session-1",
+                        "turn_index": 1,
+                        "turn_role": "tool",
+                    },
+                },
+                {
+                    "content": "Decision: use cached inventory reads for launch week",
+                    "agent_id": agent_id,
+                    "user_id": user_id,
+                    "memory_type": "decision",
+                    "metadata": {
+                        "project": "atlas_checkout",
+                        "original_session_id": "demo-session-1",
+                        "turn_index": 2,
+                        "turn_role": "assistant",
+                    },
+                },
+            ]
         )
-        print("  ✓ Added: Work frustration")
+        item("single_memory", allergy.memory_id)
+        item("policy_type", repo_rule.memory_type)
+        item("critical_slot", repo_rule.metadata.get("critical_slot"))
+        item("batch_count", len(batch))
 
-        # Preferences
-        print_subheader("Preferences & Interests")
-        pref_memories = []
-
-        pref_memories.append(
-            await memory.add(
-                content="Sarah prefers dark mode in all applications and IDEs. She uses the Dracula theme in VS Code and has her terminal configured with Catppuccin Mocha colors.",
-                agent_id=agent_id,
+        section("3. Search Modes, Deep Search, Critical Recall, Trace")
+        for mode in ("hybrid", "semantic", "keyword"):
+            results = await engram.search(
+                "rollback owner pytest launch",
+                agent_id,
                 user_id=user_id,
-                metadata={"category": "preferences", "type": "ui"},
+                mode=mode,
+                limit=3,
             )
-        )
-        print("  ✓ Added: UI preferences")
+            item(f"{mode}_hits", [preview(r.memory.content, 50) for r in results])
 
-        pref_memories.append(
-            await memory.add(
-                content="For productivity, Sarah uses the Pomodoro technique with 45-minute focus sessions. She blocks all notifications during deep work and prefers async communication over meetings.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={"category": "preferences", "type": "productivity"},
-            )
-        )
-        print("  ✓ Added: Productivity style")
-
-        pref_memories.append(
-            await memory.add(
-                content="Sarah is learning Japanese in her spare time using Anki flashcards and watching anime without subtitles. She's at JLPT N3 level and plans to take N2 next year.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={"category": "hobbies", "type": "language_learning"},
-            )
-        )
-        print("  ✓ Added: Language learning hobby")
-
-        pref_memories.append(
-            await memory.add(
-                content="Sarah is an avid hiker and has completed several trails in the Cascades. Her goal is to summit Mount Rainier next summer. She typically hikes with Apollo on weekends.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={"category": "hobbies", "type": "outdoor"},
-            )
-        )
-        print("  ✓ Added: Hiking hobby")
-
-        pref_memories.append(
-            await memory.add(
-                content="Sarah drinks oat milk lattes - she's lactose intolerant but not vegan. Her favorite coffee shop is 'Analog Coffee' near her office where she goes every morning around 8:30 AM.",
-                agent_id=agent_id,
-                user_id=user_id,
-                metadata={"category": "preferences", "type": "food", "routine": True},
-            )
-        )
-        print("  ✓ Added: Coffee preference")
-
-        # ================================================================
-        # PHASE 3: BATCH INSERT (Recent Conversations)
-        # ================================================================
-        print_header("Batch Insert - Recent Conversations", "📦")
-
-        # Batch insert also supports main_content for two-column system
-        conversation_batch = [
-            {
-                "content": "Sarah wants to implement circuit breakers in microservices using Hystrix pattern in Go",
-                "main_content": "[USER]: How do I implement circuit breakers in Go?\n[AI]: The Hystrix pattern is great for preventing cascade failures.",
-                "agent_id": agent_id,
-                "user_id": user_id,
-                "metadata": {"category": "technical", "topic": "resilience"},
-            },
-            {
-                "content": "Sarah's team is adopting OpenTelemetry for distributed tracing, migrating from Jaeger",
-                "main_content": "[USER]: We're moving to OpenTelemetry from Jaeger.\n[AI]: Good choice for vendor-neutral instrumentation!",
-                "agent_id": agent_id,
-                "user_id": user_id,
-                "metadata": {"category": "technical", "topic": "observability"},
-            },
-            {
-                "content": "Sarah submitted a KubeCon talk proposal about Kubernetes to Nomad migration",
-                "agent_id": agent_id,
-                "user_id": user_id,
-                "metadata": {"category": "events", "event": "KubeCon"},
-            },
-            {
-                "content": "Sarah's birthday is March 15th - prefers small gatherings over surprise parties",
-                "main_content": "[USER]: My birthday is March 15th. I don't like surprises.\n[AI]: Noted! Small gatherings it is.",
-                "agent_id": agent_id,
-                "user_id": user_id,
-                "metadata": {"category": "personal", "type": "birthday"},
-            },
-            {
-                "content": "Sarah is re-reading 'Designing Data-Intensive Applications' - considers it the best technical book",
-                "agent_id": agent_id,
-                "user_id": user_id,
-                "metadata": {"category": "books", "genre": "technical"},
-            },
-            {
-                "content": "Sarah has 1:1 with manager every Tuesday at 2 PM for career discussions",
-                "agent_id": agent_id,
-                "user_id": user_id,
-                "metadata": {"category": "work", "type": "meeting", "recurring": True},
-            },
-        ]
-
-        batch_results = await memory.add_batch(conversation_batch)
-        print(f"  ✓ Added {len(batch_results)} conversation memories in batch")
-        for mem in batch_results:
-            print(f"    - {mem.content[:60]}...")
-
-        # ================================================================
-        # PHASE 4: SEARCH TESTING
-        # ================================================================
-        print_header("Search Testing - Hybrid Search", "🔍")
-
-        # Test 1: Semantic search for programming
-        print_subheader("Test 1: Semantic - 'What programming languages?'")
-        results = await memory.search(
-            query="What programming languages does she know and prefer?",
-            agent_id=agent_id,
+        deep = await engram.deep_search(
+            "What should the agent remember before launch?",
+            agent_id,
             user_id=user_id,
-            limit=3,
+            limit=5,
         )
-        for r in results:
-            fact = r.memory.fact or r.memory.content
-            print(f"  [{r.score:.3f}] {fact[:70]}...")
-            # Show main_content if available (two-column system)
-            if r.memory.main_content:
-                ctx = r.memory.main_content[:60].replace("\n", " ")
-                print(f"           └─ Context: {ctx}...")
-
-        # Test 2: Search for work-related context
-        print_subheader("Test 2: Work Context - 'current project challenges'")
-        results = await memory.search(
-            query="What challenges is she facing at work right now?",
-            agent_id=agent_id,
+        critical = await engram.recall_critical(
+            agent_id,
             user_id=user_id,
-            limit=3,
+            memory_types=["constraint", "project", "tool_result", "decision"],
         )
-        for r in results:
-            print(f"  [{r.score:.3f}] {r.memory.content[:70]}...")
-
-        # Test 3: Food and dietary restrictions (shows main_content)
-        print_subheader("Test 3: Dietary - 'food allergies restrictions'")
-        results = await memory.search(
-            query="Does she have any food allergies or dietary restrictions?",
-            agent_id=agent_id,
+        trace = await engram.trace_recall(
+            "launch checklist: rollback owner pytest repo rules",
+            agent_id,
             user_id=user_id,
-            limit=3,
+            expected_terms=["Priya", "pytest", "never revert"],
+            max_tokens=1000,
         )
-        for r in results:
-            fact = r.memory.fact or r.memory.content
-            print(f"  [{r.score:.3f}] {fact[:70]}...")
-            # Display main_content to show conversation context is preserved
-            if r.memory.main_content:
-                ctx = r.memory.main_content[:80].replace("\n", " | ")
-                print(f"           └─ {ctx}...")
+        item("deep_hits", len(deep))
+        item("critical_hits", len(critical))
+        item("trace_missing", trace.missing_expected_terms)
+        print(trace.context)
 
-        # Test 4: Hobbies and interests
-        print_subheader("Test 4: Hobbies - 'weekend activities interests'")
-        results = await memory.search(
-            query="What does she do for fun on weekends?",
-            agent_id=agent_id,
+        section("4. Context Block And Plain Memory Reads")
+        block = await engram.get_context_block(
+            "repo and launch context",
+            agent_id,
             user_id=user_id,
-            limit=4,
+            memory_types=["constraint", "project", "decision", "tool_result"],
+            group_by_type=True,
+            max_tokens=800,
         )
-        for r in results:
-            print(f"  [{r.score:.3f}] {r.memory.content[:70]}...")
-
-        # Test 5: Specific keyword search
-        print_subheader("Test 5: Keyword - 'Apollo dog'")
-        results = await memory.search(
-            query="Apollo golden retriever dog pet",
-            agent_id=agent_id,
+        print(block)
+        filtered = await engram.get_memories(
+            agent_id,
             user_id=user_id,
-            limit=2,
+            metadata_filter={"project": "atlas_checkout"},
+            limit=10,
         )
-        for r in results:
-            print(f"  [{r.score:.3f}] {r.memory.content[:70]}...")
+        item("filtered_memories", [m.memory_id for m in filtered])
 
-        # Test 6: Technical tools
-        print_subheader("Test 6: Technical - 'Kubernetes observability tools'")
-        results = await memory.search(
-            query="What tools is she using for Kubernetes observability and tracing?",
-            agent_id=agent_id,
-            user_id=user_id,
-            limit=3,
+        section("5. Get, Update, Reinforce, List Recent")
+        fetched = await engram.get(allergy.memory_id)
+        updated = await engram.update(
+            fetched.memory_id,
+            content="User is allergic to shellfish and cashews",
+            metadata={"source": "manual_update"},
         )
-        for r in results:
-            print(f"  [{r.score:.3f}] {r.memory.content[:70]}...")
+        reinforced = await engram.reinforce(updated.memory_id, importance_boost=0.2)
+        recent = await engram.list_recent(agent_id, user_id=user_id, limit=5)
+        item("updated_fact", updated.content)
+        item("importance", f"{reinforced.importance:.2f}")
+        item("recent_count", len(recent))
 
-        # ================================================================
-        # PHASE 5: GET & UPDATE
-        # ================================================================
-        print_header("Get & Update Operations", "✏️")
-
-        # Get specific memory
-        print_subheader("Get by ID")
-        work_mem = work_memories[0]
-        retrieved = await memory.get(work_mem.memory_id)
-        print(f"  ID: {retrieved.memory_id}")
-        print(f"  Content: {retrieved.content[:60]}...")
-        print(f"  Importance: {retrieved.importance}")
-        print(f"  Access Count: {retrieved.access_count}")
-        print(f"  Created: {retrieved.created_at}")
-
-        # Update memory with new information
-        print_subheader("Update Memory")
-        print(f"  Before: {work_memories[2].content[:50]}...")
-        updated = await memory.update(
-            memory_id=work_memories[2].memory_id,
-            content="Sarah successfully launched 'Project Aurora' - the real-time data streaming platform now handles 15 million events per second with 0.5ms latency. The team celebrated with a launch party.",
-            metadata={"status": "completed", "celebration": True},
-        )
-        print(f"  After:  {updated.content[:50]}...")
-
-        # ================================================================
-        # PHASE 6: REINFORCE (Importance Boosting)
-        # ================================================================
-        print_header("Reinforce - Importance Boosting", "💪")
-
-        # Simulate the allergy info being useful in conversation
-        allergy_mem = personal_memories[2]  # Shellfish allergy
-
-        print_subheader("Reinforcing Critical Health Info")
-        print(f"  Memory: {allergy_mem.content[:50]}...")
-
-        before = await memory.get(allergy_mem.memory_id)
-        print(
-            f"  Before: importance={before.importance:.2f}, access_count={before.access_count}"
-        )
-
-        # Reinforce multiple times (as if it's been useful in several conversations)
-        for _ in range(3):
-            await memory.reinforce(allergy_mem.memory_id)
-
-        after = await memory.get(allergy_mem.memory_id)
-        print(
-            f"  After (3x reinforce): importance={after.importance:.2f}, access_count={after.access_count}"
-        )
-
-        # Now search should rank this higher
-        print_subheader("Search After Reinforcement")
-        results = await memory.search(
-            query="health information allergies", agent_id=agent_id, limit=2
-        )
-        for r in results:
-            print(
-                f"  [{r.score:.3f}] importance={r.memory.importance:.2f} | {r.memory.content[:50]}..."
-            )
-
-        # ================================================================
-        # PHASE 7: LIST RECENT
-        # ================================================================
-        print_header("List Recent Memories", "📋")
-
-        recent = await memory.list_recent(agent_id=agent_id, limit=5)
-        print(f"  Most recent {len(recent)} memories:")
-        for i, m in enumerate(recent, 1):
-            print(f"  {i}. [{m.created_at.strftime('%H:%M:%S')}] {m.content[:55]}...")
-
-        # ================================================================
-        # PHASE 8: CREATE RELATIONSHIPS
-        # ================================================================
-        print_header("Create Knowledge Graph Relationships", "🔗")
-
-        # Link programming skills to current project
-        print_subheader("Linking Skills to Project")
-        await memory.relate(
-            source_id=work_memories[
-                1
-            ].memory_id,  # Programming skills (Python, Go, Rust)
-            target_id=work_memories[2].memory_id,  # Project Aurora
+        section("6. Graph Relations")
+        await engram.relate(
+            batch[0].memory_id,
+            batch[2].memory_id,
             relation_type="supports",
-            weight=0.95,
-        )
-        print("  ✓ Skills --[supports]--> Project Aurora")
-
-        # Link hiking hobby to pet
-        print_subheader("Linking Hobbies")
-        await memory.relate(
-            source_id=pref_memories[3].memory_id,  # Hiking hobby
-            target_id=personal_memories[1].memory_id,  # Apollo the dog
-            relation_type="related_to",
-            weight=0.9,
-        )
-        print("  ✓ Hiking --[related_to]--> Apollo (hiking companion)")
-
-        # Link work frustration to CI/CD topic
-        await memory.relate(
-            source_id=work_memories[3].memory_id,  # CI/CD frustration
-            target_id=work_memories[2].memory_id,  # Project Aurora
-            relation_type="related_to",
             weight=0.8,
         )
-        print("  ✓ CI/CD issues --[related_to]--> Project Aurora")
-
-        # Link coffee to productivity
-        await memory.relate(
-            source_id=pref_memories[4].memory_id,  # Coffee preference
-            target_id=pref_memories[1].memory_id,  # Productivity style
+        await engram.relate(
+            repo_rule.memory_id,
+            batch[2].memory_id,
             relation_type="supports",
             weight=0.7,
         )
-        print("  ✓ Morning coffee --[supports]--> Productivity routine")
-
-        # Link Seattle to hiking
-        await memory.relate(
-            source_id=personal_memories[0].memory_id,  # Lives in Seattle
-            target_id=pref_memories[3].memory_id,  # Hiking (Cascades)
-            relation_type="related_to",
-            weight=0.85,
-        )
-        print("  ✓ Seattle location --[related_to]--> Cascade hiking")
-
-        # ================================================================
-        # PHASE 9: GRAPH TRAVERSAL
-        # ================================================================
-        print_header("Graph Traversal", "🌐")
-
-        print_subheader("Traverse from Project Aurora (inbound - what links TO it)")
-        related = await memory.traverse(
-            start_memory_id=work_memories[2].memory_id,  # Project Aurora
+        graph = await engram.traverse(
+            batch[2].memory_id,
             max_depth=2,
-            min_weight=0.5,
-            direction="inbound",  # Skills and CI/CD link TO Aurora
+            direction="inbound",
         )
-        print("  Starting from: Project Aurora")
-        print(f"  Found {len(related)} connected memories:")
-        for r in related:
-            indent = "    " * r.depth
-            print(f"  {indent}[depth={r.depth}] {r.content[:50]}...")
-
-        print_subheader("Traverse from Hiking (2 hops, any direction)")
-        related = await memory.traverse(
-            start_memory_id=pref_memories[3].memory_id,  # Hiking
-            max_depth=2,
-            min_weight=0.5,
-            direction="any",  # Follow relations in both directions
-        )
-        print("  Starting from: Hiking hobby")
-        print(f"  Found {len(related)} connected memories:")
-        for r in related:
-            indent = "    " * r.depth
-            print(f"  {indent}[depth={r.depth}] {r.content[:50]}...")
-
-        print_subheader("Multi-seed graph context for prompts")
-        graph_results = await memory.traverse_many(
-            [
-                work_memories[2].memory_id,  # Project Aurora
-                pref_memories[3].memory_id,  # Hiking
-            ],
-            max_depth=2,
+        graph_many = await engram.traverse_many(
+            [batch[0].memory_id, repo_rule.memory_id],
             direction="any",
-            total_limit=8,
+            total_limit=10,
         )
-        graph_block = memory.render_graph_context(graph_results, max_tokens=350)
-        print(graph_block or "  No graph context")
+        item("traverse_hits", len(graph))
+        print(engram.render_graph_context(graph_many, max_tokens=500))
 
-        # ================================================================
-        # PHASE 10: LONG-RUNNING TASK MEMORY
-        # ================================================================
-        print_header("Long-Running Task Memory", "🧭")
+        section("7. Sessions")
+        async with engram.session(agent_id, user_id=user_id) as session:
+            session_memory = await engram.add(
+                "User asked to keep launch answers concise",
+                agent_id,
+                user_id=user_id,
+                session_id=session.session_id,
+                memory_type="preference",
+            )
+            item("session_id", session.session_id)
+            item("session_memory", session_memory.memory_id)
 
-        task = await memory.start_task(
-            "Help Sarah prepare a KubeCon talk over multiple sessions",
+        section("8. Task Memory, Events, Checkpoints, Jobs")
+        task = await engram.start_task(
+            "Prepare Atlas checkout launch memory",
             agent_id,
             user_id=user_id,
             metadata={"example": "basic_usage"},
         )
-        print(f"  Started task: {task.task_run_id}")
-
-        await memory.record_turn(
-            task.task_run_id,
-            "I need help preparing for my KubeCon talk. What angle should I take?",
-            "Use your Project Aurora and migration experience as the backbone.",
-            artifacts=[{"title": "Initial talk direction", "type": "outline"}],
+        event = await engram.record_event(
+            agent_id=agent_id,
+            task_run_id=task.task_run_id,
+            user_id=user_id,
+            role="tool",
+            event_type="tool_result",
+            content="ruff check src tests: All checks passed",
+            payload={"command": "ruff check src tests", "exit_code": 0},
         )
-        await memory.record_turn(
+        events = await engram.record_turn(
             task.task_run_id,
-            "Let's focus on Kubernetes to Nomad migration tradeoffs for edge computing.",
-            "Good focus. We should capture tradeoffs, lessons, and production metrics.",
+            user_message="What remains before launch?",
+            assistant_response="Confirm rollback owner and pytest status.",
+            tool_calls=[{"name": "pytest", "result": "274 passed"}],
+            artifacts=[{"path": "docs/api-reference.md", "type": "markdown"}],
         )
-
-        jobs = await memory.process_memory_jobs(limit=10)
-        print(f"  Processed memory jobs: {[job.status for job in jobs]}")
-
-        task_context = await memory.build_context(
+        checkpoint = await engram.create_checkpoint(
             task.task_run_id,
-            query="KubeCon talk migration edge computing Project Aurora",
+            "Launch memory has rollback owner, repo rule, and test result.",
+            completed_steps=["Stored critical facts", "Recorded launch turn"],
+            pending_steps=["Review final context"],
+            source_event_ids=[event.event_id, *[e.event_id for e in events]],
+        )
+        jobs = await engram.process_memory_jobs(limit=10)
+        task_context = await engram.build_context(
+            task.task_run_id,
+            query="resume launch work",
+            max_tokens=1600,
+        )
+        listed_events = await engram.list_events(task_run_id=task.task_run_id, limit=10)
+        item("task", task.task_run_id)
+        item("checkpoint", checkpoint.checkpoint_id)
+        item("events", len(listed_events))
+        item("jobs", [job.status for job in jobs])
+        print(preview(task_context.text, 1000))
+
+        section("9. Long Input")
+        long_text = """
+        # Launch Review
+        The rollback owner is Priya. The launch depends on pytest staying green.
+
+        # Risk Notes
+        Do not revert user changes without approval. Keep answers concise.
+        """
+        report = await engram.record_long_input(
+            task.task_run_id,
+            long_text,
+            title="Launch review packet",
+            extract_with_llm=False,
+            max_chunk_tokens=120,
+        )
+        long_context = await engram.build_long_input_context(
+            task.task_run_id,
+            query="rollback owner pytest revert approval",
+            expected_terms=["Priya", "pytest", "approval"],
+            max_tokens=1800,
+        )
+        item("chunks", len(report.chunks))
+        item("anchored_memories", len(report.memory_ids))
+        item("long_missing", long_context.trace["missing_expected_terms"])
+
+        section("10. Evidence Set And Reader")
+        evidence = await engram.search_evidence_set(
+            "Who owns rollback and what test result matters?",
+            agent_id,
+            user_id=user_id,
+            limit=5,
+            preferred_role="user",
+            rerank=False,
+        )
+        evidence_context, sources = await engram.get_neighboring_context_block(
+            evidence,
+            agent_id,
+            user_id=user_id,
+            before=1,
+            after=1,
             max_tokens=1200,
-            recent_event_limit=10,
-            memory_limit=8,
-            include_graph=True,
         )
-        print_subheader("Prompt-ready task context")
-        print(task_context.text[:1200])
-
-        paused = await memory.pause_task(
-            task.task_run_id, outcome="Waiting for next session"
+        answer = await engram.answer_from_evidence(
+            question="Who owns rollback and what test result matters?",
+            context=evidence_context,
+            reading="direct",
         )
-        print(f"  Paused task: {paused.status}")
+        item("evidence_hits", len(evidence))
+        item("neighbor_sources", len(sources))
+        item("llm_answer", answer or "skipped because no LLM provider is configured")
 
-        resumable = await memory.list_tasks(
+        section("11. Optional LLM Conversation Extraction")
+        if engram.llm is None:
+            print("Skipping add_conversation(); no LLM provider is configured.")
+        else:
+            memories = await engram.add_conversation(
+                user_message="I prefer launch updates as a short risk table.",
+                assistant_response="I will format launch updates as a risk table.",
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            item("conversation_memories", len(memories))
+
+        section("12. Redaction, Status, Forget, Cleanup")
+        redacted = await engram.redact_event(event.event_id)
+        paused = await engram.pause_task(task.task_run_id, outcome="Demo paused")
+        resumable = await engram.list_tasks(
             agent_id=agent_id,
             user_id=user_id,
             status=["active", "paused"],
-            limit=5,
         )
-        print(f"  Resumable tasks: {[t.task_run_id for t in resumable]}")
-
-        completed = await memory.complete_task(
+        completed = await engram.complete_task(
             task.task_run_id,
-            outcome="Demo task completed",
+            outcome="API tour completed",
         )
-        print(f"  Completed task: {completed.status}")
-
-        # ================================================================
-        # PHASE 11: SESSION CONTEXT
-        # ================================================================
-        print_header("Session-Scoped Conversation", "💬")
-
-        async with memory.session(agent_id=agent_id, user_id=user_id) as session:
-            print(f"  Session ID: {session.session_id}")
-
-            # Simulate a multi-turn conversation
-            print_subheader("Adding Conversation Turns")
-
-            await memory.add(
-                content="User: 'I need help preparing for my KubeCon talk. What angle should I take?'",
-                agent_id=agent_id,
-                user_id=user_id,
-                session_id=session.session_id,
-                metadata={"turn": 1, "speaker": "user"},
-            )
-            print("  Turn 1: User asks about KubeCon talk")
-
-            await memory.add(
-                content="Assistant: 'Based on your experience with Project Aurora, you could focus on the real-world challenges of handling 15M events/sec. What specific aspect interests you most?'",
-                agent_id=agent_id,
-                user_id=user_id,
-                session_id=session.session_id,
-                metadata={"turn": 2, "speaker": "assistant"},
-            )
-            print("  Turn 2: Assistant suggests angle")
-
-            await memory.add(
-                content="User: 'I want to discuss our migration from Kubernetes to Nomad for edge computing - the tradeoffs and lessons learned.'",
-                agent_id=agent_id,
-                user_id=user_id,
-                session_id=session.session_id,
-                metadata={"turn": 3, "speaker": "user"},
-            )
-            print("  Turn 3: User clarifies focus")
-
-            await memory.add(
-                content="Assistant: 'Great choice! Your hands-on experience with both platforms is valuable. Shall we outline the key migration challenges you faced?'",
-                agent_id=agent_id,
-                user_id=user_id,
-                session_id=session.session_id,
-                metadata={"turn": 4, "speaker": "assistant"},
-            )
-            print("  Turn 4: Assistant confirms direction")
-
-            # Search within this conversation context
-            print_subheader("Search for Relevant Context")
-            context = await memory.search(
-                query="KubeCon presentation topic migration", agent_id=agent_id, limit=5
-            )
-            print("  Query: 'KubeCon presentation topic migration'")
-            for c in context:
-                is_session = c.memory.session_id == session.session_id
-                marker = "📍" if is_session else "  "
-                print(f"  {marker}[{c.score:.3f}] {c.memory.content[:55]}...")
-
-        print(f"  Session ended: {session.session_id}")
-
-        # ================================================================
-        # PHASE 12: FORGET (Delete Single Memory)
-        # ================================================================
-        print_header("Forget - Delete Single Memory", "🗑️")
-
-        # Add some temporary memories
-        temp1 = await memory.add(
-            content="Sarah mentioned she's considering buying a new MacBook Pro M3 but hasn't decided yet.",
-            agent_id=agent_id,
-            user_id=user_id,
-            metadata={"temporary": True},
-        )
-        temp2 = await memory.add(
-            content="Sarah asked about a random trivia question that's not worth remembering.",
-            agent_id=agent_id,
-            user_id=user_id,
-            metadata={"temporary": True},
-        )
-
-        print("  Created 2 temporary memories:")
-        print(f"    - {temp1.memory_id[:20]}... (MacBook)")
-        print(f"    - {temp2.memory_id[:20]}... (trivia)")
-
-        # Search before delete
-        print_subheader("Before Deletion")
-        results = await memory.search("MacBook Pro trivia", agent_id=agent_id, limit=3)
-        print(f"  Found {len(results)} results for 'MacBook Pro trivia'")
-        for r in results:
-            if "MacBook" in r.memory.content or "trivia" in r.memory.content:
-                print(f"    ✓ Found: {r.memory.content[:50]}...")
-
-        # Delete using forget()
-        deleted1 = await memory.forget(temp1.memory_id)
-        deleted2 = await memory.forget(temp2.memory_id)
-        print(f"  ✓ Deleted memory 1: {deleted1}")
-        print(f"  ✓ Deleted memory 2: {deleted2}")
-
-        # Search after delete
-        print_subheader("After Deletion")
-        results = await memory.search("MacBook Pro trivia", agent_id=agent_id, limit=3)
-        found_deleted = any(
-            "MacBook" in r.memory.content or "trivia" in r.memory.content
-            for r in results
-        )
-        print(f"  Found deleted memories in search: {found_deleted}")
-
-        # Verify with get
-        try:
-            await memory.get(temp1.memory_id)
-            print("  Error: Memory 1 still exists!")
-        except Exception as e:
-            print(f"  ✓ Memory 1 confirmed deleted ({type(e).__name__})")
-
-        # ================================================================
-        # PHASE 13: PURGE (Bulk Delete by Agent)
-        # ================================================================
-        print_header("Purge - Bulk Delete Demo", "💀")
-
-        # Create a separate agent for purge demo
-        purge_agent = "purge-test-agent"
-
-        # Add some memories for the test agent
-        await memory.add(
-            content="Test memory 1 for purge demo",
-            agent_id=purge_agent,
-            metadata={"test": True},
-        )
-        await memory.add(
-            content="Test memory 2 for purge demo",
-            agent_id=purge_agent,
-            metadata={"test": True},
-        )
-        await memory.add(
-            content="Test memory 3 for purge demo",
-            agent_id=purge_agent,
-            metadata={"test": True},
-        )
-        print(f"  Created 3 test memories for agent '{purge_agent}'")
-
-        # Verify they exist
-        before_purge = await memory.list_recent(agent_id=purge_agent, limit=10)
-        print(f"  Before purge: {len(before_purge)} memories")
-
-        # Purge all memories for this agent
-        deleted_count = await memory.purge(agent_id=purge_agent)
-        print(f"  ✓ Purged {deleted_count} memories")
-
-        # Verify they're gone
-        after_purge = await memory.list_recent(agent_id=purge_agent, limit=10)
-        print(f"  After purge: {len(after_purge)} memories")
-
-        # ================================================================
-        # FINAL SUMMARY
-        # ================================================================
-        print_header("Demo Complete!", "🎉")
-
-        # Final stats
-        await memory.list_recent(agent_id=agent_id, limit=100)
-        print(f"""
-  ╔══════════════════════════════════════════════════════════╗
-  ║                    DEMO STATISTICS                       ║
-  ╠══════════════════════════════════════════════════════════╣
-  ║  Embedding Provider:    {provider:<30} ║
-  ║  Embedding Model:       {model:<30} ║
-  ║  Total memories:        ~25+                             ║
-  ║  Relationships created: 5                                ║
-  ║  Search queries tested: 8                                ║
-  ║  Task runs created:     1                                ║
-  ║  Sessions created:      1                                ║
-  ║  Memories forgotten:    2                                ║
-  ║  Memories purged:       3                                ║
-  ╚══════════════════════════════════════════════════════════╝
-        """)
-
-        print("""
-  Operations Demonstrated:
-  ━━━━━━━━━━━━━━━━━━━━━━━━
-  ✓ health_check()   - System health verification
-  ✓ add()            - Individual memory storage (with main_content)
-  ✓ add_batch()      - Bulk memory insertion (with main_content)
-  ✓ search()         - Hybrid semantic + keyword search
-  ✓ get()            - Retrieve by ID
-  ✓ list_recent()    - Chronological listing
-  ✓ update()         - Modify existing memories
-  ✓ reinforce()      - Boost importance scores
-  ✓ relate()         - Create knowledge graph edges
-  ✓ traverse()       - Multi-hop graph exploration
-  ✓ traverse_many()  - Multi-seed graph expansion
-  ✓ start_task()     - Durable long-running task memory
-  ✓ record_turn()    - Event ledger writes
-  ✓ process_memory_jobs() - Background memory derivation
-  ✓ build_context()  - Prompt-ready task context assembly
-  ✓ list_tasks()     - Resume active/paused task runs
-  ✓ session()        - Scoped conversation context
-  ✓ forget()         - Delete single memory
-  ✓ purge()          - Bulk delete by agent
-
-  Two-Column Memory System:
-  ━━━━━━━━━━━━━━━━━━━━━━━━━
-  • content (fact)  - Embedded for hybrid search ($)
-  • main_content    - Full context preserved (free)
-
-  Cost-effective: Only facts are embedded!
-
-  Provider-Agnostic Architecture:
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  This demo works with ANY embedding provider:
-  • sentence-transformers (local, free)
-  • openai (cloud)
-  • cohere (cloud)
-  • ollama (local)
-  • huggingface (cloud/local)
-
-  Just set ENGRAM_EMBEDDING_PROVIDER to switch!
-
-  🧠 Engram: AI Memory Made Simple
-        """)
+        deleted = await engram.forget(session_memory.memory_id)
+        purged = await engram.purge(agent_id)
+        item("redacted_at", redacted.redacted_at)
+        item("paused_status", paused.status)
+        item("resumable_tasks", len(resumable))
+        item("completed_status", completed.status)
+        item("forgot_session_memory", deleted)
+        item("purged_memories", purged)
 
 
 if __name__ == "__main__":
