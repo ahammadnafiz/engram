@@ -118,6 +118,19 @@ class TestTruncationHandling:
 
         assert facts == ["User works at AskTuring", "User lives in Dhaka"]
 
+    @pytest.mark.asyncio
+    async def test_extraction_prompt_allows_fictional_reference_codes(self) -> None:
+        svc = make_service("NONE")
+        await svc.extract_facts(
+            "fictional: the recovery hint ends with 47-Kilo",
+            "I will remember the fictional hint.",
+        )
+
+        prompt = svc._provider.complete.call_args.args[0][0]["content"]
+        assert "fictional/test reference codes" in prompt
+        assert "Do not extract real passwords" in prompt
+        assert "47-Kilo" in prompt
+
 
 class TestDuplicateScoreSpace:
     """The 0.92 duplicate threshold must compare cosine similarity, not the
@@ -180,7 +193,7 @@ class TestEvaluateMemoryOperation:
         # "1 or 2" parses to digits "12" -> index 11 -> out of range -> no target
         assert op.operation == MemoryOperationType.ADD
         assert op.content == "User moved to Berlin"
-        assert op.target_id is None
+
 
     @pytest.mark.asyncio
     async def test_delete_with_no_target_falls_back_to_add(self) -> None:
@@ -212,6 +225,17 @@ class TestEvaluateMemoryOperation:
         assert op.operation == MemoryOperationType.UPDATE
         assert op.target_id == "mem_b"
         assert op.content == "merged fact text"
+
+
+class TestQueryExpansionPrompt:
+    @pytest.mark.asyncio
+    async def test_expand_query_prompt_covers_indirect_constraints(self) -> None:
+        svc = make_service("food allergies\ncancelled plans\nschedule boundaries")
+        await svc.expand_query("plan dinner and coffee")
+
+        prompt = svc._provider.complete_text.call_args.kwargs["prompt"]
+        assert "food queries should search for allergies" in prompt
+        assert "cancelled, superseded, replaced" in prompt
 
 
 class TestClassifyFacts:

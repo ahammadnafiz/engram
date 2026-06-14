@@ -1,646 +1,617 @@
 #!/usr/bin/env python3
+"""Real Engram-backed chatbot using OpenAI embeddings and chat completions.
+
+Run:
+    export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
+    export ENGRAM_EMBEDDING_PROVIDER=openai
+    export ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
+    export ENGRAM_EMBEDDING_DIMENSION=1536
+    export ENGRAM_LLM_PROVIDER=openai
+    export ENGRAM_LLM_MODEL=gpt-4o-mini
+    export ENGRAM_OPENAI_API_KEY=sk-...
+    python examples/chatbot.py
+
+If you have EMBEDDING_PROVIDER=openai from an older shell snippet, this script
+maps it to ENGRAM_EMBEDDING_PROVIDER for convenience.
 """
-Personal Chatbot with Persistent Memory - Engram Demo
 
-Demonstrates the full Engram API:
-  • engram.add()        - Store memories
-  • engram.start_task() - Start/resume long-running task memory
-  • engram.record_turn()- Write raw user/assistant events to the task ledger
-  • engram.build_context() - Build prompt context from task state + memories
-  • engram.process_memory_jobs() - Derive facts/checkpoints from queued turns
-  • engram.search()     - Hybrid search (semantic + keyword)
-  • engram.get()        - Retrieve by ID
-  • engram.update()     - Modify memories
-  • engram.reinforce()  - Boost importance (memory decay)
-  • engram.forget()     - Delete single memory
-  • engram.purge()      - Clear all memories
-  • engram.list_recent()- Browse memories
-  • engram.relate()     - Create memory relations
-  • engram.traverse()   - Graph traversal
-  • engram.session()    - Session management
-
-Usage:
-    python chatbot.py
-
-Commands:
-    /memories       Show recent memories
-    /search <q>     Hybrid search
-    /graph          Show memory relations
-    /task           Show active task memory context
-    /worker         Process queued memory jobs now
-    /forget         Clear all memories
-    /help           Show commands
-    /quit           Exit
-"""
+from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
-import sys
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+from engram.core.exceptions import DatabaseConnectionError
 
-# Config. Environment variables win so production runs can choose providers.
-EMBEDDING_PROVIDER = os.environ.get(
-    "ENGRAM_EMBEDDING_PROVIDER", "sentence-transformers"
-)
-EMBEDDING_MODEL = os.environ.get("ENGRAM_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+embedding_provider_alias = os.environ.get("EMBEDDING_PROVIDER")
+load_dotenv(Path(__file__).parent.parent / ".env", override=False)
 
-LLM_PROVIDER = os.environ.get("ENGRAM_LLM_PROVIDER", "openai")
-LLM_MODEL = os.environ.get("ENGRAM_LLM_MODEL", "gpt-4o-mini")
+if embedding_provider_alias:
+    os.environ["ENGRAM_EMBEDDING_PROVIDER"] = embedding_provider_alias
+if os.environ.get("ENGRAM_OPENAI_API_KEY") and "ENGRAM_LLM_PROVIDER" not in os.environ:
+    os.environ["ENGRAM_LLM_PROVIDER"] = "openai"
 
-os.environ.setdefault("ENGRAM_EMBEDDING_PROVIDER", EMBEDDING_PROVIDER)
-os.environ.setdefault("ENGRAM_EMBEDDING_MODEL", EMBEDDING_MODEL)
-if os.environ.get("OPENAI_API_KEY"):
-    os.environ.setdefault("ENGRAM_OPENAI_API_KEY", os.environ["OPENAI_API_KEY"])
+AGENT_ID = os.environ.get("ENGRAM_CHATBOT_AGENT_ID", "engram-chatbot")
+USER_ID = os.environ.get("ENGRAM_CHATBOT_USER_ID", "default-user")
+HISTORY_LIMIT = 10
+MEMORY_JOBS_MODE = os.environ.get("ENGRAM_CHATBOT_MEMORY_JOBS", "inline").lower()
+BROAD_MEMORY_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_BROAD_MEMORY_LIMIT", "60"))
+BROAD_MEMORY_CHARS = int(os.environ.get("ENGRAM_CHATBOT_BROAD_MEMORY_CHARS", "3600"))
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from engram import EmbeddingService, Engram, LLMService  # noqa: E402
-from engram.core.config import clear_settings_cache  # noqa: E402
+SYSTEM_PROMPT = """You are a helpful assistant with persistent Engram memory.
+Use the supplied memory and task context as the only source for remembered facts.
+If the context does not contain something, say that you do not have it in memory.
+When the user tells you a durable preference, profile fact, project detail,
+decision, or instruction, acknowledge it naturally; Engram will store it after
+the turn. Answer every part of the user's question. For "why" questions, include
+the supporting memory detail. When correcting an outdated or false value, name
+both the outdated value and the correct value. Keep answers concise and directly
+useful.
 
-clear_settings_cache()
+For list or aggregation questions, enumerate every relevant matching memory in
+the supplied context instead of choosing only the first examples. For planning
+food, restaurants, travel, or meetings, include any remembered allergies,
+avoidances, hard constraints, and preferences that apply. If the user asks for
+an owner, approval, threshold, date, document, or other named field, include that
+field explicitly when it exists in memory. If
+<engram_query_specific_must_use> is non-empty, every line in it is mandatory for
+the current answer."""
 
-AGENT_ID = "assistant"
-USER_ID = "user"
 
-# Sliding window config
-MAX_HISTORY = 20
-CONTEXT_WINDOW = 10
-MAX_CHARS = 4000
+def preview(text: str, limit: int = 180) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else f"{text[:limit]}..."
 
-SYSTEM_PROMPT = """<role>
-You are a friendly personal assistant with persistent memory. You remember facts about the user across conversations.
-</role>
 
-<memory_rules>
-- The facts provided in <memories> are YOUR ground truth - they come from previous conversations
-- ALWAYS use these facts when answering questions about the user
-- Pay special attention to: name, job, company, projects, interests, preferences
-- For multi-part questions, answer each part separately using all available memory context
-- If asked about projects/work, check memories for specific project names
-- NEVER contradict or guess beyond what's in your memories
-- If asked about something not in your memories, say "I don't have that in my memory"
-</memory_rules>
+def print_table(rows: list[tuple[str, Any]]) -> None:
+    for key, value in rows:
+        print(f"{key:<20} {value}")
 
-<personality>
-- Be warm, friendly, and conversational
-- Show genuine interest in the user
-- Keep responses concise unless detail is requested
-- Ask follow-up questions to learn more
-</personality>
 
-<response_format>
-- Reference specific facts naturally (don't say "according to my memory")
-- If user corrects a fact, acknowledge it
-</response_format>"""
+def require_real_openai_config() -> None:
+    missing = []
+    if not os.environ.get("ENGRAM_OPENAI_API_KEY"):
+        missing.append("ENGRAM_OPENAI_API_KEY")
+
+    provider = os.environ.get("ENGRAM_EMBEDDING_PROVIDER", "openai")
+    if provider != "openai":
+        raise SystemExit(
+            "examples/chatbot.py is configured as a real OpenAI-backed chatbot. "
+            f"Set ENGRAM_EMBEDDING_PROVIDER=openai, got {provider!r}."
+        )
+
+    if missing:
+        raise SystemExit(
+            "Missing required environment variable(s): "
+            + ", ".join(missing)
+            + "\nSet OpenAI embeddings/chat config before running the chatbot."
+        )
 
 
 class MemoryChatbot:
-    """Chatbot using Engram's task memory architecture."""
+    def __init__(self) -> None:
+        self.engram = None
+        self.task_id: str | None = None
+        self.session_id: str | None = None
+        self._session_context: Any | None = None
+        self.history: list[dict[str, str]] = []
 
-    def __init__(self):
-        self.engram: Engram | None = None
-        self.embedding: EmbeddingService | None = None
-        self.llm: LLMService | None = None
-        self.history: list[dict] = []
-        self._tasks: list[asyncio.Task] = []
-        self.task_run_id: str | None = None
-        self.last_recall_trace = None
+    async def connect(self) -> None:
+        require_real_openai_config()
 
-    # =========================================================================
-    # Connection & Lifecycle
-    # =========================================================================
+        from engram import Engram
 
-    async def connect(self):
-        """Connect to Engram and initialize services."""
-        self.engram = Engram()
+        self.engram = Engram(memory_policy="default")
         await self.engram.connect()
-
-        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get(
-            "ENGRAM_OPENAI_API_KEY"
-        )
-
-        # EmbeddingService - for vector embeddings
-        # sentence-transformers is local (no API key needed)
-        if EMBEDDING_PROVIDER == "sentence-transformers":
-            self.embedding = EmbeddingService.from_provider(
-                EMBEDDING_PROVIDER,
-                model=EMBEDDING_MODEL,
-            )
-        else:
-            self.embedding = EmbeddingService.from_provider(
-                EMBEDDING_PROVIDER,
-                model=EMBEDDING_MODEL,
-                api_key=api_key,
+        if self.engram.llm is None:
+            raise RuntimeError(
+                "LLM provider is disabled. Set ENGRAM_LLM_PROVIDER=openai and "
+                "ENGRAM_OPENAI_API_KEY before running examples/chatbot.py."
             )
 
-        # LLMService - for chat and fact extraction
-        self.llm = LLMService.from_provider(
-            LLM_PROVIDER, model=LLM_MODEL, api_key=api_key
-        )
-
-        # Health check
+        await self._resume_or_start_task()
         health = await self.engram.health_check()
-        status = "✓" if health.get("status") == "healthy" else "⚠"
-        print(f"  Database: {status}")
-        print(f"  Embedding: {self.embedding.model} ({self.embedding.dimension}d)")
-        print(f"  LLM: {self.llm.model}\n")
+        print_table(
+            [
+                ("health", health.get("status")),
+                ("agent", AGENT_ID),
+                ("user", USER_ID),
+                ("task", self.task_id),
+                ("session", self.session_id),
+                ("embedding_provider", os.environ.get("ENGRAM_EMBEDDING_PROVIDER", "openai")),
+                ("embedding_model", os.environ.get("ENGRAM_EMBEDDING_MODEL", "text-embedding-3-small")),
+                ("embedding_dim", os.environ.get("ENGRAM_EMBEDDING_DIMENSION", "auto")),
+                ("llm_provider", os.environ.get("ENGRAM_LLM_PROVIDER", "openai")),
+                ("llm_model", os.environ.get("ENGRAM_LLM_MODEL", "gpt-4o-mini")),
+                ("memory_jobs", MEMORY_JOBS_MODE),
+                ("broad_memory_limit", BROAD_MEMORY_LIMIT),
+            ]
+        )
 
-        active_tasks = await self.engram.list_tasks(
+    async def _resume_or_start_task(self) -> None:
+        assert self.engram is not None
+
+        tasks = await self.engram.list_tasks(
             agent_id=AGENT_ID,
             user_id=USER_ID,
             status=["active", "paused"],
             limit=1,
         )
-        if active_tasks:
-            task = active_tasks[0]
-            self.task_run_id = task.task_run_id
-            if task.status == "paused":
-                # Reuse the same task row; new turns will continue the ledger.
-                print(f"  Resumed paused memory task: {task.task_run_id}")
-            else:
-                print(f"  Resumed active memory task: {task.task_run_id}")
-        else:
-            task = await self.engram.start_task(
-                "Maintain persistent memory for the personal assistant chat",
-                AGENT_ID,
-                user_id=USER_ID,
-                metadata={"example": "chatbot"},
-            )
-            self.task_run_id = task.task_run_id
-            print(f"  Started memory task: {task.task_run_id}")
-
-    async def close(self):
-        """Wait for pending tasks and close."""
-        pending = [t for t in self._tasks if not t.done()]
-        if pending:
-            print(f"  Saving {len(pending)} memories...")
-            try:
-                # Increased timeout to allow complex fact extraction to complete
-                await asyncio.wait_for(
-                    asyncio.gather(*pending, return_exceptions=True), timeout=45.0
-                )
-            except asyncio.TimeoutError:
-                remaining = len([t for t in self._tasks if not t.done()])
-                if remaining:
-                    print(f"  ⚠ {remaining} tasks still pending (timeout)")
-        await self.pause_task()
-        if self.engram:
-            await self.engram.close()
-
-    # =========================================================================
-    # Sliding Window
-    # =========================================================================
-
-    def _get_context(self) -> list[dict]:
-        """Get sliding window of recent conversation."""
-        window, chars = [], 0
-        for msg in reversed(self.history):
-            if len(window) >= CONTEXT_WINDOW or chars > MAX_CHARS:
-                break
-            window.append(msg)
-            chars += len(msg.get("content", ""))
-        return list(reversed(window))
-
-    def _trim_history(self):
-        """Keep history bounded."""
-        if len(self.history) > MAX_HISTORY:
-            self.history = self.history[-MAX_HISTORY:]
-
-    # =========================================================================
-    # ENGRAM API: Search & Reinforce
-    # =========================================================================
-
-    def _needs_high_recall(self, query: str) -> bool:
-        """Return True for broad prompts that need more than a top-k search."""
-        q = query.lower()
-        broad_markers = (
-            "everything",
-            "summarize",
-            "what do you remember",
-            "based on everything",
-            "based on memory",
-            "final verification",
-            "exact",
-            "all targets",
-            "checklist",
-            "brief",
-        )
-        return (
-            any(marker in q for marker in broad_markers)
-            or q.count("?") > 1
-            or ("," in q and (" and " in q or ":" in q))
-        )
-
-    async def recall(
-        self,
-        query: str,
-        limit: int = 6,
-        max_chars: int = 3500,
-        *,
-        high_recall: bool = False,
-    ) -> str:
-        """
-        engram.search() - Hybrid search with semantic + keyword matching
-        engram.deep_search() - Multi-query retrieval for broad questions
-        engram.reinforce() - Boost importance of used memories
-
-        Returns both fact and main_content for richer LLM context.
-        Context budget management: truncates main_content if too large.
-        """
-        if not self.engram:
-            return ""
-
-        if high_recall:
-            trace = await self.engram.trace_recall(
-                query=query,
-                agent_id=AGENT_ID,
-                user_id=USER_ID,
-                limit=limit,
-                min_score=0.15,
-                max_tokens=max_chars // 4,
-                use_deep_search=True,
-            )
-            self.last_recall_trace = trace
-            return trace.context
-        else:
-            # Hybrid search: combines vector similarity + BM25 keyword matching
-            # (Engram uses hybrid mode by default, searches on fact column)
-            results = await self.engram.search(
-                query=query,
-                agent_id=AGENT_ID,
-                user_id=USER_ID,
-                limit=limit,
-                min_score=0.2,
-            )
-            self.last_recall_trace = None
-
-        relevant = [r for r in results if r.score >= (0.15 if high_recall else 0.2)]
-        if not relevant:
-            return ""
-
-        # Reinforce used memories (increases importance over time)
-        for r in relevant:
-            boost = 0.02 + (r.score * 0.08)
-            self._tasks.append(
-                asyncio.create_task(self.engram.reinforce(r.memory.memory_id, boost))
-            )
-
-        # Build context with both fact and main_content
-        # Context budget management to avoid overflowing LLM context window
-        lines = []
-        chars_used = 0
-        max_main_content_len = 220 if high_recall else 150
-
-        for r in relevant:
-            # Always include the fact (this is what matched)
-            fact = r.memory.fact or r.memory.content
-            line = f"- {fact}"
-
-            # Include main_content only if budget allows
-            main_content = r.memory.main_content
-            if main_content and chars_used + len(main_content) < max_chars:
-                # Truncate if too long
-                if len(main_content) > max_main_content_len:
-                    main_content = main_content[:max_main_content_len] + "..."
-                line += f"\n  ({main_content})"
-                chars_used += len(main_content)
-
-            lines.append(line)
-            chars_used += len(fact)
-
-        return "\n".join(lines)
-
-    # =========================================================================
-    # ENGRAM API: Durable Task Memory Ingestion
-    # =========================================================================
-
-    async def learn(self, user_msg: str, bot_msg: str):
-        """
-        Record the raw turn and process the queued memory job.
-
-        record_turn() stores user/assistant events in agent_events and queues
-        a turn_ingest job. process_memory_jobs() turns that raw ledger entry
-        into checkpoints and, when an LLM provider is configured, searchable
-        facts in agent_memory.
-        """
-        if not self.engram or not self.task_run_id:
+        if tasks:
+            task = tasks[0]
+            self.task_id = task.task_run_id
+            self.session_id = task.session_id
             return
 
-        try:
-            await self.engram.record_turn(
-                self.task_run_id,
-                user_msg,
-                bot_msg,
-                metadata={"source": "chatbot_example"},
-            )
-            jobs = await self.engram.process_memory_jobs(limit=5)
-            if jobs and os.environ.get("DEBUG_FACTS"):
-                print(f"  Processed memory jobs: {[j.status for j in jobs]}")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if os.environ.get("DEBUG_FACTS"):
-                print(f"  Memory job failed: {exc}")
+        self._session_context = self.engram.session(
+            AGENT_ID,
+            user_id=USER_ID,
+            metadata={"application": "examples/chatbot.py"},
+        )
+        session = await self._session_context.__aenter__()
+        self.session_id = session.session_id
+        task = await self.engram.start_task(
+            "Run a real OpenAI-backed chatbot with persistent Engram memory",
+            AGENT_ID,
+            user_id=USER_ID,
+            session_id=self.session_id,
+            metadata={"application": "examples/chatbot.py"},
+        )
+        self.task_id = task.task_run_id
 
-    async def task_context(
-        self,
-        query: str,
-        max_tokens: int = 1200,
-        *,
-        memory_limit: int = 8,
-        recent_event_limit: int = 12,
-        checkpoint_limit: int = 2,
-    ) -> str:
-        """Build prompt-ready context from task memory and fact memory."""
-        if not self.engram or not self.task_run_id:
-            return ""
+    async def close(self) -> None:
+        if self.engram is None:
+            return
+        if self.task_id is not None:
+            with contextlib.suppress(Exception):
+                await self.engram.pause_task(
+                    self.task_id,
+                    outcome="Chatbot process exited; task can be resumed later.",
+                )
+        if self._session_context is not None:
+            with contextlib.suppress(Exception):
+                await self._session_context.__aexit__(None, None, None)
+        await self.engram.close()
 
-        context = await self.engram.build_context(
-            self.task_run_id,
-            query=query,
-            max_tokens=max_tokens,
-            recent_event_limit=recent_event_limit,
-            memory_limit=memory_limit,
-            checkpoint_limit=checkpoint_limit,
+    async def reply(self, message: str) -> str:
+        assert self.engram is not None
+        assert self.task_id is not None
+
+        trace = await self.engram.trace_recall(
+            message,
+            AGENT_ID,
+            user_id=USER_ID,
+            limit=12,
+            max_tokens=1400,
+            expected_terms=self._expected_terms(message),
+        )
+        memory_block = await self.engram.get_context_block(
+            message,
+            AGENT_ID,
+            user_id=USER_ID,
+            session_id=self.session_id,
+            limit=10,
+            max_tokens=1000,
+            group_by_type=True,
+        )
+        deep_hits = await self.engram.deep_search(
+            message,
+            AGENT_ID,
+            user_id=USER_ID,
+            limit=16,
+            n_queries=4,
+        )
+        deep_memory_block = self._render_deep_memory_block(deep_hits)
+        broad_memories = await self.engram.list_recent(
+            AGENT_ID,
+            user_id=USER_ID,
+            limit=BROAD_MEMORY_LIMIT,
+        )
+        broad_memory_block = self._render_memories_block(
+            broad_memories,
+            max_chars=BROAD_MEMORY_CHARS,
+        )
+        attention_memory_block = self._render_attention_memory_block(broad_memories)
+        query_attention_block = self._render_query_attention_memory_block(
+            message,
+            broad_memories,
+        )
+        task_context = await self.engram.build_context(
+            self.task_id,
+            query=message,
+            max_tokens=1600,
+            recent_event_limit=10,
+            memory_limit=10,
+            checkpoint_limit=2,
             include_graph=True,
         )
-        return context.text
 
-    async def process_memory_backlog(self) -> int:
-        """Process queued memory jobs on demand."""
-        if not self.engram:
-            return 0
-        jobs = await self.engram.process_memory_jobs(limit=20)
-        return len(jobs)
-
-    async def pause_task(self):
-        """Pause the active task before shutdown."""
-        if self.engram and self.task_run_id:
-            await self.engram.pause_task(
-                self.task_run_id, outcome="Chatbot session ended"
+        user_content = message
+        if query_attention_block:
+            user_content = (
+                "Mandatory Engram memories for this question. "
+                "Every line below matches the current question; include every "
+                "line in your answer:\n"
+                f"{query_attention_block}\n\n"
+                f"User question: {message}"
             )
 
-    # =========================================================================
-    # Chat
-    # =========================================================================
-
-    async def chat(self, user_input: str) -> str:
-        """Generate response with memory context."""
-        if not self.llm:
-            return "Error: LLM not configured"
-
-        high_recall = self._needs_high_recall(user_input)
-
-        # Long-term memory via hybrid search, or deep search for broad prompts.
-        memories = await self.recall(
-            user_input,
-            limit=14 if high_recall else 6,
-            max_chars=6500 if high_recall else 3500,
-            high_recall=high_recall,
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": (
+                    "<engram_query_specific_must_use priority=\"highest\">\n"
+                    f"{query_attention_block}\n"
+                    "</engram_query_specific_must_use>"
+                ),
+            },
+            {
+                "role": "system",
+                "content": f"<engram_memory_context>\n{memory_block}\n</engram_memory_context>",
+            },
+            {
+                "role": "system",
+                "content": f"<engram_recall_trace>\n{trace.context}\n</engram_recall_trace>",
+            },
+            {
+                "role": "system",
+                "content": f"<engram_deep_memory>\n{deep_memory_block}\n</engram_deep_memory>",
+            },
+            {
+                "role": "system",
+                "content": f"<engram_recent_memory_safety_net>\n{broad_memory_block}\n</engram_recent_memory_safety_net>",
+            },
+            {
+                "role": "system",
+                "content": f"<engram_attention_memory>\n{attention_memory_block}\n</engram_attention_memory>",
+            },
+            {
+                "role": "system",
+                "content": f"<engram_task_context>\n{task_context.text}\n</engram_task_context>",
+            },
+            *self.history[-HISTORY_LIMIT:],
+            {"role": "user", "content": user_content},
+        ]
+        llm_response = await self.engram.llm.complete_full(
+            messages,
+            max_tokens=700,
+            temperature=0.4,
         )
+        response = llm_response.content.strip()
 
-        # Long-running task context: goal, recent events, checkpoints, facts,
-        # artifacts, and graph expansion assembled under one prompt budget.
-        task_memory = await self.task_context(
-            user_input,
-            max_tokens=2800 if high_recall else 1200,
-            memory_limit=18 if high_recall else 8,
-            recent_event_limit=24 if high_recall else 12,
-            checkpoint_limit=3 if high_recall else 2,
-        )
-
-        # Build messages
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        if task_memory:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": f"<task_memory>\n{task_memory}\n</task_memory>",
-                }
-            )
-        if memories:
-            messages.append(
-                {"role": "system", "content": f"<memories>\n{memories}\n</memories>"}
-            )
-
-        # Short-term context via sliding window
-        messages.extend(self._get_context())
-        messages.append({"role": "user", "content": user_input})
-
-        # Generate
-        response = await self.llm.complete_full(messages)
-        reply = response.content
-
-        # Update history
-        self.history.append({"role": "user", "content": user_input})
-        self.history.append({"role": "assistant", "content": reply})
-        self._trim_history()
-
-        # Learn in background
-        self._tasks.append(asyncio.create_task(self.learn(user_input, reply)))
-
-        return reply
-
-    # =========================================================================
-    # Commands - Full Engram API Demo
-    # =========================================================================
-
-    async def show_memories(self, limit: int = 10):
-        """engram.list_recent() - List memories sorted by recency."""
-        if not self.engram:
-            return
-
-        memories = await self.engram.list_recent(
+        await self.engram.record_turn(
+            self.task_id,
+            message,
+            response,
             agent_id=AGENT_ID,
             user_id=USER_ID,
-            limit=limit,
+            session_id=self.session_id,
+            metadata={
+                "application": "examples/chatbot.py",
+                "llm_model": llm_response.model,
+                "trace_kept_memory_ids": trace.kept_memory_ids,
+                "missing_expected_terms": trace.missing_expected_terms,
+            },
         )
+        if MEMORY_JOBS_MODE == "inline":
+            jobs = await self.engram.process_memory_jobs(limit=10)
+        elif MEMORY_JOBS_MODE == "deferred":
+            jobs = []
+            print(
+                "[engram] memory job queued; run process_memory_jobs() "
+                "or run_memory_worker() later"
+            )
+        else:
+            raise RuntimeError(
+                "Invalid ENGRAM_CHATBOT_MEMORY_JOBS. Use 'inline' or 'deferred'."
+            )
 
-        print(f"\n📝 Memories ({len(memories)})")
-        for m in memories:
-            fact = m.fact or m.content
-            print(f"  [{m.importance:.0%}] {fact[:55]}...")
-            if m.main_content:
-                # Show truncated main_content
-                ctx = m.main_content[:60].replace("\n", " ")
-                print(f"           └─ {ctx}...")
-        print()
+        self.history.append({"role": "user", "content": message})
+        self.history.append({"role": "assistant", "content": response})
+        self.history = self.history[-HISTORY_LIMIT:]
 
-    async def search_memories(self, query: str):
-        """engram.search() - Hybrid search demo (searches on fact column)."""
-        if not self.engram:
+        processed = len([job for job in jobs if job.status == "completed"])
+        if processed:
+            print(f"[engram] processed {processed} memory job(s)")
+        return response
+
+    def _render_deep_memory_block(self, results: list[Any], max_chars: int = 2400) -> str:
+        lines = []
+        used = 0
+        seen = set()
+        for result in results:
+            memory = result.memory
+            if memory.memory_id in seen:
+                continue
+            seen.add(memory.memory_id)
+            line = f"- [{memory.memory_type}] {memory.content}"
+            if used + len(line) > max_chars:
+                break
+            lines.append(line)
+            used += len(line)
+        return "\n".join(lines)
+
+    def _render_memories_block(self, memories: list[Any], max_chars: int) -> str:
+        lines = []
+        used = 0
+        for memory in memories:
+            line = f"- [{memory.memory_type}] {memory.content}"
+            if used + len(line) > max_chars:
+                break
+            lines.append(line)
+            used += len(line)
+        return "\n".join(lines)
+
+    def _render_attention_memory_block(
+        self,
+        memories: list[Any],
+        max_chars: int = 1800,
+    ) -> str:
+        keywords = (
+            "avoid",
+            "allerg",
+            "no longer",
+            "superseded",
+            "cancel",
+            "instead",
+            "not ",
+            "must",
+            "before",
+            "owner",
+            "threshold",
+        )
+        lines = []
+        used = 0
+        for memory in memories:
+            content_lower = memory.content.lower()
+            if not any(keyword in content_lower for keyword in keywords):
+                continue
+            line = f"- [{memory.memory_type}] {memory.content}"
+            if used + len(line) > max_chars:
+                break
+            lines.append(line)
+            used += len(line)
+        return "\n".join(lines)
+
+    def _render_query_attention_memory_block(
+        self,
+        message: str,
+        memories: list[Any],
+        max_chars: int = 1600,
+    ) -> str:
+        lowered = message.lower()
+        keyword_groups: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+            (
+                ("dinner", "restaurant", "food", "meal", "thai", "coffee"),
+                ("shellfish", "allerg", "vegetarian", "quiet", "live music", "avoid"),
+            ),
+            (
+                ("older", "old plan", "superseded", "cancelled", "canceled", "replaced"),
+                ("superseded", "cancel", "no longer"),
+            ),
+            (
+                ("owner", "approval", "threshold", "safety rule", "launch"),
+                ("owner", "must", "before", "threshold", "latency", "p95"),
+            ),
+        ]
+        needles: set[str] = set()
+        for triggers, terms in keyword_groups:
+            if any(trigger in lowered for trigger in triggers):
+                needles.update(terms)
+        if not needles:
+            return ""
+
+        lines = []
+        used = 0
+        for memory in memories:
+            content_lower = memory.content.lower()
+            if not any(term in content_lower for term in needles):
+                continue
+            line = f"- [{memory.memory_type}] {memory.content}"
+            if used + len(line) > max_chars:
+                break
+            lines.append(line)
+            used += len(line)
+        return "\n".join(lines)
+
+    def _expected_terms(self, message: str) -> list[str]:
+        terms = []
+        lowered = message.lower()
+        for raw in lowered.replace("\n", " ").split():
+            word = raw.strip(".,!?;:()[]{}\"'")
+            if len(word) >= 5 and word not in {"about", "there", "would", "could"}:
+                terms.append(word)
+            if len(terms) == 6:
+                break
+        return terms
+
+    async def remember(self, text: str) -> None:
+        assert self.engram is not None
+        memory = await self.engram.add(
+            text,
+            AGENT_ID,
+            user_id=USER_ID,
+            session_id=self.session_id,
+            memory_type="semantic",
+            metadata={"source": "manual_chatbot_memory"},
+        )
+        print_table([("memory_id", memory.memory_id), ("content", preview(memory.content))])
+
+    async def memories(self) -> None:
+        assert self.engram is not None
+        memories = await self.engram.list_recent(AGENT_ID, user_id=USER_ID, limit=15)
+        if not memories:
+            print("No memories stored yet.")
             return
+        for memory in memories:
+            print(
+                f"{memory.memory_id} [{memory.memory_type}] "
+                f"{memory.importance:.2f} {preview(memory.content)}"
+            )
 
-        results = await self.engram.search(
+    async def search(self, query: str) -> None:
+        assert self.engram is not None
+        results = await self.engram.search(query, AGENT_ID, user_id=USER_ID, limit=8)
+        if not results:
+            print("No matches.")
+            return
+        for result in results:
+            await self.engram.reinforce(result.memory.memory_id, 0.02)
+            print(f"{result.score:.3f} {preview(result.memory.content)}")
+
+    async def context(self, query: str) -> None:
+        assert self.engram is not None
+        assert self.task_id is not None
+        block = await self.engram.get_context_block(
+            query,
+            AGENT_ID,
+            user_id=USER_ID,
+            session_id=self.session_id,
+            group_by_type=True,
+            max_tokens=1200,
+        )
+        task_context = await self.engram.build_context(
+            self.task_id,
             query=query,
+            max_tokens=1400,
+            include_graph=True,
+        )
+        print(block or "No memory context.")
+        print("\nTask context:")
+        print(task_context.text or "No task context.")
+
+    async def trace(self, query: str) -> None:
+        assert self.engram is not None
+        trace = await self.engram.trace_recall(
+            query,
+            AGENT_ID,
+            user_id=USER_ID,
+            expected_terms=self._expected_terms(query),
+            max_tokens=1200,
+        )
+        print(trace.context or "No recall context.")
+        print_table(
+            [
+                ("critical", len(trace.critical_memory_ids)),
+                ("search", len(trace.search_memory_ids)),
+                ("kept", len(trace.kept_memory_ids)),
+                ("trimmed", len(trace.trimmed_memory_ids)),
+                ("missing_terms", trace.missing_expected_terms),
+            ]
+        )
+
+    async def task(self) -> None:
+        assert self.engram is not None
+        assert self.task_id is not None
+        current = await self.engram.get_task(self.task_id)
+        tasks = await self.engram.list_tasks(
             agent_id=AGENT_ID,
             user_id=USER_ID,
+            status=["active", "paused"],
             limit=5,
         )
-
-        print(f"\n🔍 Hybrid Search: '{query}'")
-        if not results:
-            print("  No matches")
-        else:
-            for r in results:
-                fact = r.memory.fact or r.memory.content
-                print(f"  [{r.score:.0%}] {fact[:50]}...")
-                if r.memory.main_content:
-                    ctx = r.memory.main_content[:50].replace("\n", " ")
-                    print(f"           └─ {ctx}...")
-        print()
-
-    async def show_graph(self):
-        """engram.traverse() + traverse_many() - Show memory relations."""
-        if not self.engram:
-            return
-
-        memories = await self.engram.list_recent(
-            agent_id=AGENT_ID,
-            user_id=USER_ID,
-            limit=3,
+        print_table(
+            [
+                ("current", f"{current.task_run_id} ({current.status})"),
+                ("session", current.session_id),
+                ("resumable", [task.task_run_id for task in tasks]),
+            ]
         )
 
-        if not memories:
-            print("\n📊 No memories to traverse\n")
-            return
+    async def forget(self, memory_id: str) -> None:
+        assert self.engram is not None
+        deleted = await self.engram.forget(memory_id)
+        print_table([("deleted", deleted)])
 
-        # Traverse from most recent memory
-        results = await self.engram.traverse(
-            start_memory_id=memories[0].memory_id,
-            max_depth=2,
-        )
-
-        print(f"\n📊 Memory Graph (from: {memories[0].content[:30]}...)")
-        if not results:
-            print("  No connections")
-        else:
-            for r in results:
-                print(f"  └─ [{r.depth}] {r.content[:45]}...")
-
-        expanded = await self.engram.traverse_many(
-            [m.memory_id for m in memories[:3]],
-            max_depth=2,
-            direction="any",
-            total_limit=8,
-        )
-        block = self.engram.render_graph_context(expanded, max_tokens=300)
-        if block:
-            print("\nPrompt-ready graph block:")
-            print(block)
-        print()
-
-    async def show_task(self):
-        """engram.build_context() - Show active task memory context."""
-        if not self.engram or not self.task_run_id:
-            print("\nNo active task memory\n")
-            return
-
-        task = await self.engram.get_task(self.task_run_id)
-        context = await self.task_context("current conversation state", max_tokens=900)
-        print(f"\n🧭 Task Memory ({task.status})")
-        print(f"  ID:   {task.task_run_id}")
-        print(f"  Goal: {task.goal}")
-        print("\n" + (context or "  No task context yet"))
-        print()
-
-    async def clear_memories(self):
-        """engram.purge() - Delete all memories."""
-        if not self.engram:
-            return
-
-        count = await self.engram.purge(agent_id=AGENT_ID)
+    async def clear(self) -> None:
+        assert self.engram is not None
+        count = await self.engram.purge(AGENT_ID, user_id=USER_ID)
         self.history.clear()
-        print(f"🗑️  Deleted {count} memories\n")
+        print_table([("purged", count)])
 
 
-# =============================================================================
-# Main
-# =============================================================================
-
-
-def print_help():
-    print("""
+HELP = """
 Commands:
-  /memories     List recent memories (engram.list_recent)
-  /search <q>   Hybrid search (engram.search)
-  /graph        Show memory graph + prompt block (traverse_many/render_context)
-  /task         Show active long-running task context (engram.build_context)
-  /worker       Process queued memory jobs (engram.process_memory_jobs)
-  /forget       Clear all (engram.purge)
-  /help         This help
-  /quit         Exit
+  /remember <fact>      Store a durable fact immediately with add()
+  /memories             List recent Engram memories for this user
+  /search <query>       Search memories and reinforce the retrieved hits
+  /context <query>      Show the prompt context Engram would send to the LLM
+  /trace <query>        Inspect trace_recall() retrieval decisions
+  /task                 Show the resumable task/session backing this chat
+  /forget <memory_id>   Delete one memory
+  /clear                Purge this chatbot user's memories
+  /help                 Show this help
+  /quit                 Exit
 
-Engram API Used:
-  start_task, list_tasks, record_turn, build_context,
-  process_memory_jobs, pause_task,
-  add, search, get, update, reinforce, forget, purge,
-  list_recent, relate, traverse, health_check
-""")
+Plain text sends a real OpenAI chat completion with Engram memory context,
+then records the turn and processes memory jobs so future replies can recall it.
+"""
 
 
-async def main():
-    print("🧠 Engram Memory Chatbot\n")
-    print("Connecting...")
+async def run_command(bot: MemoryChatbot, line: str) -> bool:
+    command, _, rest = line.partition(" ")
+    command = command.lower()
+    rest = rest.strip()
 
+    if command in {"/quit", "/q"}:
+        return False
+    if command == "/help":
+        print(HELP)
+    elif command == "/remember" and rest:
+        await bot.remember(rest)
+    elif command == "/memories":
+        await bot.memories()
+    elif command == "/search" and rest:
+        await bot.search(rest)
+    elif command == "/context" and rest:
+        await bot.context(rest)
+    elif command == "/trace" and rest:
+        await bot.trace(rest)
+    elif command == "/task":
+        await bot.task()
+    elif command == "/forget" and rest:
+        await bot.forget(rest)
+    elif command == "/clear":
+        confirm = await asyncio.to_thread(input, "Delete this user's chatbot memories? y/N: ")
+        if confirm.lower() == "y":
+            await bot.clear()
+    else:
+        print("Unknown or incomplete command. Type /help.")
+    return True
+
+
+async def main() -> None:
     bot = MemoryChatbot()
-
     try:
         await bot.connect()
-        print("Type /help for commands.\n")
-
+    except DatabaseConnectionError as exc:
+        print(f"Database connection failed: {exc}")
+        print(
+            "Check that ENGRAM_DATABASE_URL matches the running Postgres "
+            "container credentials. If you used docker-setup.sh, the password "
+            "in .env may differ from an older existing Docker volume."
+        )
+        return
+    print(HELP)
+    try:
         while True:
-            try:
-                user_input = (await asyncio.to_thread(input, "You: ")).strip()
-                if not user_input:
-                    continue
-
-                if user_input.startswith("/"):
-                    cmd = user_input.split()[0].lower()
-
-                    if cmd in ("/quit", "/q"):
-                        break
-                    elif cmd == "/help":
-                        print_help()
-                    elif cmd == "/memories":
-                        await bot.show_memories()
-                    elif cmd == "/search":
-                        q = user_input[7:].strip()
-                        if q:
-                            await bot.search_memories(q)
-                        else:
-                            print("Usage: /search <query>")
-                    elif cmd == "/graph":
-                        await bot.show_graph()
-                    elif cmd == "/task":
-                        await bot.show_task()
-                    elif cmd == "/worker":
-                        count = await bot.process_memory_backlog()
-                        print(f"Processed {count} memory jobs\n")
-                    elif cmd == "/forget":
-                        if (
-                            await asyncio.to_thread(input, "Delete all? (y/n): ")
-                        ).lower() == "y":
-                            await bot.clear_memories()
-                    else:
-                        print(f"Unknown: {cmd}")
-                    continue
-
-                response = await bot.chat(user_input)
-                print(f"Bot: {response}\n")
-
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                print(f"Error: {e}\n")
-
+            line = (await asyncio.to_thread(input, "you> ")).strip()
+            if not line:
+                continue
+            if line.startswith("/"):
+                if not await run_command(bot, line):
+                    break
+            else:
+                response = await bot.reply(line)
+                print(f"bot> {response}")
     finally:
-        print("\n💾 Saving...")
         await bot.close()
-        print("Goodbye!")
+        print("bye")
 
 
 if __name__ == "__main__":

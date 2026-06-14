@@ -329,6 +329,7 @@ An atomic fact is a single, self-contained piece of information that can stand a
 <category name="schedule">appointments, meetings, plans, events (include times/dates/locations)</category>
 <category name="goals">aspirations, things they want to do, future plans</category>
 <category name="possessions">devices, vehicles, items they own</category>
+<category name="reference">fictional/test reference codes, labels, confirmation numbers, safe-note labels, non-secret recovery hints</category>
 <category name="other">any other SPECIFIC personal information</category>
 </categories>
 
@@ -381,6 +382,16 @@ Always include the RELATIONSHIP when referring to third parties: "User's wife Am
 
 <rule id="10" name="relationship_context">
 Use conversation history to identify relationships. If history says "my wife Amy", then later "Amy did X" means "User's wife Amy did X".
+</rule>
+
+<rule id="11" name="reference_codes_and_sensitive_values">
+Extract fictional/test reference codes, safe-note labels, recovery hints, confirmation
+numbers, and user instructions about how they should be shared when the user
+explicitly asks you to remember them. Do not extract real passwords, API keys,
+private keys, full access tokens, or payment card numbers unless the user clearly
+labels them as fictional test data.
+<example type="good" input="fictional: the recovery hint ends with 47-Kilo">User's fictional recovery hint ends with 47-Kilo</example>
+<example type="good" input="the safe-note label is Violet">User's safe-note label is Violet</example>
 </rule>
 </rules>
 
@@ -613,7 +624,12 @@ Default to semantic if unsure.
 Rewrite the search query into {n_queries} alternative queries that together
 maximize recall against a store of facts about a user. Cover different angles:
 a comprehensive third-person restatement, the key entities/names, the
-action/target, and literal nouns or numbers.
+action/target, and literal nouns or numbers. Include indirectly relevant
+constraints and preferences: food queries should search for allergies,
+avoidances, dietary restrictions, and restaurant preferences; scheduling
+queries should search for time boundaries and preferred call windows; update or
+"old plan" queries should search for cancelled, superseded, replaced, moved, and
+"no longer" facts.
 </task>
 
 <query>{query}</query>
