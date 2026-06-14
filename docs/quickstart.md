@@ -1,16 +1,15 @@
 # Quickstart
 
-This guide gets a local Engram database running and exercises the current memory
-architecture.
+This guide starts a local PostgreSQL + pgvector database and runs the core
+memory flows against the current API.
 
 ## Prerequisites
 
 - Python 3.10+
 - Docker and Docker Compose
-- One embedding provider:
-  - `sentence-transformers` for local/free development
-  - OpenAI, Cohere, HuggingFace, or Ollama for other deployments
-- Optional LLM provider for fact extraction, deep search, and job processing
+- One embedding provider
+
+For a local setup with no embedding API key, use `sentence-transformers`.
 
 ## Install
 
@@ -26,57 +25,102 @@ For OpenAI-backed embeddings and LLM features:
 pip install -e ".[dev,examples,openai]"
 ```
 
-## Start Postgres + pgvector
+## Start Postgres
 
 ```bash
-docker compose up -d
-docker compose ps
+docker compose up -d postgres
+docker compose ps postgres
 ```
 
-The default compose stack creates:
+The compose defaults match `.env.example`:
 
 ```bash
-ENGRAM_DATABASE_URL=postgresql://engram:engram@localhost:5432/engram
+export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
 ```
 
-## Configure
+Engram initializes the schema on `connect()`, including `vector`, `pg_trgm`,
+tables, indexes, migrations, text-search config, and vector dimension alignment.
 
-Local embeddings:
+## Configure Local Embeddings
 
 ```bash
-export ENGRAM_DATABASE_URL=postgresql://engram:engram@localhost:5432/engram
 export ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
 export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
 ```
 
-OpenAI embeddings and LLM:
+OpenAI alternative:
 
 ```bash
-export ENGRAM_DATABASE_URL=postgresql://engram:engram@localhost:5432/engram
 export ENGRAM_EMBEDDING_PROVIDER=openai
 export ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
+export ENGRAM_EMBEDDING_DIMENSION=1536
 export ENGRAM_LLM_PROVIDER=openai
 export ENGRAM_LLM_MODEL=gpt-4o-mini
 export ENGRAM_OPENAI_API_KEY=sk-...
 ```
 
-## Store And Trace Critical Memory
+## Store And Search A Fact
+
+Create `quickstart_memory.py`:
 
 ```python
 import asyncio
+
 from engram import Engram
 
-async def main():
+
+async def main() -> None:
+    async with Engram(memory_policy="default") as engram:
+        memory = await engram.add(
+            "User prefers dark mode",
+            "assistant",
+            user_id="user_123",
+            main_content="[USER]: I always switch apps to dark mode.\n[AI]: Noted.",
+        )
+
+        results = await engram.search(
+            "interface preferences",
+            "assistant",
+            user_id="user_123",
+            limit=5,
+        )
+
+        print(memory.memory_id)
+        for result in results:
+            print(f"{result.score:.3f}: {result.memory.content}")
+
+
+asyncio.run(main())
+```
+
+Run it:
+
+```bash
+python quickstart_memory.py
+```
+
+## Trace Critical Memory
+
+Policies can type and pin critical facts. The `coding_agent` policy marks repo
+constraints as critical and gives them deterministic conflict slots.
+
+```python
+import asyncio
+
+from engram import Engram
+
+
+async def main() -> None:
     async with Engram(memory_policy="coding_agent") as engram:
         await engram.add(
             "Repo constraint: never revert user changes without explicit approval",
-            agent_id="codex",
+            "codex",
             user_id="nafiz",
         )
 
         trace = await engram.trace_recall(
             "resume repository work",
-            agent_id="codex",
+            "codex",
             user_id="nafiz",
             expected_terms=["never revert"],
             max_tokens=800,
@@ -86,99 +130,107 @@ async def main():
         print("missing:", trace.missing_expected_terms)
         print("kept:", trace.kept_memory_ids)
 
+
 asyncio.run(main())
 ```
 
 Expected behavior:
 
-- The repo constraint is typed as `constraint`.
-- It is marked critical by policy metadata.
-- `trace_recall()` includes it even if vector ranking would not.
+- the memory is typed as `constraint`
+- metadata includes `critical`, `critical_slot`, and `conflict_key`
+- `trace_recall()` includes it before ordinary search-ranked memories
 
 ## Store Conversation Facts
 
-With an LLM provider configured:
+`add_conversation()` needs an LLM provider. It extracts facts from a user and
+assistant exchange, compares them with existing memories, and stores only useful
+updates.
 
 ```python
-async with Engram(memory_policy="default") as engram:
-    memories = await engram.add_conversation(
-        user_message="I'm Sarah. I am allergic to shellfish.",
-        assistant_response="I will remember that and avoid shellfish suggestions.",
-        agent_id="assistant",
-        user_id="sarah",
-    )
+memories = await engram.add_conversation(
+    user_message="I'm Sarah. I am allergic to shellfish.",
+    assistant_response="I will avoid shellfish recommendations.",
+    agent_id="assistant",
+    user_id="sarah",
+)
 
-    for memory in memories:
-        print(memory.memory_type, memory.content, memory.metadata)
+for memory in memories:
+    print(memory.memory_type, memory.content, memory.metadata)
 ```
 
-`add_conversation()` extracts facts, compares them with existing memories, stores
-the raw exchange in `main_content`, and applies conflict metadata.
+## Use Task Memory
 
-## Long-Running Task Memory
+Task memory stores resumable agent work: the task record, raw events,
+checkpoints, and background jobs.
 
 ```python
-async with Engram(memory_policy="coding_agent") as engram:
-    task = await engram.start_task(
-        "Make the project OSS publish ready",
-        agent_id="codex",
-        user_id="nafiz",
-    )
+task = await engram.start_task(
+    "Make the project OSS publish ready",
+    "codex",
+    user_id="nafiz",
+)
 
-    await engram.record_turn(
-        task.task_run_id,
-        user_message="Clean Ruff and update docs.",
-        assistant_response="Ruff passes and I am updating the docs now.",
-        tool_calls=[{"name": "ruff", "result": "All checks passed"}],
-    )
+await engram.record_turn(
+    task.task_run_id,
+    user_message="Clean Ruff and update docs.",
+    assistant_response="Ruff passes and I am updating the docs now.",
+    tool_calls=[{"name": "ruff", "result": "All checks passed"}],
+)
 
-    await engram.process_memory_jobs(limit=10)
+await engram.process_memory_jobs(limit=10)
 
-    context = await engram.build_context(
-        task.task_run_id,
-        query="what remains before publishing?",
-        max_tokens=200000,
-    )
+context = await engram.build_context(
+    task.task_run_id,
+    query="what remains before publishing?",
+    max_tokens=200000,
+)
 
-    print(context.text)
+print(context.text)
 ```
 
-Use `run_memory_worker()` instead of inline `process_memory_jobs()` when you
-want a separate background worker.
+For production, run `run_memory_worker()` in a separate worker process instead
+of processing jobs inline.
 
-## Long Input
+## Use Long Input
 
-Use this for large prompts, legal documents, specs, or multi-thousand-token
-instructions.
+Use long input for legal documents, specs, large prompts, or task packets where
+the exact source matters.
 
 ```python
-async with Engram(memory_policy="legal") as engram:
-    task = await engram.start_task(
-        "Review vendor contract",
-        agent_id="legal-agent",
-        user_id="user_123",
-    )
+contract_text = """
+# Termination
+Either party may terminate with 30 days written notice.
 
-    report = await engram.record_long_input(
-        task.task_run_id,
-        text=contract_text,
-        title="Vendor agreement",
-        max_chunk_tokens=700,
-    )
+# Audit Logs
+The vendor shall retain audit logs for 180 days.
+"""
 
-    context = await engram.build_long_input_context(
-        task.task_run_id,
-        query="What are the termination notice requirements?",
-        expected_terms=["termination", "notice"],
-        max_tokens=4000,
-    )
+task = await engram.start_task(
+    "Review vendor contract",
+    "legal-agent",
+    user_id="user_123",
+)
 
-    print(report.manifest)
-    print(context.text)
-    print(context.trace["missing_expected_terms"])
+report = await engram.record_long_input(
+    task.task_run_id,
+    text=contract_text,
+    title="Vendor agreement",
+    max_chunk_tokens=700,
+)
+
+context = await engram.build_long_input_context(
+    task.task_run_id,
+    query="What are the termination notice requirements?",
+    expected_terms=["termination", "notice"],
+    max_tokens=4000,
+)
+
+print(report.manifest)
+print(context.text)
+print(context.trace["missing_expected_terms"])
 ```
 
-## Run The Examples
+## Run Included Examples
 
 ```bash
 python examples/basic_usage.py
@@ -186,8 +238,10 @@ python examples/long_input_usage.py
 python examples/chatbot.py
 ```
 
-`examples/chatbot.py` demonstrates task memory, trace recall, graph context,
-manual `/worker` processing, and the full Engram API.
+`examples/chatbot.py` is a real OpenAI-backed chatbot. It retrieves Engram
+memory before each model call, records the turn, processes memory jobs, and
+offers small operational commands for search, trace, context, task state, and
+manual memory cleanup.
 
 ## Verify Health
 
@@ -200,13 +254,14 @@ async with Engram() as engram:
 
 ## Clean Up
 
+Stop containers without deleting data:
+
 ```bash
 docker compose down
 ```
 
-To remove all local database data:
+Delete the local database volume:
 
 ```bash
 docker compose down -v
 ```
-

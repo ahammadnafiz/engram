@@ -26,17 +26,17 @@ source-anchored long-input ingestion, and traceable recall.
 
 ## Features
 
-- **Hybrid Search** — Combines vector similarity, keyword matching (BM25), time decay, and importance scoring using Reciprocal Rank Fusion
-- **Two-Column Memory System** — Embed only facts for search, store full conversation context separately (cost-effective)
-- **Memory Decay** — Exponential decay prioritizes recent and frequently accessed memories
-- **Graph Traversal** — Multi-hop reasoning through typed memory relationships using recursive CTEs
-- **Long-Running Task Memory** — Durable task runs, raw event ledger, checkpoints, and background memory jobs for agents that run across many turns
-- **Session Management** — Track conversation context with automatic TTL expiration
-- **Pluggable Providers** — Support for OpenAI, Anthropic, Cohere, Ollama, Sentence Transformers, and custom providers
-- **Configurable Memory Policies** — Domain-specific typing and conflict slots for personal, coding, legal, and custom agents
-- **Long Input Ingestion** — Store full prompts/documents, chunk by structure, extract anchored memories, and build source-grounded context
-- **Recall Observability** — Trace whether memories were stored, ranked, kept, trimmed, superseded, or missing
-- **Operational Foundation** — ACID storage, connection pooling, and automatic vector dimension scaling
+- **Hybrid Search** - Combines vector similarity, keyword matching (BM25), time decay, and importance scoring using Reciprocal Rank Fusion
+- **Two-Column Memory System** - Embed only facts for search, store full conversation context separately (cost-effective)
+- **Memory Decay** - Exponential decay prioritizes recent and frequently accessed memories
+- **Graph Traversal** - Multi-hop reasoning through typed memory relationships using recursive CTEs
+- **Long-Running Task Memory** - Durable task runs, raw event ledger, checkpoints, and background memory jobs for agents that run across many turns
+- **Session Management** - Track conversation context with session IDs and rolling summaries
+- **Pluggable Providers** - Support for OpenAI, Anthropic, Cohere, Ollama, Sentence Transformers, and custom providers
+- **Configurable Memory Policies** - Domain-specific typing and conflict slots for personal, coding, legal, and custom agents
+- **Long Input Ingestion** - Store full prompts/documents, chunk by structure, extract anchored memories, and build source-grounded context
+- **Recall Observability** - Trace whether memories were stored, ranked, kept, trimmed, superseded, or missing
+- **Operational Foundation** - ACID storage, connection pooling, and guarded vector-dimension alignment
 
 ## Installation
 
@@ -64,17 +64,17 @@ pip install engram[all]                   # All providers
 ```bash
 git clone https://github.com/ahammadnafiz/engram.git
 cd engram
-docker compose up -d
+pip install -e ".[dev,examples,sentence-transformers]"
+docker compose up -d postgres
 ```
 
 ### 2. Configure Environment
 
 ```bash
 # .env
-ENGRAM_DATABASE_URL=postgresql://engram:engram@localhost:5432/engram
-ENGRAM_EMBEDDING_PROVIDER=openai
-ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
-ENGRAM_OPENAI_API_KEY=sk-...
+ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
+ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
+ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
 ```
 
 ### 3. Use Engram
@@ -396,7 +396,7 @@ All settings are configured via environment variables with the `ENGRAM_` prefix:
 | `ENGRAM_DATABASE_URL` | `postgresql://localhost:5432/engram` | PostgreSQL connection string |
 | `ENGRAM_EMBEDDING_PROVIDER` | `openai` | Embedding provider |
 | `ENGRAM_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model |
-| `ENGRAM_LLM_PROVIDER` | — | LLM provider (optional) |
+| `ENGRAM_LLM_PROVIDER` | - | LLM provider (optional) |
 | `ENGRAM_LLM_MODEL` | `gpt-4o-mini` | LLM model |
 | `ENGRAM_WEIGHT_SEMANTIC` | `0.40` | Semantic search weight |
 | `ENGRAM_WEIGHT_KEYWORD` | `0.20` | Keyword search weight |
@@ -422,15 +422,21 @@ docker compose down -v
 
 ## Documentation
 
-Current alpha documentation lives in this README and the examples:
+The docs in `docs/` are the source for the MkDocs site.
 
-- [examples/basic_usage.py](./examples/basic_usage.py) — comprehensive API walkthrough
-- [examples/chatbot.py](./examples/chatbot.py) — task-memory chatbot demo
-- [examples/long_input_usage.py](./examples/long_input_usage.py) — source-anchored long-input demo
-- [CHANGELOG.md](./CHANGELOG.md) — release notes
-- [SECURITY.md](./SECURITY.md) — privacy, deletion, and API-key guidance
+- [Quickstart](./docs/quickstart.md) - install, configure, and run the first flow
+- [Core Concepts](./docs/concepts.md) - memory types, policies, search, graph, and task memory
+- [Task Memory](./docs/task-memory.md) - tasks, events, checkpoints, workers, long input, and evidence APIs
+- [API Reference](./docs/api-reference.md) - current public signatures and tested examples
+- [Configuration](./docs/configuration.md) - environment variables, provider extras, and safety flags
+- [Production Guide](./docs/production-guide.md) - deployment shape, observability, and privacy boundaries
+- [Operations](./docs/operations.md) - Docker, psql, migrations, workers, and verification commands
+- [Examples](./docs/examples.md) - included scripts and what they demonstrate
 
-The hosted documentation site will be added after the public API stabilizes.
+Additional project docs:
+
+- [CHANGELOG.md](./CHANGELOG.md) - release notes
+- [SECURITY.md](./SECURITY.md) - privacy, deletion, and API-key guidance
 
 ## Production Caveats
 

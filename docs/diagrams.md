@@ -4,29 +4,58 @@
 
 ```mermaid
 flowchart TD
-    App["Agent / LLM App"] --> Client["Engram Client"]
+    App["Agent / LLM app"] --> Client["Engram client"]
 
     Client --> Policy["MemoryPolicy<br/>type + critical slot + conflict key"]
+    Client --> MemoryAPI["Memory APIs<br/>add/search/trace"]
+    Client --> EvidenceAPI["Evidence APIs<br/>diverse hits + neighbors + reader"]
     Client --> TaskAPI["Task APIs<br/>tasks/events/checkpoints/jobs"]
     Client --> LongInput["Long Input APIs<br/>source + chunks + manifest"]
     Client --> Graph["GraphTraversal"]
 
     Policy --> MemoryStore["MemoryStore"]
+    MemoryAPI --> MemoryStore
+    EvidenceAPI --> MemoryStore
     MemoryStore --> Embed["EmbeddingService"]
-    Embed --> Providers["Embedding Providers"]
+    EvidenceAPI --> LLM["LLMService"]
+    LongInput --> LLM
+    Embed --> Providers["Embedding providers"]
+    LLM --> LLMProviders["LLM providers"]
 
     TaskAPI --> TaskMgr["TaskMemoryManager"]
     LongInput --> TaskMgr
-    Graph --> DB[("PostgreSQL + pgvector")]
+    Graph --> DB[("PostgreSQL + pgvector + pg_trgm")]
     MemoryStore --> DB
     TaskMgr --> DB
 
     DB --> Fact["agent_memory<br/>typed facts + embeddings + metadata"]
     DB --> Relations["memory_relations"]
+    DB --> Sessions["agent_sessions"]
     DB --> Tasks["agent_task_runs"]
     DB --> Events["agent_events"]
     DB --> Checkpoints["agent_checkpoints"]
     DB --> Jobs["memory_jobs"]
+```
+
+## Connect And Schema Initialization
+
+```mermaid
+sequenceDiagram
+    participant A as Application
+    participant E as Engram
+    participant ES as EmbeddingService
+    participant DB as PostgreSQL
+    participant L as LLMService
+
+    A->>E: connect()
+    E->>ES: from_settings()
+    ES-->>E: embedding dimension
+    E->>DB: connect()
+    E->>DB: init_schema(embedding_dimension)
+    DB-->>E: schema ready or dimension error
+    E->>L: from_settings()
+    L-->>E: optional LLM or None
+    E-->>A: connected client
 ```
 
 ## Memory Write With Policy
@@ -40,16 +69,15 @@ sequenceDiagram
     participant V as EmbeddingService
     participant DB as PostgreSQL
 
-    A->>E: add(content, memory_type, metadata)
+    A->>E: add(content, agent_id, main_content)
     E->>P: apply_metadata()
     P-->>E: inferred type, critical_slot, conflict_key
     E->>S: add(MemoryCreate)
     S->>V: embed(content/fact)
     V-->>S: vector
-    S->>DB: INSERT agent_memory
-    DB-->>S: memory_id
-    E->>S: supersede_conflicts(conflict_key, memory_id)
-    S->>DB: UPDATE old active memories status=superseded
+    S->>DB: duplicate guard + INSERT agent_memory
+    S->>DB: supersede older active rows with same conflict_key
+    DB-->>S: memory row
     E-->>A: Memory
 ```
 
@@ -61,11 +89,24 @@ flowchart TD
     Q --> Search["deep_search/search<br/>vector + keyword + decay + importance"]
     Q --> Old["list superseded<br/>for observability"]
 
-    Critical --> Merge["Dedupe and rank<br/>critical first"]
+    Critical --> Merge["dedupe and rank<br/>critical first"]
     Search --> Merge
-    Merge --> Budget["Trim to max_tokens"]
+    Merge --> Budget["trim to max_tokens"]
     Budget --> Trace["RecallTrace<br/>kept / trimmed / missing / superseded"]
     Old --> Trace
+```
+
+## Evidence Retrieval
+
+```mermaid
+flowchart TD
+    Question["aggregation question"] --> Evidence["search_evidence_set"]
+    Evidence --> Candidates["overfetch candidates"]
+    Candidates --> Rerank["optional rerank"]
+    Rerank --> Diverse["round-robin by session/group"]
+    Diverse --> Neighbors["get_neighboring_context_block"]
+    Neighbors --> Reader["answer_from_evidence"]
+    Reader --> Answer["grounded answer"]
 ```
 
 ## Long-Running Task Flow
@@ -80,14 +121,14 @@ sequenceDiagram
     A->>E: start_task(goal)
     E->>DB: INSERT agent_task_runs
     A->>E: build_context(task_id, query)
-    E->>DB: SELECT task, recent events, checkpoints, memories
+    E->>DB: SELECT task, events, checkpoints, memories
     E-->>A: ContextBuildResult
     A->>E: record_turn(user, assistant, tools)
     E->>DB: INSERT agent_events
     E->>DB: INSERT memory_jobs(turn_ingest)
     W->>E: process_memory_jobs()
     E->>DB: claim memory_jobs
-    E->>DB: INSERT derived agent_memory
+    E->>DB: INSERT derived agent_memory if LLM exists
     E->>DB: INSERT agent_checkpoints
     E->>DB: mark memory_jobs completed
 ```
@@ -96,7 +137,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Input["2k+ token prompt / legal doc / spec"] --> Source["source event<br/>raw text"]
+    Input["large prompt / legal doc / spec"] --> Source["source event<br/>raw text"]
     Source --> Split["chunk by heading and token estimate"]
     Split --> ChunkEvents["artifact events<br/>chunk_id, char span, quote_hash"]
     ChunkEvents --> Extract["LLM or heuristic fact extraction"]
@@ -181,22 +222,22 @@ erDiagram
 ```mermaid
 flowchart LR
     subgraph Fact["fact / content"]
-        F1["Concise extracted fact"]
-        F2["Embedded"]
-        F3["Searched by vector + keyword"]
-        F4["Returned in prompt context"]
+        F1["concise extracted fact"]
+        F2["embedded"]
+        F3["searched by vector + keyword"]
+        F4["returned in prompt context"]
     end
 
     subgraph Main["main_content"]
-        M1["Source conversation or document chunk"]
-        M2["Not embedded"]
-        M3["Not used for vector ranking"]
-        M4["Returned as supporting context"]
+        M1["source conversation or document chunk"]
+        M2["not embedded"]
+        M3["not used for vector ranking"]
+        M4["returned as supporting context"]
     end
 
     F1 --> F2 --> F3 --> F4
     M1 --> M2 --> M3 --> M4
 
-    F2 -. "embedding cost" .-> Cost["Paid provider call or local compute"]
-    M2 -. "storage only" .-> Savings["No extra embedding cost"]
+    F2 -. "embedding cost" .-> Cost["paid provider call or local compute"]
+    M2 -. "storage only" .-> Savings["no extra embedding cost"]
 ```

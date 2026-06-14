@@ -33,16 +33,16 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - Core Concepts: concepts.md
-  - Long-Running Memory: long-running-memory.md
-  - API Reference: api.md
+  - Task Memory: task-memory.md
+  - API Reference: api-reference.md
   - Configuration: configuration.md
   - Architecture: architecture.md
-  - Diagrams: diagram.md
+  - Diagrams: diagrams.md
   - Production Guide: production-guide.md
-  - Migration Guide: migration.md
-  - Commands: commands.md
-  - Edge Cases: edge-cases.md
-  - Chatbot Concept: CHATBOT_CONCEPT.md
+  - Migrations: migrations.md
+  - Operations: operations.md
+  - Reliability Testing: reliability-testing.md
+  - Examples: examples.md
 
 plugins:
   - search

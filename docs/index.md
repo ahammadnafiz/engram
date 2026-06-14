@@ -1,138 +1,119 @@
 # Engram
 
-**Persistent memory infrastructure for long-running AI agents.**
-
-Engram is an alpha-stage memory library for LLM applications. It stores typed,
-searchable memory in PostgreSQL + pgvector, adds deterministic recall for
-critical facts, preserves raw task/event history, and provides traceable context
-assembly for long-running agents.
+Engram is an async Python memory layer for LLM applications and long-running
+agents. It stores searchable facts, raw task history, source-anchored long
+inputs, and graph relations in PostgreSQL + pgvector.
 
 !!! warning "Alpha status"
-    The public API and schema are still evolving. Use migrations carefully,
-    back up production data, and read the production guide before deploying.
+    Engram is `0.3.0a1`. The codebase has unit and integration coverage, but
+    public APIs and the schema may still change before a stable release. Back
+    up data before migrations.
 
-## What Changed
+## What Engram Gives You
 
-The current architecture includes:
-
-- **Two-column memory**: embed concise facts in `fact`; preserve full context in
-  `main_content` without embedding it.
-- **Typed memory**: profile, project, task, preference, constraint, decision,
-  tool result, semantic, episodic, and procedural memories.
-- **Memory policies**: automatic typing, critical slots, and conflict keys via
-  `MemoryPolicy`, with `default`, `legal`, and `coding_agent` presets.
-- **Deterministic critical recall**: important facts are retrieved by metadata,
-  not only by vector rank.
-- **Conflict resolution**: corrected facts supersede older facts with the same
-  conflict key.
-- **Recall observability**: `trace_recall()` reports stored, ranked, kept,
-  trimmed, missing, and superseded memories.
-- **Long-running task memory**: durable task runs, append-only event ledger,
-  checkpoints, and background memory jobs.
-- **Long-input support**: source-anchored chunking for large prompts, legal docs,
-  specs, and multi-day task context.
+| Need | Engram surface |
+|------|----------------|
+| Store durable facts | `add()`, `add_batch()`, `add_conversation()` |
+| Retrieve memories | `search()`, `deep_search()`, `get_context_block()` |
+| Debug missed recall | `trace_recall()` |
+| Pin critical facts | `MemoryPolicy`, `recall_critical()` |
+| Handle corrections | `conflict_key`, active/superseded metadata |
+| Resume long work | tasks, events, checkpoints, memory jobs |
+| Work with large documents | `record_long_input()`, `build_long_input_context()` |
+| Expand related context | graph relations and traversal |
+| Build evidence sets | `search_evidence_set()`, neighboring context, `answer_from_evidence()` |
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/ahammadnafiz/engram.git
 cd engram
-docker compose up -d
 pip install -e ".[dev,examples,sentence-transformers]"
-```
+docker compose up -d postgres
 
-```bash
-export ENGRAM_DATABASE_URL=postgresql://engram:engram@localhost:5432/engram
+export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
 export ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
 export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
 ```
 
 ```python
 import asyncio
+
 from engram import Engram
 
-async def main():
+
+async def main() -> None:
     async with Engram(memory_policy="coding_agent") as engram:
         memory = await engram.add(
             "Repo constraint: never revert user changes without approval",
-            agent_id="codex",
+            "codex",
             user_id="nafiz",
         )
 
         trace = await engram.trace_recall(
             "continue the repository work",
-            agent_id="codex",
+            "codex",
             user_id="nafiz",
             expected_terms=["never revert"],
         )
 
         print(memory.memory_type)
         print(trace.context)
-        print(trace.missing_expected_terms)
+
 
 asyncio.run(main())
 ```
 
-## Long-Running Task Example
+## Architecture In One Page
 
-```python
-async with Engram(memory_policy="coding_agent") as engram:
-    task = await engram.start_task(
-        "Ship persistent memory for Codex",
-        agent_id="codex",
-        user_id="nafiz",
-    )
+Engram has two connected planes:
 
-    await engram.record_turn(
-        task.task_run_id,
-        user_message="Implement deterministic recall and conflict resolution.",
-        assistant_response="I will add policy metadata, traces, and tests.",
-        tool_calls=[{"name": "pytest", "result": "190 passed"}],
-    )
+| Plane | Tables | Optimized for |
+|-------|--------|---------------|
+| Fact memory | `agent_memory`, `memory_relations` | search, type filters, conflict resolution, graph recall |
+| Task memory | `agent_task_runs`, `agent_events`, `agent_checkpoints`, `memory_jobs` | resumability, audit history, background derivation |
 
-    await engram.process_memory_jobs(limit=10)
+`Engram.connect()` creates or migrates the schema for normal library use. It
+also aligns the vector column with the configured embedding dimension, with a
+safety guard that blocks destructive dimension changes unless explicitly
+enabled.
 
-    context = await engram.build_context(
-        task.task_run_id,
-        query="resume the work",
-        max_tokens=200000,
-    )
-    print(context.text)
-```
-
-## Learn More
+## Where To Go Next
 
 <div class="grid cards" markdown>
 
 - :material-play-circle: **[Quickstart](quickstart.md)**
 
-    Install, configure, and run your first memory flow.
+    Install, configure, and run the first memory flow.
 
 - :material-memory: **[Core Concepts](concepts.md)**
 
-    Understand memory types, policies, conflict resolution, search, and graph recall.
+    Understand fact memory, policies, conflict slots, search, graph recall, and task memory.
 
-- :material-timeline-clock: **[Long-Running Memory](long-running-memory.md)**
+- :material-timeline-clock: **[Task Memory](task-memory.md)**
 
-    Deep dive into task memory, events, checkpoints, long input, and recall traces.
+    Work with task runs, events, checkpoints, background jobs, and long inputs.
 
-- :material-api: **[API Reference](api.md)**
+- :material-api: **[API Reference](api-reference.md)**
 
-    Public methods, models, and examples.
+    Current public methods, signatures, models, and examples from the codebase.
 
-- :material-database-arrow-up: **[Migration Guide](migration.md)**
+- :material-cog: **[Configuration](configuration.md)**
 
-    Schema changes and upgrade order.
+    Environment variables, provider extras, search tuning, reranking, and safety flags.
 
 - :material-shield-check: **[Production Guide](production-guide.md)**
 
-    Practical deployment, observability, and safety guidance.
+    Deployment shape, privacy boundaries, observability, and failure modes.
 
 </div>
 
-## Examples
+## Included Examples
 
-- `examples/basic_usage.py`: broad API walkthrough.
-- `examples/chatbot.py`: persistent memory chatbot using task memory.
-- `examples/long_input_usage.py`: source-anchored long-input ingestion and context.
+| File | Purpose |
+|------|---------|
+| `examples/basic_usage.py` | broad API walkthrough |
+| `examples/chatbot.py` | real OpenAI-backed chatbot with Engram recall, turn recording, memory jobs, and cleanup commands |
+| `examples/long_input_usage.py` | source-anchored long-input ingestion and context |
 
+Read [Examples](examples.md) for what each script exercises.
