@@ -120,9 +120,7 @@ class OpenAILLMProvider(LLMProvider):
             response = None
             for _ in range(3):
                 try:
-                    response = await self._client.chat.completions.create(
-                        **call_kwargs
-                    )
+                    response = await self._client.chat.completions.create(**call_kwargs)
                     break
                 except self._openai.BadRequestError as e:
                     msg = str(e)

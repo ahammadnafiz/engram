@@ -194,7 +194,6 @@ class TestEvaluateMemoryOperation:
         assert op.operation == MemoryOperationType.ADD
         assert op.content == "User moved to Berlin"
 
-
     @pytest.mark.asyncio
     async def test_delete_with_no_target_falls_back_to_add(self) -> None:
         from engram.llm.service import MemoryOperationType

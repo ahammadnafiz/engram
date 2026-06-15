@@ -134,9 +134,7 @@ class GraphTraversal:
                 "datetime",
                 self._row_value(row, "last_accessed_at"),
             ),
-            access_count=int(
-                cast("int", self._row_value(row, "access_count", 0) or 0)
-            ),
+            access_count=int(cast("int", self._row_value(row, "access_count", 0) or 0)),
             depth=int(cast("int", self._row_value(row, "depth") or 0)),
             path=cast("list[str]", self._row_value(row, "path", []) or []),
             relation_type=cast("str | None", self._row_value(row, "relation_type")),

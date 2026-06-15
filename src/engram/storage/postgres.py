@@ -374,8 +374,7 @@ class PostgresStorage:
         # Upgrade pre-existing unique fact indexes to the md5 form (raw-fact
         # entries fail for facts larger than the ~2704-byte btree row limit).
         unique_fact_def = await self.fetchval(
-            "SELECT indexdef FROM pg_indexes "
-            "WHERE indexname = 'idx_unique_memory_fact'"
+            "SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_unique_memory_fact'"
         )
         if unique_fact_def is not None and "md5" not in unique_fact_def:
             logger.info("Rebuilding idx_unique_memory_fact on md5(fact)")

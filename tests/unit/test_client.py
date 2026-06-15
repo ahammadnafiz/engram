@@ -893,9 +893,7 @@ class TestAnswerFromEvidence:
             '"included":[{"entity":"boots"},{"entity":"blazer"},{"entity":"coat"}],'
             '"excluded":[]}'
         )
-        eg._llm.complete = AsyncMock(
-            side_effect=["notes", verified, verified, "3"]
-        )
+        eg._llm.complete = AsyncMock(side_effect=["notes", verified, verified, "3"])
 
         out = await eg.answer_from_evidence(
             question="How many things do I need to pick up?",
@@ -917,9 +915,7 @@ class TestAnswerFromEvidence:
             '"included":[{"amount":"$25"},{"amount":"$40"},{"amount":"$120"}],'
             '"excluded":[]}'
         )
-        eg._llm.complete = AsyncMock(
-            side_effect=["notes", verified, verified, "$185"]
-        )
+        eg._llm.complete = AsyncMock(side_effect=["notes", verified, verified, "$185"])
 
         out = await eg.answer_from_evidence(
             question="How much did I spend total?",
