@@ -78,7 +78,16 @@ from engram.core import (
 from engram.embedding import EmbeddingService
 from engram.graph import MemoryRelation, TraversalResult
 from engram.llm import LLMService
-from engram.memory import Memory, MemoryCreate, RecallTrace, SearchQuery, SearchResult
+from engram.memory import (
+    Memory,
+    MemoryCreate,
+    MemoryExplanation,
+    MemoryHistoryEvent,
+    MemoryLineage,
+    RecallTrace,
+    SearchQuery,
+    SearchResult,
+)
 from engram.policy import (
     CODING_AGENT_MEMORY_POLICY,
     DEFAULT_MEMORY_POLICY,
@@ -147,8 +156,11 @@ __all__ = [
     # Models
     "Memory",
     "MemoryCreate",
+    "MemoryExplanation",
+    "MemoryHistoryEvent",
     "MemoryId",
     "MemoryJob",
+    "MemoryLineage",
     "MemoryNotFoundError",
     "MemoryPolicy",
     "MemoryRelation",

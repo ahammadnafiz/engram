@@ -114,4 +114,5 @@ class TestSchemaFiles:
 
         assert "idx_unique_memory_fact" in sql
         assert "md5(fact)" in sql
+        assert "WHERE status = 'active'" in sql
         assert "COALESCE(user_id, ''), fact)" not in sql

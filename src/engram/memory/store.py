@@ -5,6 +5,7 @@ This module provides the MemoryStore class for CRUD operations on memories.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -24,6 +25,9 @@ from engram.core.serialization import json_dumps
 from engram.memory.models import (
     Memory,
     MemoryCreate,
+    MemoryExplanation,
+    MemoryHistoryEvent,
+    MemoryLineage,
     MemoryUpdate,
     SearchQuery,
     SearchResult,
@@ -36,46 +40,105 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Insert one memory; on an exact-fact conflict return the existing row's id.
-# (xmax = 0) distinguishes a real insert from a conflict-update.
-#
-# On conflict we reactivate the existing row: re-asserting the exact text of a
-# fact that was previously superseded (e.g. a corrected-then-restated profile
-# value) must bring it back as active, not silently resolve to a hidden
-# superseded row. The near-duplicate guard deliberately ignores superseded
-# rows, so this conflict path is the only place an exact re-assert can land.
-# Clearing the supersede markers is a no-op for rows that were already active.
+_MEMORY_SELECT_COLUMNS = """
+    memory_id, agent_id, user_id, session_id,
+    content, fact, main_content, memory_type, embedding,
+    importance, access_count,
+    created_at, last_accessed_at,
+    lineage_id, revision, status, valid_from, valid_to,
+    superseded_by_memory_id, superseded_at, metadata
+"""
+
+_MEMORY_SELECT_COLUMNS_M = """
+    m.memory_id, m.agent_id, m.user_id, m.session_id,
+    m.content, m.fact, m.main_content, m.memory_type, m.embedding,
+    m.importance, m.access_count,
+    m.created_at, m.last_accessed_at,
+    m.lineage_id, m.revision, m.status, m.valid_from, m.valid_to,
+    m.superseded_by_memory_id, m.superseded_at, m.metadata
+"""
+
+# Insert one active memory; on an exact active-fact conflict return the existing
+# row's id. Superseded historical rows are outside the partial unique index, so
+# reasserting a corrected old fact creates a new active revision instead of
+# reviving the hidden row.
 _INSERT_MEMORY_SQL = """
 INSERT INTO agent_memory (
     memory_id, agent_id, user_id, session_id,
     content, fact, main_content, memory_type, embedding, importance, metadata,
+    lineage_id, revision, status, valid_from, valid_to,
+    superseded_by_memory_id, superseded_at,
     created_at, last_accessed_at, access_count
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-ON CONFLICT (agent_id, COALESCE(user_id, ''), md5(fact)) DO UPDATE
-    SET metadata =
-        (agent_memory.metadata || jsonb_build_object('status', 'active'))
-        - 'superseded_by'
-        - 'superseded_at',
-        last_accessed_at = NOW()
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+    $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+)
+ON CONFLICT (agent_id, COALESCE(user_id, ''), md5(fact))
+    WHERE status = 'active'
+DO UPDATE
+    SET metadata = agent_memory.metadata || jsonb_build_object('status', 'active'),
+        last_accessed_at = NOW(),
+        access_count = agent_memory.access_count + 1
 RETURNING memory_id,
     (xmax = 0) AS was_inserted
 """
 
-# Mark older active memories with the same conflict key superseded.
+# Mark older active memories in a lineage/conflict slot superseded.
 _SUPERSEDE_CONFLICTS_SQL = """
 UPDATE agent_memory
-SET metadata =
+SET status = 'superseded',
+    valid_to = NOW(),
+    superseded_by_memory_id = $4,
+    superseded_at = NOW(),
+    metadata =
     metadata
     || jsonb_build_object(
         'status', 'superseded',
         'superseded_by', $4::text,
-        'superseded_at', NOW()::text
+        'superseded_at', NOW()::text,
+        'lineage_id', $5::text,
+        'revision', revision
     )
 WHERE agent_id = $1
-    AND ($2::text IS NULL OR user_id = $2)
+    AND COALESCE(user_id, '') = COALESCE($2::text, '')
     AND memory_id <> $4
-    AND metadata->>'conflict_key' = $3
-    AND COALESCE(metadata->>'status', 'active') <> 'superseded'
+    AND (
+        lineage_id = $5
+        OR ($3::text IS NOT NULL AND metadata->>'conflict_key' = $3)
+    )
+    AND status <> 'superseded'
+RETURNING memory_id
+"""
+
+_SUPERSEDE_LINEAGE_SQL = """
+UPDATE agent_memory
+SET status = 'superseded',
+    valid_to = NOW(),
+    superseded_by_memory_id = $2,
+    superseded_at = NOW(),
+    metadata =
+    metadata
+    || jsonb_build_object(
+        'status', 'superseded',
+        'superseded_by', $2::text,
+        'superseded_at', NOW()::text,
+        'lineage_id', $1::text,
+        'revision', revision
+    )
+WHERE lineage_id = $1
+    AND memory_id <> $2
+    AND status <> 'superseded'
+RETURNING memory_id
+"""
+
+_INSERT_SUPERSEDES_RELATION_SQL = """
+INSERT INTO memory_relations (
+    source_memory_id, target_memory_id, relation_type, weight, metadata
+)
+VALUES (
+    $1, $2, 'supersedes', 1.0, $3::jsonb
+)
+ON CONFLICT (source_memory_id, target_memory_id, relation_type) DO NOTHING
 """
 
 # Nearest active memory by cosine distance, scoped to match the unique index.
@@ -86,6 +149,7 @@ SELECT memory_id, 1 - (embedding <=> $1::vector) AS score
 FROM agent_memory
 WHERE agent_id = $2
     AND COALESCE(user_id, '') = COALESCE($3::text, '')
+    AND status <> 'superseded'
     AND COALESCE(metadata->>'status', 'active') <> 'superseded'
     AND embedding IS NOT NULL
 ORDER BY embedding <=> $1::vector
@@ -98,20 +162,55 @@ LIMIT 1
 # different facts cannot both pass the guard and both insert a twin.
 _SCOPE_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext($1))"
 
-_SELECT_MEMORY_BY_ID_SQL = """
+_SELECT_MEMORY_BY_ID_SQL = (
+    """
 SELECT
-    memory_id, agent_id, user_id, session_id,
-    content, fact, main_content, memory_type, embedding,
-    importance, access_count,
-    created_at, last_accessed_at, metadata
+"""
+    + _MEMORY_SELECT_COLUMNS
+    + """
 FROM agent_memory
 WHERE memory_id = $1
 """
+)
 
 
 def _scope_lock_key(agent_id: str, user_id: str | None) -> str:
     """Advisory-lock key for an (agent, user) write scope."""
     return f"{agent_id}\x1f{user_id or ''}"
+
+
+def _metadata_conflict_key(metadata: dict[str, Any]) -> str | None:
+    value = metadata.get("conflict_key")
+    if value is None:
+        return None
+    key = str(value).strip()
+    return key or None
+
+
+def _lineage_id_for(
+    agent_id: str,
+    user_id: str | None,
+    conflict_key: str | None,
+    fallback_memory_id: str,
+) -> str:
+    if not conflict_key:
+        return fallback_memory_id
+    digest = hashlib.md5(
+        f"{agent_id}\x1f{user_id or ''}\x1f{conflict_key}".encode()
+    ).hexdigest()
+    return f"lin_{digest}"
+
+
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    if row is None:
+        return default
+    get = getattr(row, "get", None)
+    if get is not None:
+        return get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -188,6 +287,224 @@ class MemoryStore:
             user_id,
         )
 
+    async def _ensure_lineage_row(
+        self,
+        conn: Any,
+        *,
+        lineage_id: str,
+        memory: Memory,
+        conflict_key: str | None,
+        current_memory_id: str | None = None,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO memory_lineages (
+                lineage_id, agent_id, user_id, conflict_key,
+                current_memory_id, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            ON CONFLICT (lineage_id) DO UPDATE
+            SET current_memory_id = COALESCE(
+                    EXCLUDED.current_memory_id,
+                    memory_lineages.current_memory_id
+                ),
+                updated_at = NOW()
+            """,
+            lineage_id,
+            memory.agent_id,
+            memory.user_id,
+            conflict_key,
+            current_memory_id,
+            json_dumps({"source": "engram"}),
+        )
+
+    async def _next_lineage_revision(
+        self,
+        conn: Any,
+        *,
+        memory: Memory,
+        lineage_id: str,
+        conflict_key: str | None,
+        lock_existing: bool,
+    ) -> int:
+        if lock_existing:
+            await self._ensure_lineage_row(
+                conn,
+                lineage_id=lineage_id,
+                memory=memory,
+                conflict_key=conflict_key,
+            )
+            lineage_row = await conn.fetchrow(
+                """
+                SELECT current_memory_id
+                FROM memory_lineages
+                WHERE lineage_id = $1
+                FOR UPDATE
+                """,
+                lineage_id,
+            )
+            current_id = _row_get(lineage_row, "current_memory_id")
+            if current_id:
+                current = await conn.fetchrow(
+                    "SELECT revision FROM agent_memory WHERE memory_id = $1",
+                    current_id,
+                )
+                revision = _row_get(current, "revision")
+                if revision is not None:
+                    return int(revision) + 1
+
+            newest = await conn.fetchrow(
+                """
+                SELECT revision
+                FROM agent_memory
+                WHERE lineage_id = $1
+                ORDER BY revision DESC, created_at DESC
+                LIMIT 1
+                """,
+                lineage_id,
+            )
+            revision = _row_get(newest, "revision")
+            if revision is not None:
+                return int(revision) + 1
+        return 1
+
+    async def _insert_supersedes_edges(
+        self,
+        conn: Any,
+        *,
+        winner_memory_id: str,
+        superseded_ids: list[str],
+        lineage_id: str,
+    ) -> None:
+        for old_id in superseded_ids:
+            await conn.execute(
+                _INSERT_SUPERSEDES_RELATION_SQL,
+                winner_memory_id,
+                old_id,
+                json_dumps({"lineage_id": lineage_id}),
+            )
+
+    async def _supersede_lineage_members(
+        self,
+        conn: Any,
+        *,
+        memory: Memory,
+        conflict_key: str | None,
+        winner_memory_id: str,
+        lineage_id: str,
+    ) -> list[str]:
+        if conflict_key:
+            rows = await conn.fetch(
+                _SUPERSEDE_CONFLICTS_SQL,
+                memory.agent_id,
+                memory.user_id,
+                conflict_key,
+                winner_memory_id,
+                lineage_id,
+            )
+        else:
+            rows = await conn.fetch(
+                _SUPERSEDE_LINEAGE_SQL,
+                lineage_id,
+                winner_memory_id,
+            )
+        return [str(row["memory_id"]) for row in rows]
+
+    async def _insert_memory_with_lineage(
+        self,
+        conn: Any,
+        memory: Memory,
+        *,
+        force_lineage_id: str | None = None,
+    ) -> tuple[str, bool]:
+        conflict_key = _metadata_conflict_key(memory.metadata)
+        lineage_id = force_lineage_id or str(
+            memory.metadata.get("lineage_id")
+            or _lineage_id_for(
+                memory.agent_id, memory.user_id, conflict_key, memory.memory_id
+            )
+        )
+        lock_existing = conflict_key is not None or force_lineage_id is not None
+        revision = await self._next_lineage_revision(
+            conn,
+            memory=memory,
+            lineage_id=lineage_id,
+            conflict_key=conflict_key,
+            lock_existing=lock_existing,
+        )
+
+        memory.lineage_id = lineage_id
+        memory.revision = revision
+        memory.status = "active"
+        memory.valid_from = memory.created_at
+        memory.valid_to = None
+        memory.superseded_by_memory_id = None
+        memory.superseded_at = None
+        memory.metadata = {
+            **memory.metadata,
+            "status": "active",
+            "lineage_id": lineage_id,
+            "revision": revision,
+        }
+
+        row = await conn.fetchrow(
+            _INSERT_MEMORY_SQL,
+            memory.memory_id,
+            memory.agent_id,
+            memory.user_id,
+            memory.session_id,
+            memory.content,
+            memory.fact,
+            memory.main_content,
+            memory.memory_type,
+            json.dumps(memory.embedding),
+            memory.importance,
+            json_dumps(memory.metadata),
+            memory.lineage_id,
+            memory.revision,
+            memory.status,
+            memory.valid_from,
+            memory.valid_to,
+            memory.superseded_by_memory_id,
+            memory.superseded_at,
+            memory.created_at,
+            memory.last_accessed_at,
+            memory.access_count,
+        )
+        if row is None:
+            raise StorageError("Memory insert returned no row")
+
+        resolved_id = str(row["memory_id"])
+        was_inserted = bool(row["was_inserted"])
+        if not was_inserted:
+            return resolved_id, False
+
+        superseded_ids = (
+            await self._supersede_lineage_members(
+                conn,
+                memory=memory,
+                conflict_key=conflict_key,
+                winner_memory_id=resolved_id,
+                lineage_id=lineage_id,
+            )
+            if lock_existing
+            else []
+        )
+        await self._insert_supersedes_edges(
+            conn,
+            winner_memory_id=resolved_id,
+            superseded_ids=superseded_ids,
+            lineage_id=lineage_id,
+        )
+        await self._ensure_lineage_row(
+            conn,
+            lineage_id=lineage_id,
+            memory=memory,
+            conflict_key=conflict_key,
+            current_memory_id=resolved_id,
+        )
+        return resolved_id, True
+
     async def _find_near_duplicate(
         self,
         conn: Any,
@@ -221,10 +538,38 @@ class MemoryStore:
         )
         if row is None:
             return None
-        score = row.get("score")
+        score = _row_get(row, "score")
         if score is not None and score >= threshold:
             return str(row["memory_id"])
         return None
+
+    async def _find_superseded_exact_lineage(
+        self,
+        conn: Any,
+        memory: Memory,
+    ) -> str | None:
+        """Return a historical exact fact's lineage for reassertion."""
+        row = await conn.fetchrow(
+            """
+            SELECT lineage_id
+            FROM agent_memory
+            WHERE agent_id = $1
+                AND COALESCE(user_id, '') = COALESCE($2::text, '')
+                AND fact = $3
+                AND lineage_id IS NOT NULL
+                AND (
+                    status = 'superseded'
+                    OR COALESCE(metadata->>'status', 'active') = 'superseded'
+                )
+            ORDER BY revision DESC, created_at DESC
+            LIMIT 1
+            """,
+            memory.agent_id,
+            memory.user_id,
+            memory.fact,
+        )
+        lineage_id = _row_get(row, "lineage_id")
+        return str(lineage_id) if lineage_id else None
 
     async def add(self, create: MemoryCreate) -> Memory:
         """Add a new memory.
@@ -261,7 +606,7 @@ class MemoryStore:
             memory_type=create.memory_type,
             embedding=embedding,
             importance=0.5,  # Default importance, use reinforce() to boost
-            metadata=create.metadata,
+            metadata=dict(create.metadata),
         )
 
         try:
@@ -270,7 +615,7 @@ class MemoryStore:
             if create.user_id:
                 await self._ensure_user_exists(create.user_id)
 
-            conflict_key = memory.metadata.get("conflict_key")
+            conflict_key = _metadata_conflict_key(memory.metadata)
 
             # Near-dup guard, insert, and conflict-supersede all run in one
             # transaction. The per-scope advisory lock serializes the guard
@@ -278,15 +623,19 @@ class MemoryStore:
             # crash can't leave two active memories in one conflict slot and two
             # concurrent adds of near-identical facts can't both insert a twin.
             async with self._storage.transaction() as conn:
+                await conn.execute(
+                    _SCOPE_LOCK_SQL,
+                    _scope_lock_key(create.agent_id, create.user_id),
+                )
                 # Near-duplicate guard: if a vector-near-identical memory
                 # already exists (e.g. same fact with different
                 # punctuation/wording), resolve to it instead of inserting a
                 # twin. near_duplicate_threshold=1.0 disables this.
-                if threshold < 1.0:
-                    await conn.execute(
-                        _SCOPE_LOCK_SQL,
-                        _scope_lock_key(create.agent_id, create.user_id),
-                    )
+                # Conflict-keyed memories represent mutable slots; do not let
+                # vector similarity absorb corrections before they become
+                # lineage revisions. Exact active duplicates still dedupe via
+                # the database unique index.
+                if threshold < 1.0 and conflict_key is None:
                     dup_id = await self._find_near_duplicate(
                         conn, create.agent_id, create.user_id, embedding, threshold
                     )
@@ -296,53 +645,29 @@ class MemoryStore:
                             "skipping insert"
                         )
                         # The resolved memory still wins its conflict slot.
-                        if conflict_key:
-                            await conn.execute(
-                                _SUPERSEDE_CONFLICTS_SQL,
-                                create.agent_id,
-                                create.user_id,
-                                str(conflict_key),
-                                dup_id,
-                            )
                         existing_row = await conn.fetchrow(
                             _SELECT_MEMORY_BY_ID_SQL, dup_id
                         )
                         if existing_row is not None:
                             return self._row_to_memory(existing_row)
 
-                row = await conn.fetchrow(
-                    _INSERT_MEMORY_SQL,
-                    memory.memory_id,
-                    memory.agent_id,
-                    memory.user_id,
-                    memory.session_id,
-                    fact_text,  # content (backward compat)
-                    fact_text,  # fact (new)
-                    create.main_content,  # main_content (new)
-                    memory.memory_type,  # memory_type (new)
-                    json.dumps(memory.embedding),  # Store as JSON for vector type
-                    memory.importance,
-                    json_dumps(memory.metadata),
-                    memory.created_at,
-                    memory.last_accessed_at,
-                    memory.access_count,
-                )
-                if row and conflict_key:
-                    await conn.execute(
-                        _SUPERSEDE_CONFLICTS_SQL,
-                        memory.agent_id,
-                        memory.user_id,
-                        str(conflict_key),
-                        row["memory_id"],
+                force_lineage_id = None
+                if conflict_key is None:
+                    force_lineage_id = await self._find_superseded_exact_lineage(
+                        conn, memory
                     )
 
-            if row and not row["was_inserted"]:
+                resolved_id, was_inserted = await self._insert_memory_with_lineage(
+                    conn, memory, force_lineage_id=force_lineage_id
+                )
+
+            if not was_inserted:
                 # Memory with same fact already exists
                 logger.debug(
-                    f"Memory with same fact already exists, returning existing: {row['memory_id']}"
+                    f"Memory with same fact already exists, returning existing: {resolved_id}"
                 )
                 # Return the existing memory
-                existing = await self.get(row["memory_id"])
+                existing = await self.get(resolved_id)
                 if existing:
                     return existing
 
@@ -399,7 +724,7 @@ class MemoryStore:
                 memory_type=create.memory_type,
                 embedding=embedding,
                 importance=0.5,  # Default importance, use reinforce() to boost
-                metadata=create.metadata,
+                metadata=dict(create.metadata),
             )
             memories.append(memory)
 
@@ -418,38 +743,41 @@ class MemoryStore:
         try:
             results: list[Memory] = []
             async with self._storage.transaction() as conn:
-                if threshold < 1.0:
-                    # Lock distinct scopes in a stable order so two batches that
-                    # share scopes can't deadlock on each other.
-                    scope_keys = sorted(
-                        {_scope_lock_key(m.agent_id, m.user_id) for m in memories}
-                    )
-                    for key in scope_keys:
-                        await conn.execute(_SCOPE_LOCK_SQL, key)
+                # Lock distinct scopes in a stable order so two batches that
+                # share scopes can't deadlock on each other.
+                scope_keys = sorted(
+                    {_scope_lock_key(m.agent_id, m.user_id) for m in memories}
+                )
+                for key in scope_keys:
+                    await conn.execute(_SCOPE_LOCK_SQL, key)
 
                 plan: list[Memory | str] = []  # Memory -> insert, str -> existing
                 if threshold < 1.0:
                     inserting: list[Memory] = []
                     for m in memories:
                         assert m.embedding is not None
-                        dup_id = await self._find_near_duplicate(
-                            conn, m.agent_id, m.user_id, m.embedding, threshold
-                        )
-                        if dup_id is not None:
-                            logger.debug(f"Batch near-duplicate of {dup_id}; resolving")
-                            plan.append(dup_id)
-                            continue
-                        in_batch_dup = any(
-                            k.embedding is not None
-                            and k.agent_id == m.agent_id
-                            and (k.user_id or "") == (m.user_id or "")
-                            and _cosine_similarity(m.embedding, k.embedding)
-                            >= threshold
-                            for k in inserting
-                        )
-                        if in_batch_dup:
-                            logger.debug("In-batch near-duplicate; skipping")
-                            continue
+                        if _metadata_conflict_key(m.metadata) is None:
+                            dup_id = await self._find_near_duplicate(
+                                conn, m.agent_id, m.user_id, m.embedding, threshold
+                            )
+                            if dup_id is not None:
+                                logger.debug(
+                                    f"Batch near-duplicate of {dup_id}; resolving"
+                                )
+                                plan.append(dup_id)
+                                continue
+                            in_batch_dup = any(
+                                k.embedding is not None
+                                and k.agent_id == m.agent_id
+                                and (k.user_id or "") == (m.user_id or "")
+                                and _metadata_conflict_key(k.metadata) is None
+                                and _cosine_similarity(m.embedding, k.embedding)
+                                >= threshold
+                                for k in inserting
+                            )
+                            if in_batch_dup:
+                                logger.debug("In-batch near-duplicate; skipping")
+                                continue
                         inserting.append(m)
                         plan.append(m)
                 else:
@@ -469,34 +797,15 @@ class MemoryStore:
                             results.append(self._row_to_memory(existing_row))
                         continue
                     m = item
-                    row = await conn.fetchrow(
-                        _INSERT_MEMORY_SQL,
-                        m.memory_id,
-                        m.agent_id,
-                        m.user_id,
-                        m.session_id,
-                        m.content,
-                        m.fact,
-                        m.main_content,
-                        m.memory_type,
-                        json.dumps(m.embedding),
-                        m.importance,
-                        json_dumps(m.metadata),
-                        m.created_at,
-                        m.last_accessed_at,
-                        m.access_count,
-                    )
-                    resolved_id = row["memory_id"]
-                    conflict_key = m.metadata.get("conflict_key")
-                    if conflict_key:
-                        await conn.execute(
-                            _SUPERSEDE_CONFLICTS_SQL,
-                            m.agent_id,
-                            m.user_id,
-                            str(conflict_key),
-                            resolved_id,
+                    force_lineage_id = None
+                    if _metadata_conflict_key(m.metadata) is None:
+                        force_lineage_id = await self._find_superseded_exact_lineage(
+                            conn, m
                         )
-                    if row["was_inserted"]:
+                    resolved_id, was_inserted = await self._insert_memory_with_lineage(
+                        conn, m, force_lineage_id=force_lineage_id
+                    )
+                    if was_inserted:
                         results.append(m)
                     else:
                         existing_row = await conn.fetchrow(
@@ -532,14 +841,12 @@ class MemoryStore:
             return await self.get_without_access_update(memory_id)
 
         row = await self._storage.fetchone(
-            """
+            f"""
             UPDATE agent_memory
             SET last_accessed_at = NOW(), access_count = access_count + 1
             WHERE memory_id = $1
             RETURNING
-                memory_id, agent_id, user_id, session_id,
-                content, fact, main_content, memory_type, embedding, importance, access_count,
-                created_at, last_accessed_at, metadata
+                {_MEMORY_SELECT_COLUMNS}
             """,
             memory_id,
         )
@@ -562,11 +869,9 @@ class MemoryStore:
             MemoryNotFoundError: If memory doesn't exist.
         """
         row = await self._storage.fetchone(
-            """
+            f"""
             SELECT
-                memory_id, agent_id, user_id, session_id,
-                content, fact, main_content, memory_type, embedding, importance, access_count,
-                created_at, last_accessed_at, metadata
+                {_MEMORY_SELECT_COLUMNS}
             FROM agent_memory
             WHERE memory_id = $1
             """,
@@ -577,6 +882,150 @@ class MemoryStore:
             raise MemoryNotFoundError(memory_id)
 
         return self._row_to_memory(row)
+
+    async def get_current(self, memory_id: MemoryId) -> Memory:
+        """Return the active head for a memory's lineage."""
+        seed = await self.get_without_access_update(memory_id)
+        lineage_id = seed.lineage_id
+        if lineage_id is None:
+            return seed
+
+        row = await self._storage.fetchone(
+            f"""
+            SELECT
+                {_MEMORY_SELECT_COLUMNS}
+            FROM agent_memory
+            WHERE lineage_id = $1
+                AND status = 'active'
+                AND COALESCE(metadata->>'status', 'active') <> 'superseded'
+            ORDER BY revision DESC, created_at DESC
+            LIMIT 1
+            """,
+            lineage_id,
+        )
+        if row is None:
+            return seed
+        return self._row_to_memory(row)
+
+    async def get_lineage(self, memory_id: MemoryId) -> MemoryLineage:
+        """Return all revisions for a memory, newest first."""
+        seed = await self.get_without_access_update(memory_id)
+        lineage_id = seed.lineage_id or seed.memory_id
+        rows = await self._storage.fetchall(
+            f"""
+            SELECT
+                {_MEMORY_SELECT_COLUMNS}
+            FROM agent_memory
+            WHERE lineage_id = $1 OR memory_id = $2
+            ORDER BY revision DESC, created_at DESC
+            """,
+            lineage_id,
+            seed.memory_id,
+        )
+        memories = [self._row_to_memory(row) for row in rows]
+        current_memory_id = next(
+            (memory.memory_id for memory in memories if memory.status == "active"),
+            None,
+        )
+        return MemoryLineage(
+            lineage_id=lineage_id,
+            current_memory_id=current_memory_id,
+            memories=memories,
+        )
+
+    async def explain_memory(self, memory_id: MemoryId) -> MemoryExplanation:
+        """Return the lineage and direct supersede edges for a memory."""
+        memory = await self.get_without_access_update(memory_id)
+        current = await self.get_current(memory_id)
+        lineage = await self.get_lineage(memory_id)
+        supersedes_rows = await self._storage.fetchall(
+            f"""
+            SELECT
+                {_MEMORY_SELECT_COLUMNS_M}
+            FROM memory_relations r
+            JOIN agent_memory m ON m.memory_id = r.target_memory_id
+            WHERE r.source_memory_id = $1
+                AND r.relation_type = 'supersedes'
+            ORDER BY m.revision DESC, m.created_at DESC
+            """,
+            memory_id,
+        )
+        superseded_by = None
+        if memory.superseded_by_memory_id:
+            try:
+                superseded_by = await self.get_without_access_update(
+                    memory.superseded_by_memory_id
+                )
+            except MemoryNotFoundError:
+                superseded_by = None
+        return MemoryExplanation(
+            memory=memory,
+            current=current,
+            lineage=lineage,
+            supersedes=[self._row_to_memory(row) for row in supersedes_rows],
+            superseded_by=superseded_by,
+        )
+
+    async def revise(
+        self,
+        memory_id: MemoryId,
+        update: MemoryUpdate,
+        *,
+        reason: str | None = None,
+    ) -> Memory:
+        """Create a new active revision and supersede the previous head."""
+        current = await self.get_current(memory_id)
+        new_content = update.content if update.content else current.content
+        new_importance = (
+            update.importance if update.importance is not None else current.importance
+        )
+        new_metadata = {**current.metadata, **(update.metadata or {})}
+        lineage_id = current.lineage_id or current.memory_id
+        new_metadata["lineage_id"] = lineage_id
+        new_metadata["previous_memory_id"] = current.memory_id
+        new_metadata["status"] = "active"
+        if reason:
+            new_metadata["revision_reason"] = reason
+
+        new_embedding = current.embedding
+        if new_content != current.content or new_embedding is None:
+            new_embedding = await self._embedding.embed(new_content)
+
+        memory = Memory(
+            agent_id=current.agent_id,
+            user_id=current.user_id,
+            session_id=current.session_id,
+            content=new_content,
+            fact=new_content,
+            main_content=current.main_content,
+            memory_type=str(new_metadata.get("memory_type") or current.memory_type),
+            embedding=new_embedding,
+            importance=new_importance,
+            metadata=new_metadata,
+        )
+
+        try:
+            async with self._storage.transaction() as conn:
+                await conn.execute(
+                    _SCOPE_LOCK_SQL,
+                    _scope_lock_key(current.agent_id, current.user_id),
+                )
+                resolved_id, was_inserted = await self._insert_memory_with_lineage(
+                    conn,
+                    memory,
+                    force_lineage_id=lineage_id,
+                )
+
+            if not was_inserted:
+                return await self.get(resolved_id)
+            return memory
+        except asyncpg.UniqueViolationError as e:
+            raise DuplicateMemoryError(
+                "Revised content collides with an existing active memory",
+                memory_id=memory_id,
+            ) from e
+        except Exception as e:
+            raise StorageError(f"Failed to revise memory: {e}") from e
 
     async def list_memories(
         self,
@@ -605,17 +1054,16 @@ class MemoryStore:
             Matching memories, oldest first.
         """
         rows = await self._storage.fetchall(
-            """
+            f"""
             SELECT
-                memory_id, agent_id, user_id, session_id,
-                content, fact, main_content, memory_type, embedding, importance, access_count,
-                created_at, last_accessed_at, metadata
+                {_MEMORY_SELECT_COLUMNS}
             FROM agent_memory
             WHERE agent_id = $1
                 AND ($2::text IS NULL OR user_id = $2)
                 AND ($3::jsonb IS NULL OR metadata @> $3::jsonb)
                 AND ($4::text[] IS NULL OR memory_type = ANY($4))
                 AND ($6::text IS NULL OR session_id = $6)
+                AND status <> 'superseded'
                 AND COALESCE(metadata->>'status', 'active') <> 'superseded'
             ORDER BY created_at
             LIMIT $5
@@ -682,7 +1130,7 @@ class MemoryStore:
         try:
             # Update both content and fact to stay in sync
             row = await self._storage.fetchone(
-                """
+                f"""
                 UPDATE agent_memory
                 SET
                     content = $2,
@@ -694,9 +1142,7 @@ class MemoryStore:
                     last_accessed_at = NOW()
                 WHERE memory_id = $1
                 RETURNING
-                    memory_id, agent_id, user_id, session_id,
-                    content, fact, main_content, memory_type, embedding, importance, access_count,
-                    created_at, last_accessed_at, metadata
+                    {_MEMORY_SELECT_COLUMNS}
                 """,
                 memory_id,
                 new_content,
@@ -734,16 +1180,27 @@ class MemoryStore:
     ) -> int:
         """Mark older active memories with the same conflict key superseded."""
         try:
-            result = await self._storage.execute(
-                _SUPERSEDE_CONFLICTS_SQL,
-                agent_id,
-                user_id,
-                conflict_key,
-                winner_memory_id,
+            lineage_id = _lineage_id_for(
+                str(agent_id), user_id, conflict_key, winner_memory_id
             )
-            if isinstance(result, str) and result.startswith("UPDATE "):
-                return int(result.split()[-1])
-            return 0
+            async with self._storage.transaction() as conn:
+                await conn.execute(_SCOPE_LOCK_SQL, _scope_lock_key(agent_id, user_id))
+                rows = await conn.fetch(
+                    _SUPERSEDE_CONFLICTS_SQL,
+                    agent_id,
+                    user_id,
+                    conflict_key,
+                    winner_memory_id,
+                    lineage_id,
+                )
+                superseded_ids = [str(row["memory_id"]) for row in rows]
+                await self._insert_supersedes_edges(
+                    conn,
+                    winner_memory_id=winner_memory_id,
+                    superseded_ids=superseded_ids,
+                    lineage_id=lineage_id,
+                )
+                return len(superseded_ids)
         except Exception as e:
             raise StorageError(f"Failed to supersede conflicts: {e}") from e
 
@@ -764,11 +1221,9 @@ class MemoryStore:
         """
         try:
             rows = await self._storage.fetchall(
-                """
+                f"""
                 SELECT
-                    memory_id, agent_id, user_id, session_id,
-                    content, fact, main_content, memory_type, embedding, importance, access_count,
-                    created_at, last_accessed_at, metadata
+                    {_MEMORY_SELECT_COLUMNS}
                 FROM agent_memory
                 WHERE agent_id = $1
                     AND ($2::text IS NULL OR user_id = $2)
@@ -776,6 +1231,10 @@ class MemoryStore:
                     AND (
                         $4::boolean = false
                         OR COALESCE((metadata->>'critical')::boolean, false) = true
+                    )
+                    AND (
+                        $6::boolean = true
+                        OR status <> 'superseded'
                     )
                     AND (
                         $6::boolean = true
@@ -834,7 +1293,7 @@ class MemoryStore:
             )
 
         row = await self._storage.fetchone(
-            """
+            f"""
             UPDATE agent_memory
             SET
                 importance = GREATEST(0.0, LEAST(importance + $2, 1.0)),
@@ -842,9 +1301,7 @@ class MemoryStore:
                 access_count = access_count + 1
             WHERE memory_id = $1
             RETURNING
-                memory_id, agent_id, user_id, session_id,
-                content, fact, main_content, memory_type, embedding, importance, access_count,
-                created_at, last_accessed_at, metadata
+                {_MEMORY_SELECT_COLUMNS}
             """,
             memory_id,
             importance_boost,
@@ -930,13 +1387,12 @@ class MemoryStore:
         """
         if user_id:
             rows = await self._storage.fetchall(
-                """
+                f"""
                 SELECT
-                    memory_id, agent_id, user_id, session_id,
-                    content, fact, main_content, memory_type, embedding, importance, access_count,
-                    created_at, last_accessed_at, metadata
+                    {_MEMORY_SELECT_COLUMNS}
                 FROM agent_memory
                 WHERE agent_id = $1 AND user_id = $2
+                    AND status <> 'superseded'
                     AND COALESCE(metadata->>'status', 'active') <> 'superseded'
                 ORDER BY created_at DESC
                 LIMIT $3
@@ -947,13 +1403,12 @@ class MemoryStore:
             )
         else:
             rows = await self._storage.fetchall(
-                """
+                f"""
                 SELECT
-                    memory_id, agent_id, user_id, session_id,
-                    content, fact, main_content, memory_type, embedding, importance, access_count,
-                    created_at, last_accessed_at, metadata
+                    {_MEMORY_SELECT_COLUMNS}
                 FROM agent_memory
                 WHERE agent_id = $1
+                    AND status <> 'superseded'
                     AND COALESCE(metadata->>'status', 'active') <> 'superseded'
                 ORDER BY created_at DESC
                 LIMIT $2
@@ -963,6 +1418,103 @@ class MemoryStore:
             )
 
         return [self._row_to_memory(row) for row in rows]
+
+    async def get_history(
+        self,
+        agent_id: AgentId,
+        user_id: UserId | None = None,
+        *,
+        limit: int = 50,
+        include_superseded: bool = True,
+        memory_types: list[MemoryType] | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[MemoryHistoryEvent]:
+        """Return a user-facing memory timeline for an agent/user.
+
+        The timeline includes:
+        - ``added`` for first revisions
+        - ``revised`` for later active/current revisions
+        - ``superseded`` for historical facts replaced by a newer revision
+        """
+        if limit <= 0:
+            return []
+
+        try:
+            rows = await self._storage.fetchall(
+                f"""
+                WITH scoped AS (
+                    SELECT
+                        {_MEMORY_SELECT_COLUMNS}
+                    FROM agent_memory
+                    WHERE agent_id = $1
+                        AND ($2::text IS NULL OR user_id = $2)
+                        AND ($5::text[] IS NULL OR memory_type = ANY($5))
+                ),
+                events AS (
+                    SELECT
+                        CASE
+                            WHEN s.revision > 1 OR s.metadata ? 'previous_memory_id'
+                                THEN 'revised'
+                            ELSE 'added'
+                        END AS event_type,
+                        CASE
+                            WHEN s.revision > 1 OR s.metadata ? 'previous_memory_id'
+                                THEN 1
+                            ELSE 2
+                        END AS event_rank,
+                        s.created_at AS occurred_at,
+                        s.metadata->>'previous_memory_id' AS event_previous_memory_id,
+                        s.superseded_by_memory_id AS event_superseded_by_memory_id,
+                        s.metadata->>'revision_reason' AS event_reason,
+                        l.current_memory_id AS event_current_memory_id,
+                        s.*
+                    FROM scoped s
+                    LEFT JOIN memory_lineages l
+                        ON l.lineage_id = s.lineage_id
+                    WHERE (
+                        $4::boolean = true
+                        OR (
+                            s.status <> 'superseded'
+                            AND COALESCE(s.metadata->>'status', 'active') <> 'superseded'
+                        )
+                    )
+
+                    UNION ALL
+
+                    SELECT
+                        'superseded' AS event_type,
+                        0 AS event_rank,
+                        s.superseded_at AS occurred_at,
+                        NULL::text AS event_previous_memory_id,
+                        s.superseded_by_memory_id AS event_superseded_by_memory_id,
+                        s.metadata->>'revision_reason' AS event_reason,
+                        l.current_memory_id AS event_current_memory_id,
+                        s.*
+                    FROM scoped s
+                    LEFT JOIN memory_lineages l
+                        ON l.lineage_id = s.lineage_id
+                    WHERE $4::boolean = true
+                        AND s.superseded_at IS NOT NULL
+                )
+                SELECT *
+                FROM events
+                WHERE ($6::timestamptz IS NULL OR occurred_at >= $6)
+                    AND ($7::timestamptz IS NULL OR occurred_at <= $7)
+                ORDER BY occurred_at DESC, event_rank ASC, revision DESC, memory_id DESC
+                LIMIT $3
+                """,
+                agent_id,
+                user_id,
+                limit,
+                include_superseded,
+                list(memory_types) if memory_types else None,
+                since,
+                until,
+            )
+            return [self._row_to_history_event(row) for row in rows]
+        except Exception as e:
+            raise QueryError(f"Memory history listing failed: {e}") from e
 
     async def search(self, query: SearchQuery) -> list[SearchResult]:
         """Search memories using specified search mode.
@@ -1046,31 +1598,38 @@ class MemoryStore:
             results: list[SearchResult] = []
             for row in rows:
                 # Handle both fact column (new) and content column (backward compat)
-                fact_text = row.get("fact") or row["content"]
+                fact_text = _row_get(row, "fact") or row["content"]
                 memory = Memory(
                     memory_id=row["memory_id"],
                     agent_id=query.agent_id,
-                    user_id=row.get("user_id"),
-                    session_id=row.get("session_id"),
+                    user_id=_row_get(row, "user_id"),
+                    session_id=_row_get(row, "session_id"),
                     content=fact_text,  # Backward compat
                     fact=fact_text,
-                    main_content=row.get("main_content"),
-                    memory_type=row.get("memory_type", "semantic"),
+                    main_content=_row_get(row, "main_content"),
+                    memory_type=_row_get(row, "memory_type", "semantic"),
                     importance=row["importance"],
-                    access_count=row.get("access_count", 0),
+                    access_count=_row_get(row, "access_count", 0),
                     metadata=json.loads(row["metadata"])
                     if isinstance(row["metadata"], str)
                     else row["metadata"],
                     created_at=row["created_at"],
                     last_accessed_at=row["last_accessed_at"],
+                    lineage_id=_row_get(row, "lineage_id"),
+                    revision=int(_row_get(row, "revision", 1)),
+                    status=str(_row_get(row, "status", "active")),
+                    valid_from=_row_get(row, "valid_from"),
+                    valid_to=_row_get(row, "valid_to"),
+                    superseded_by_memory_id=_row_get(row, "superseded_by_memory_id"),
+                    superseded_at=_row_get(row, "superseded_at"),
                 )
 
                 result = SearchResult(
                     memory=memory,
                     score=float(row["score"]),
-                    semantic_score=float(row.get("semantic_score", 0)),
-                    keyword_score=float(row.get("keyword_score", 0)),
-                    decay_score=float(row.get("decay_score", 0)),
+                    semantic_score=float(_row_get(row, "semantic_score", 0)),
+                    keyword_score=float(_row_get(row, "keyword_score", 0)),
+                    decay_score=float(_row_get(row, "decay_score", 0)),
                 )
 
                 if result.score >= query.min_score:
@@ -1106,6 +1665,13 @@ class MemoryStore:
                     m.metadata,
                     m.created_at,
                     m.last_accessed_at,
+                    m.lineage_id,
+                    m.revision,
+                    m.status,
+                    m.valid_from,
+                    m.valid_to,
+                    m.superseded_by_memory_id,
+                    m.superseded_at,
                     ts_rank(fact_tsv, plainto_tsquery($9::regconfig, $1)) AS keyword_rank,
                     calculate_decay(m.last_accessed_at, $5) AS decay_score
                 FROM agent_memory m
@@ -1113,6 +1679,7 @@ class MemoryStore:
                     AND ($3::TEXT IS NULL OR m.user_id = $3)
                     AND ($6::jsonb IS NULL OR m.metadata @> $6::jsonb)
                     AND ($7::text[] IS NULL OR m.memory_type = ANY($7))
+                    AND m.status <> 'superseded'
                     AND COALESCE(m.metadata->>'status', 'active') <> 'superseded'
                     AND fact_tsv @@ plainto_tsquery($9::regconfig, $1)
             )
@@ -1143,31 +1710,38 @@ class MemoryStore:
 
             results: list[SearchResult] = []
             for row in rows:
-                fact_text = row.get("fact") or row.get("content", "")
+                fact_text = _row_get(row, "fact") or _row_get(row, "content", "")
                 memory = Memory(
                     memory_id=row["memory_id"],
                     agent_id=query.agent_id,
-                    user_id=row.get("user_id"),
-                    session_id=row.get("session_id"),
+                    user_id=_row_get(row, "user_id"),
+                    session_id=_row_get(row, "session_id"),
                     content=fact_text,  # Backward compat
                     fact=fact_text,
-                    main_content=row.get("main_content"),
-                    memory_type=row.get("memory_type", "semantic"),
+                    main_content=_row_get(row, "main_content"),
+                    memory_type=_row_get(row, "memory_type", "semantic"),
                     importance=row["importance"],
-                    access_count=row.get("access_count", 0),
+                    access_count=_row_get(row, "access_count", 0),
                     metadata=json.loads(row["metadata"])
                     if isinstance(row["metadata"], str)
                     else row["metadata"],
                     created_at=row["created_at"],
                     last_accessed_at=row["last_accessed_at"],
+                    lineage_id=_row_get(row, "lineage_id"),
+                    revision=int(_row_get(row, "revision", 1)),
+                    status=str(_row_get(row, "status", "active")),
+                    valid_from=_row_get(row, "valid_from"),
+                    valid_to=_row_get(row, "valid_to"),
+                    superseded_by_memory_id=_row_get(row, "superseded_by_memory_id"),
+                    superseded_at=_row_get(row, "superseded_at"),
                 )
 
                 result = SearchResult(
                     memory=memory,
                     score=float(row["score"]),
                     semantic_score=0.0,
-                    keyword_score=float(row.get("keyword_rank", 0)),
-                    decay_score=float(row.get("decay_score", 0)),
+                    keyword_score=float(_row_get(row, "keyword_rank", 0)),
+                    decay_score=float(_row_get(row, "decay_score", 0)),
                 )
 
                 if result.score >= query.min_score:
@@ -1223,23 +1797,30 @@ class MemoryStore:
             results: list[SearchResult] = []
             for row in rows:
                 # Handle both fact column (new) and content column (backward compat)
-                fact_text = row.get("fact") or row["content"]
+                fact_text = _row_get(row, "fact") or row["content"]
                 memory = Memory(
                     memory_id=row["memory_id"],
                     agent_id=agent_id,
-                    user_id=row.get("user_id"),
-                    session_id=row.get("session_id"),
+                    user_id=_row_get(row, "user_id"),
+                    session_id=_row_get(row, "session_id"),
                     content=fact_text,  # Backward compat
                     fact=fact_text,
-                    main_content=row.get("main_content"),
-                    memory_type=row.get("memory_type", "semantic"),
+                    main_content=_row_get(row, "main_content"),
+                    memory_type=_row_get(row, "memory_type", "semantic"),
                     importance=row["importance"],
-                    access_count=row.get("access_count", 0),
+                    access_count=_row_get(row, "access_count", 0),
                     metadata=json.loads(row["metadata"])
                     if isinstance(row["metadata"], str)
                     else row["metadata"],
                     created_at=row["created_at"],
                     last_accessed_at=row["last_accessed_at"],
+                    lineage_id=_row_get(row, "lineage_id"),
+                    revision=int(_row_get(row, "revision", 1)),
+                    status=str(_row_get(row, "status", "active")),
+                    valid_from=_row_get(row, "valid_from"),
+                    valid_to=_row_get(row, "valid_to"),
+                    superseded_by_memory_id=_row_get(row, "superseded_by_memory_id"),
+                    superseded_at=_row_get(row, "superseded_at"),
                 )
 
                 results.append(
@@ -1271,8 +1852,8 @@ class MemoryStore:
 
         # Handle both old and new schema
         # Prefer fact column if available, fallback to content
-        fact_text = row.get("fact") or row["content"]
-        main_content = row.get("main_content")
+        fact_text = _row_get(row, "fact") or row["content"]
+        main_content = _row_get(row, "main_content")
 
         return Memory(
             memory_id=row["memory_id"],
@@ -1282,11 +1863,39 @@ class MemoryStore:
             content=fact_text,  # Backward compat - content = fact
             fact=fact_text,
             main_content=main_content,
-            memory_type=row.get("memory_type", "semantic"),
+            memory_type=_row_get(row, "memory_type", "semantic"),
             embedding=embedding,
             importance=row["importance"],
             access_count=row["access_count"],
             created_at=row["created_at"],
             last_accessed_at=row["last_accessed_at"],
             metadata=metadata or {},
+            lineage_id=_row_get(row, "lineage_id"),
+            revision=int(_row_get(row, "revision", 1)),
+            status=str(_row_get(row, "status", "active")),
+            valid_from=_row_get(row, "valid_from"),
+            valid_to=_row_get(row, "valid_to"),
+            superseded_by_memory_id=_row_get(row, "superseded_by_memory_id"),
+            superseded_at=_row_get(row, "superseded_at"),
+        )
+
+    def _row_to_history_event(self, row: Any) -> MemoryHistoryEvent:
+        memory = self._row_to_memory(row)
+        current_memory_id = _row_get(row, "event_current_memory_id")
+        if current_memory_id is None and memory.status == "active":
+            current_memory_id = memory.memory_id
+
+        return MemoryHistoryEvent(
+            event_type=str(row["event_type"]),  # type: ignore[arg-type]
+            occurred_at=row["occurred_at"],
+            memory=memory,
+            current_memory_id=current_memory_id,
+            previous_memory_id=_row_get(row, "event_previous_memory_id"),
+            superseded_by_memory_id=_row_get(row, "event_superseded_by_memory_id"),
+            reason=_row_get(row, "event_reason"),
+            metadata={
+                "lineage_id": memory.lineage_id,
+                "revision": memory.revision,
+                "status": memory.status,
+            },
         )

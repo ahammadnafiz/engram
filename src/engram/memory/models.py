@@ -7,7 +7,7 @@ This module defines the Pydantic models for memories and search results.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -98,6 +98,16 @@ class Memory(BaseModel):
 
     metadata: Metadata = Field(default_factory=dict)
 
+    # Version lineage. ``agent_memory`` remains the fast read model; these
+    # fields make corrections auditable without scanning JSON metadata.
+    lineage_id: str | None = None
+    revision: int = Field(default=1, ge=1)
+    status: str = "active"
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    superseded_by_memory_id: MemoryId | None = None
+    superseded_at: datetime | None = None
+
     model_config = {"frozen": False, "extra": "forbid"}
 
     def __hash__(self) -> int:
@@ -169,6 +179,52 @@ class MemoryUpdate(BaseModel):
     metadata: Metadata | None = None
 
     model_config = {"frozen": True, "extra": "forbid"}
+
+
+class MemoryLineage(BaseModel):
+    """Version history for one memory lineage.
+
+    The first-class lineage keeps the current fact fast to retrieve while
+    preserving older corrected facts for audit/debugging.
+    """
+
+    lineage_id: str
+    current_memory_id: MemoryId | None = None
+    memories: list[Memory] = Field(default_factory=list)
+
+    model_config = {"frozen": True}
+
+
+class MemoryExplanation(BaseModel):
+    """Debug view for why a memory is current or superseded."""
+
+    memory: Memory
+    current: Memory
+    lineage: MemoryLineage
+    supersedes: list[Memory] = Field(default_factory=list)
+    superseded_by: Memory | None = None
+
+    model_config = {"frozen": True}
+
+
+class MemoryHistoryEvent(BaseModel):
+    """One user-facing memory timeline event.
+
+    History events are derived from the durable memory rows and lineage state:
+    additions/revisions use the new row's ``created_at`` timestamp, while
+    supersession events use the old row's ``superseded_at`` timestamp.
+    """
+
+    event_type: Literal["added", "revised", "superseded"]
+    occurred_at: datetime
+    memory: Memory
+    current_memory_id: MemoryId | None = None
+    previous_memory_id: MemoryId | None = None
+    superseded_by_memory_id: MemoryId | None = None
+    reason: str | None = None
+    metadata: Metadata = Field(default_factory=dict)
+
+    model_config = {"frozen": True}
 
 
 class SearchResult(BaseModel):

@@ -106,7 +106,10 @@ class TestNearDuplicateGuard:
         await storage.execute(
             """
             UPDATE agent_memory
-            SET metadata = metadata || '{"status": "superseded"}'::jsonb
+            SET status = 'superseded',
+                superseded_at = NOW(),
+                valid_to = NOW(),
+                metadata = metadata || '{"status": "superseded"}'::jsonb
             WHERE memory_id = $1
             """,
             old.memory_id,
@@ -118,13 +121,11 @@ class TestNearDuplicateGuard:
         assert new.metadata.get("status") != "superseded"
 
     @pytest.mark.asyncio
-    async def test_reasserting_exact_superseded_fact_reactivates_it(
+    async def test_reasserting_exact_superseded_fact_creates_new_revision(
         self, store_env
     ) -> None:
-        """Re-asserting the *exact* text of a superseded fact must reactivate
-        the same row, not leave it hidden. The exact-text unique index makes
-        this hit ON CONFLICT (the near-dup guard ignores superseded rows), so
-        the conflict path must clear the supersede markers."""
+        """Re-asserting the *exact* text of a superseded fact must create a
+        new active row. Historical rows stay immutable in the lineage."""
         from engram.memory.models import MemoryCreate
 
         store, storage, embedding, agent_id = store_env
@@ -137,7 +138,10 @@ class TestNearDuplicateGuard:
         await storage.execute(
             """
             UPDATE agent_memory
-            SET metadata = metadata || jsonb_build_object(
+            SET status = 'superseded',
+                superseded_at = NOW(),
+                valid_to = NOW(),
+                metadata = metadata || jsonb_build_object(
                 'status', 'superseded',
                 'superseded_by', 'some-other-id',
                 'superseded_at', NOW()::text
@@ -149,11 +153,14 @@ class TestNearDuplicateGuard:
 
         revived = await store.add(MemoryCreate(content=text, agent_id=agent_id))
 
-        # Same row (exact-text conflict), but active again with markers cleared.
-        assert revived.memory_id == original.memory_id
+        assert revived.memory_id != original.memory_id
         assert revived.metadata.get("status") == "active"
-        assert "superseded_by" not in revived.metadata
-        assert "superseded_at" not in revived.metadata
+        assert revived.status == "active"
+        assert revived.lineage_id == original.lineage_id
+        assert revived.revision == original.revision + 1
+
+        old = await store.get_without_access_update(original.memory_id)
+        assert old.status == "superseded"
 
     @pytest.mark.asyncio
     async def test_concurrent_near_duplicate_adds_collapse_to_one(
@@ -325,6 +332,95 @@ class TestUpdateEdgeCases:
 
         assert updated.importance == 0.9
         assert updated.embedding is None
+
+    @pytest.mark.asyncio
+    async def test_revise_creates_new_head_and_hides_old_from_active_reads(
+        self, store_env
+    ) -> None:
+        from engram.memory.models import MemoryCreate, MemoryUpdate, SearchQuery
+
+        store, _storage, _embedding, agent_id = store_env
+
+        old = await store.add(
+            MemoryCreate(
+                content="User lives in Dhaka",
+                agent_id=agent_id,
+                metadata={"conflict_key": f"{agent_id}:*:profile:city"},
+            )
+        )
+
+        new = await store.revise(
+            old.memory_id,
+            MemoryUpdate(content="User lives in Singapore"),
+            reason="correction",
+        )
+
+        assert new.memory_id != old.memory_id
+        assert new.lineage_id == old.lineage_id
+        assert new.revision == old.revision + 1
+
+        current = await store.get_current(old.memory_id)
+        assert current.memory_id == new.memory_id
+
+        lineage = await store.get_lineage(old.memory_id)
+        assert [m.memory_id for m in lineage.memories] == [
+            new.memory_id,
+            old.memory_id,
+        ]
+
+        active = await store.list_recent(agent_id, limit=10)
+        assert [m.memory_id for m in active] == [new.memory_id]
+
+        search = await store.search(
+            SearchQuery(query="Dhaka", agent_id=agent_id, mode="keyword")
+        )
+        assert old.memory_id not in [result.memory.memory_id for result in search]
+
+    @pytest.mark.asyncio
+    async def test_history_timeline_includes_add_revise_and_supersede_events(
+        self, store_env
+    ) -> None:
+        from engram.memory.models import MemoryCreate, MemoryUpdate
+
+        store, _storage, _embedding, agent_id = store_env
+
+        old = await store.add(
+            MemoryCreate(
+                content="User lives in Dhaka",
+                agent_id=agent_id,
+                metadata={"conflict_key": f"{agent_id}:*:profile:city"},
+            )
+        )
+        new = await store.revise(
+            old.memory_id,
+            MemoryUpdate(content="User lives in Singapore"),
+            reason="user_correction",
+        )
+
+        history = await store.get_history(agent_id, limit=10)
+
+        assert [event.event_type for event in history[:3]] == [
+            "revised",
+            "superseded",
+            "added",
+        ]
+        revised, superseded, added = history[:3]
+        assert superseded.memory.memory_id == old.memory_id
+        assert superseded.superseded_by_memory_id == new.memory_id
+        assert revised.memory.memory_id == new.memory_id
+        assert revised.previous_memory_id == old.memory_id
+        assert revised.reason == "user_correction"
+        assert revised.current_memory_id == new.memory_id
+        assert added.memory.memory_id == old.memory_id
+
+        active_history = await store.get_history(
+            agent_id,
+            limit=10,
+            include_superseded=False,
+        )
+
+        assert [event.event_type for event in active_history] == ["revised"]
+        assert active_history[0].memory.memory_id == new.memory_id
 
 
 class TestSearchScoring:
@@ -518,7 +614,34 @@ class TestSupersedeAtomicity:
         new = await store.get_without_access_update(second.memory_id)
         assert old.metadata.get("status") == "superseded"
         assert old.metadata.get("superseded_by") == second.memory_id
+        assert old.status == "superseded"
+        assert old.superseded_by_memory_id == second.memory_id
         assert new.metadata.get("status") == "active"
+        assert new.status == "active"
+        assert new.lineage_id == old.lineage_id
+        assert new.revision == old.revision + 1
+
+        lineage = await store.get_lineage(first.memory_id)
+        assert lineage.current_memory_id == second.memory_id
+        assert [m.memory_id for m in lineage.memories] == [
+            second.memory_id,
+            first.memory_id,
+        ]
+
+        relation_exists = await _storage.fetchval(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM memory_relations
+                WHERE source_memory_id = $1
+                    AND target_memory_id = $2
+                    AND relation_type = 'supersedes'
+            )
+            """,
+            second.memory_id,
+            first.memory_id,
+        )
+        assert relation_exists
 
 
 class TestLongFactIndex:

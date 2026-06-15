@@ -29,6 +29,9 @@ from engram.llm.service import LLMService, MemoryOperationType
 from engram.memory.models import (
     Memory,
     MemoryCreate,
+    MemoryExplanation,
+    MemoryHistoryEvent,
+    MemoryLineage,
     MemoryUpdate,
     RecallTrace,
     SearchQuery,
@@ -56,6 +59,7 @@ from engram.task import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
+    from datetime import datetime
 
     from engram.core._types import (
         AgentId,
@@ -801,8 +805,8 @@ class Engram:
                 )
                 and op.target_id
             ):
-                # Replace the contradicted/updated memory in place so its
-                # graph relations (and id) survive the correction.
+                # Corrections create a new active revision while preserving the
+                # old fact in the same lineage for audit/debugging.
                 op_type, op_metadata = self._policy_metadata(
                     content=op.content,
                     agent_id=agent_id,
@@ -814,10 +818,11 @@ class Engram:
                 op_metadata["correction_operation"] = op.operation.value
                 try:
                     affected.append(
-                        await self.update(
+                        await self.revise(
                             op.target_id,
                             content=op.content,
                             metadata=op_metadata,
+                            reason=op.operation.value,
                         )
                     )
                 except DuplicateMemoryError:
@@ -923,6 +928,54 @@ class Engram:
             ),
         )
 
+    async def revise(
+        self,
+        memory_id: MemoryId,
+        *,
+        content: str | None = None,
+        importance: float | None = None,
+        metadata: Metadata | None = None,
+        reason: str | None = None,
+    ) -> Memory:
+        """Create a new active revision for an existing memory lineage.
+
+        Use this for user corrections and LLM-extracted UPDATE/DELETE
+        operations. ``update()`` remains the legacy in-place edit API.
+        """
+        self._ensure_connected()
+        assert self._memory_store is not None
+
+        return await self._memory_store.revise(
+            memory_id,
+            MemoryUpdate(
+                content=content,
+                importance=importance,
+                metadata=metadata,
+            ),
+            reason=reason,
+        )
+
+    async def get_current(self, memory_id: MemoryId) -> Memory:
+        """Return the current active head for a memory's lineage."""
+        self._ensure_connected()
+        assert self._memory_store is not None
+
+        return await self._memory_store.get_current(memory_id)
+
+    async def get_lineage(self, memory_id: MemoryId) -> MemoryLineage:
+        """Return all revisions for a memory lineage, newest first."""
+        self._ensure_connected()
+        assert self._memory_store is not None
+
+        return await self._memory_store.get_lineage(memory_id)
+
+    async def explain_memory(self, memory_id: MemoryId) -> MemoryExplanation:
+        """Return lineage and supersession details for one memory."""
+        self._ensure_connected()
+        assert self._memory_store is not None
+
+        return await self._memory_store.explain_memory(memory_id)
+
     async def reinforce(
         self,
         memory_id: MemoryId,
@@ -995,6 +1048,36 @@ class Engram:
         assert self._memory_store is not None
 
         return await self._memory_store.list_recent(agent_id, user_id, limit)
+
+    async def get_history(
+        self,
+        agent_id: AgentId,
+        *,
+        user_id: UserId | None = None,
+        limit: int = 50,
+        include_superseded: bool = True,
+        memory_types: list[MemoryType] | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[MemoryHistoryEvent]:
+        """Return a user-facing memory timeline for an agent/user.
+
+        The feed contains ``added``, ``revised``, and ``superseded`` events.
+        Normal recall/search hides superseded memories, but history keeps them
+        visible for audit, debugging, and user-facing "what changed?" views.
+        """
+        self._ensure_connected()
+        assert self._memory_store is not None
+
+        return await self._memory_store.get_history(
+            agent_id,
+            user_id,
+            limit=limit,
+            include_superseded=include_superseded,
+            memory_types=memory_types,
+            since=since,
+            until=until,
+        )
 
     # =========================================================================
     # Search Operations

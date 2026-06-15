@@ -38,6 +38,10 @@ RelationType: TypeAlias = Literal[
     "contains",
     "references",
     "mentioned_with",
+    "supersedes",
+    "revision_of",
+    "derived_from",
+    "reasserts",
 ]
 
 # ============================================================================

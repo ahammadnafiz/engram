@@ -28,6 +28,7 @@ SELECT *
 FROM (
     SELECT
         memory_id,
+        agent_id,
         user_id,
         session_id,
         memory_type,
@@ -39,6 +40,13 @@ FROM (
         created_at,
         last_accessed_at,
         access_count,
+        lineage_id,
+        revision,
+        status,
+        valid_from,
+        valid_to,
+        superseded_by_memory_id,
+        superseded_at,
         -- Semantic similarity (GREATEST ensures 0-1 range even if embeddings not perfectly normalized)
         GREATEST(0, 1 - (embedding <=> $1::vector)) AS semantic_score,
         -- Time decay
@@ -54,6 +62,7 @@ FROM (
         AND ($3::text IS NULL OR user_id = $3)
         AND ($6::jsonb IS NULL OR metadata @> $6::jsonb)
         AND ($7::text[] IS NULL OR memory_type = ANY($7))
+        AND status <> 'superseded'
         AND COALESCE(metadata->>'status', 'active') <> 'superseded'
         AND embedding IS NOT NULL
         AND GREATEST(0, 1 - (embedding <=> $1::vector)) > 0.1  -- Early filter: min 10% similarity

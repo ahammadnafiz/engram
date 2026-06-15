@@ -82,6 +82,28 @@ CREATE INDEX IF NOT EXISTS idx_task_runs_deleted ON agent_task_runs(deleted_at)
     WHERE deleted_at IS NOT NULL;
 
 -- ============================================================================
+-- Memory Lineages Table
+-- Current-head pointer and conflict-slot identity for versioned memories
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS memory_lineages (
+    lineage_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+    user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
+    conflict_key TEXT,
+    current_memory_id TEXT,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lineage_conflict_key
+    ON memory_lineages(agent_id, COALESCE(user_id, ''), conflict_key)
+    WHERE conflict_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_lineage_current
+    ON memory_lineages(current_memory_id)
+    WHERE current_memory_id IS NOT NULL;
+
+-- ============================================================================
 -- Agent Memory Table
 -- Core memory storage with vector embeddings and full-text search
 -- Two-column system: fact (embedded) + main_content (context, not embedded)
@@ -127,6 +149,16 @@ CREATE TABLE IF NOT EXISTS agent_memory (
     -- Timestamps
     created_at TIMESTAMPTZ DEFAULT NOW(),
     last_accessed_at TIMESTAMPTZ DEFAULT NOW(),
+
+    -- Version lineage / correction state
+    lineage_id TEXT,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'superseded')),
+    valid_from TIMESTAMPTZ DEFAULT NOW(),
+    valid_to TIMESTAMPTZ,
+    superseded_by_memory_id TEXT REFERENCES agent_memory(memory_id) ON DELETE SET NULL,
+    superseded_at TIMESTAMPTZ,
     
     -- Metadata
     metadata JSONB DEFAULT '{}'
@@ -157,8 +189,8 @@ CREATE INDEX IF NOT EXISTS idx_memory_last_accessed ON agent_memory(last_accesse
 -- JSONB index for metadata queries
 CREATE INDEX IF NOT EXISTS idx_memory_metadata ON agent_memory USING GIN (metadata);
 
--- Prevent duplicate facts per agent+user
--- This ensures the same fact isn't stored twice.
+-- Prevent duplicate facts per agent+user during base schema creation. Migration
+-- 006 upgrades this to an active-row partial index after lineage columns exist.
 -- md5(fact) keeps the index entry small: indexing the raw fact fails for
 -- facts larger than ~2704 bytes (btree row limit).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_memory_fact

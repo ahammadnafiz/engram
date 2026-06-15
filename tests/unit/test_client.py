@@ -473,6 +473,36 @@ class TestPolicyRecall:
         assert create.metadata["conflict_key"] == "agent:user:sales:account_owner"
 
     @pytest.mark.asyncio
+    async def test_get_history_delegates_to_store(self) -> None:
+        from datetime import datetime, timezone
+
+        eg = make_engram()
+        since = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        until = datetime(2026, 6, 16, tzinfo=timezone.utc)
+        eg._memory_store.get_history = AsyncMock(return_value=["event"])
+
+        out = await eg.get_history(
+            "agent",
+            user_id="user",
+            limit=25,
+            include_superseded=False,
+            memory_types=["project"],
+            since=since,
+            until=until,
+        )
+
+        assert out == ["event"]
+        eg._memory_store.get_history.assert_awaited_once_with(
+            "agent",
+            "user",
+            limit=25,
+            include_superseded=False,
+            memory_types=["project"],
+            since=since,
+            until=until,
+        )
+
+    @pytest.mark.asyncio
     async def test_trace_recall_shows_critical_kept_and_superseded(self) -> None:
         eg = make_engram()
         critical = mem(
@@ -542,9 +572,9 @@ class TestGraphPromptHelpers:
         eg._graph.render_context.assert_called_once()
 
 
-class TestAddConversationGraphPreserving:
+class TestAddConversationLineage:
     @pytest.mark.asyncio
-    async def test_contradiction_updates_in_place_not_delete_add(self) -> None:
+    async def test_contradiction_creates_revision_not_delete_add(self) -> None:
         from engram.llm.service import (
             ExtractionResult,
             MemoryOperation,
@@ -565,25 +595,29 @@ class TestAddConversationGraphPreserving:
                 ]
             )
         )
-        eg.update = AsyncMock(
+        eg.revise = AsyncMock(
             return_value=Memory(
-                memory_id="old_1", agent_id="a", content="User lives in Singapore"
+                memory_id="new_1", agent_id="a", content="User lives in Singapore"
             )
         )
+        eg.update = AsyncMock()
         eg.forget = AsyncMock()
         eg.add = AsyncMock()
 
         out = await eg.add_conversation("moved", "ok", "agent")
 
-        # Contradiction updates the existing row in place (id + relations survive)
-        eg.update.assert_awaited_once_with(
+        # Contradictions create a new revision while keeping the old value
+        # reachable through lineage history.
+        eg.revise.assert_awaited_once_with(
             "old_1",
             content="User lives in Singapore",
             metadata=ANY,
+            reason="DELETE",
         )
+        eg.update.assert_not_awaited()
         eg.forget.assert_not_awaited()
         eg.add.assert_not_awaited()
-        assert out[0].memory_id == "old_1"
+        assert out[0].memory_id == "new_1"
         # per-fact retrieval callback is wired
         assert (
             eg._llm.process_for_memory.call_args.kwargs["retrieve_for_fact"] is not None

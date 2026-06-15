@@ -371,17 +371,27 @@ class PostgresStorage:
             "ON agent_memory(agent_id, memory_type);"
         )
 
+        # First-class memory lineage/current-head columns. This runs after
+        # memory_type setup because older databases may have been created before
+        # migrations were applied uniformly.
+        await self.execute(self.load_sql("migrations/006_add_memory_lineage.sql"))
+
         # Upgrade pre-existing unique fact indexes to the md5 form (raw-fact
-        # entries fail for facts larger than the ~2704-byte btree row limit).
+        # entries fail for facts larger than the ~2704-byte btree row limit) and
+        # to the active-row partial form used by memory lineage history.
         unique_fact_def = await self.fetchval(
             "SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_unique_memory_fact'"
         )
-        if unique_fact_def is not None and "md5" not in unique_fact_def:
-            logger.info("Rebuilding idx_unique_memory_fact on md5(fact)")
+        if unique_fact_def is not None and (
+            "md5" not in unique_fact_def
+            or "WHERE (status = 'active'::text)" not in unique_fact_def
+        ):
+            logger.info("Rebuilding idx_unique_memory_fact on active md5(fact)")
             await self.execute("DROP INDEX idx_unique_memory_fact;")
             await self.execute(
                 "CREATE UNIQUE INDEX idx_unique_memory_fact "
-                "ON agent_memory(agent_id, COALESCE(user_id, ''), md5(fact));"
+                "ON agent_memory(agent_id, COALESCE(user_id, ''), md5(fact)) "
+                "WHERE status = 'active';"
             )
         logger.info("Database schema initialized")
 

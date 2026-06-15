@@ -30,6 +30,7 @@ WITH
 semantic_search AS (
     SELECT
         memory_id,
+        agent_id,
         user_id,
         session_id,
         memory_type,
@@ -40,6 +41,13 @@ semantic_search AS (
         created_at,
         last_accessed_at,
         access_count,
+        lineage_id,
+        revision,
+        status,
+        valid_from,
+        valid_to,
+        superseded_by_memory_id,
+        superseded_at,
         -- Cosine similarity (GREATEST ensures 0-1 range even if embeddings not perfectly normalized)
         GREATEST(0, 1 - (embedding <=> $1::vector)) AS semantic_score,
         ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS semantic_rank
@@ -48,6 +56,7 @@ semantic_search AS (
         AND ($4::text IS NULL OR user_id = $4)
         AND ($11::jsonb IS NULL OR metadata @> $11::jsonb)
         AND ($12::text[] IS NULL OR memory_type = ANY($12))
+        AND status <> 'superseded'
         AND COALESCE(metadata->>'status', 'active') <> 'superseded'
         AND embedding IS NOT NULL
     ORDER BY embedding <=> $1::vector
@@ -59,6 +68,7 @@ semantic_search AS (
 keyword_search AS (
     SELECT 
         memory_id,
+        agent_id,
         ts_rank(fact_tsv, query, 32) AS keyword_score_raw,
         ROW_NUMBER() OVER (ORDER BY ts_rank(fact_tsv, query, 32) DESC) AS keyword_rank
     FROM agent_memory,
@@ -67,6 +77,7 @@ keyword_search AS (
         AND ($4::text IS NULL OR user_id = $4)
         AND ($11::jsonb IS NULL OR metadata @> $11::jsonb)
         AND ($12::text[] IS NULL OR memory_type = ANY($12))
+        AND status <> 'superseded'
         AND COALESCE(metadata->>'status', 'active') <> 'superseded'
         AND fact_tsv @@ query
     ORDER BY keyword_score_raw DESC
@@ -78,6 +89,7 @@ combined AS (
     -- Semantic results with keyword boost
     SELECT
         s.memory_id,
+        s.agent_id,
         s.user_id,
         s.session_id,
         s.memory_type,
@@ -88,6 +100,13 @@ combined AS (
         s.created_at,
         s.last_accessed_at,
         s.access_count,
+        s.lineage_id,
+        s.revision,
+        s.status,
+        s.valid_from,
+        s.valid_to,
+        s.superseded_by_memory_id,
+        s.superseded_at,
         s.semantic_score,
         s.semantic_rank,
         COALESCE(k.keyword_rank, 999999) AS keyword_rank,
@@ -105,6 +124,7 @@ combined AS (
     -- Keyword-only results (not in semantic search)
     SELECT
         k.memory_id,
+        m.agent_id,
         m.user_id,
         m.session_id,
         m.memory_type,
@@ -115,6 +135,13 @@ combined AS (
         m.created_at,
         m.last_accessed_at,
         m.access_count,
+        m.lineage_id,
+        m.revision,
+        m.status,
+        m.valid_from,
+        m.valid_to,
+        m.superseded_by_memory_id,
+        m.superseded_at,
         0.0 AS semantic_score,
         999999 AS semantic_rank,
         k.keyword_rank,
@@ -130,6 +157,7 @@ combined AS (
 final_scored AS (
     SELECT
         memory_id,
+        agent_id,
         user_id,
         session_id,
         memory_type,
@@ -141,6 +169,13 @@ final_scored AS (
         created_at,
         last_accessed_at,
         access_count,
+        lineage_id,
+        revision,
+        status,
+        valid_from,
+        valid_to,
+        superseded_by_memory_id,
+        superseded_at,
         semantic_score,
         (rrf_semantic + rrf_keyword) * 30.0 AS keyword_score,  -- Normalized RRF
         calculate_decay(last_accessed_at, $10) AS decay_score,
@@ -160,6 +195,7 @@ final_scored AS (
 -- Final results: hybrid search output
 SELECT
     memory_id,
+    agent_id,
     user_id,
     session_id,
     memory_type,
@@ -171,6 +207,13 @@ SELECT
     created_at,
     last_accessed_at,
     access_count,
+    lineage_id,
+    revision,
+    status,
+    valid_from,
+    valid_to,
+    superseded_by_memory_id,
+    superseded_at,
     semantic_score,
     keyword_score,
     decay_score,

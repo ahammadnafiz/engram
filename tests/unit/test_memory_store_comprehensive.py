@@ -23,8 +23,18 @@ def wire_transaction(storage: MagicMock) -> MagicMock:
     async def _execute(query: str, *args: object) -> object:
         return await storage.execute(query, *args)
 
+    async def _fetch(query: str, *args: object) -> object:
+        fetchall = getattr(storage, "fetchall", None)
+        if fetchall is None:
+            return []
+        result = fetchall(query, *args)
+        if hasattr(result, "__await__"):
+            return await result
+        return result
+
     conn.fetchrow = AsyncMock(side_effect=_fetchrow)
     conn.execute = AsyncMock(side_effect=_execute)
+    conn.fetch = AsyncMock(side_effect=_fetch)
     tx = MagicMock()
     tx.__aenter__ = AsyncMock(return_value=conn)
     tx.__aexit__ = AsyncMock(return_value=False)
@@ -43,6 +53,7 @@ class TestMemoryStoreAdd:
         storage.fetchone = AsyncMock(
             return_value={"memory_id": "mem_123", "was_inserted": True}
         )
+        storage.fetchall = AsyncMock(return_value=[])
         storage.fetchval = AsyncMock(return_value=1)
         return wire_transaction(storage)
 
@@ -154,7 +165,10 @@ class TestMemoryStoreAdd:
 
         memory = await store.add(create)
 
-        assert memory.metadata == {"source": "conversation", "confidence": 0.9}
+        assert memory.metadata["source"] == "conversation"
+        assert memory.metadata["confidence"] == 0.9
+        assert memory.metadata["status"] == "active"
+        assert memory.lineage_id == memory.metadata["lineage_id"]
 
     @pytest.mark.asyncio
     async def test_add_near_duplicate_returns_existing(
@@ -208,6 +222,7 @@ class TestMemoryStoreAdd:
         mock_storage.fetchone = AsyncMock(
             side_effect=[
                 {"memory_id": "x", "score": 0.0},  # near-dup query: none
+                None,  # exact superseded lineage lookup
                 {"memory_id": "mem_1", "was_inserted": True},  # insert RETURNING
             ]
         )
@@ -255,6 +270,7 @@ class TestMemoryStoreAdd:
                 {"memory_id": "dup", "score": 0.99},  # first item near-dup
                 {"memory_id": "x", "score": 0.10},  # second novel
                 existing_dup_row,  # resolve dup -> existing memory
+                None,  # exact superseded lineage lookup for novel item
                 {"memory_id": "mem_new", "was_inserted": True},  # insert novel
             ]
         )
