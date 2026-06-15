@@ -13,10 +13,15 @@ Run:
 
 If you have EMBEDDING_PROVIDER=openai from an older shell snippet, this script
 maps it to ENGRAM_EMBEDDING_PROVIDER for convenience.
+
+Non-interactive checks:
+    python examples/chatbot.py --once "What do you remember about me?"
+    python examples/chatbot.py --demo
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import os
@@ -78,6 +83,15 @@ the current answer."""
 def preview(text: str, limit: int = 180) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else f"{text[:limit]}..."
+
+
+def format_timestamp(value: Any) -> str:
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat(timespec="minutes")
+        except TypeError:
+            return value.isoformat()
+    return str(value)
 
 
 def paint(text: str, code: str) -> str:
@@ -684,7 +698,13 @@ class MemoryChatbot:
         )
         print(rule("stored"))
         print_table(
-            [("memory_id", memory.memory_id), ("content", preview(memory.content))]
+            [
+                ("memory_id", memory.memory_id),
+                ("lineage_id", memory.lineage_id),
+                ("revision", memory.revision),
+                ("status", memory.status),
+                ("content", preview(memory.content)),
+            ]
         )
 
     async def memories(self) -> None:
@@ -697,7 +717,107 @@ class MemoryChatbot:
         for memory in memories:
             print(
                 f"  {accent(memory.memory_id[:16])} "
-                f"{dim(f'[{memory.memory_type} {memory.importance:.2f}]')} "
+                f"{dim(f'[{memory.memory_type} r{memory.revision} {memory.status} {memory.importance:.2f}]')} "
+                f"{preview(memory.content, 120)}"
+            )
+
+    async def show_history(self, rest: str = "") -> None:
+        assert self.engram is not None
+        arg = rest.strip()
+        if arg.startswith("mem_"):
+            await self.lineage(arg)
+            return
+
+        include_superseded = True
+        limit = 20
+        if arg == "active":
+            include_superseded = False
+        elif arg.isdigit():
+            limit = max(1, min(100, int(arg)))
+        elif arg:
+            print_notice("usage: /history [active|limit|memory_id]", level="warn")
+            return
+
+        events = await self.engram.get_history(
+            AGENT_ID,
+            user_id=USER_ID,
+            limit=limit,
+            include_superseded=include_superseded,
+        )
+        if not events:
+            print_notice("no memory history yet", level="warn")
+            return
+
+        print(rule("history"))
+        for event in events:
+            marker = {
+                "added": "+",
+                "revised": "~",
+                "superseded": "x",
+            }.get(event.event_type, "?")
+            relation = ""
+            if event.event_type == "revised" and event.previous_memory_id:
+                relation = f" prev={event.previous_memory_id[:12]}"
+            elif event.event_type == "superseded" and event.superseded_by_memory_id:
+                relation = f" by={event.superseded_by_memory_id[:12]}"
+            print(
+                f"  {accent(marker)} {accent(event.event_type.ljust(10))} "
+                f"{dim(format_timestamp(event.occurred_at))} "
+                f"{accent(event.memory.memory_id[:16])} "
+                f"{dim(f'[{event.memory.memory_type} r{event.memory.revision} {event.memory.status}]')} "
+                f"{preview(event.memory.content, 110)}{dim(relation)}"
+            )
+            if event.reason:
+                print(f"    {dim('reason')} {event.reason}")
+
+    async def revise(self, memory_id: str, content: str) -> None:
+        assert self.engram is not None
+        memory = await self.engram.revise(
+            memory_id,
+            content=content,
+            metadata={"source": "manual_chatbot_revision"},
+            reason="manual_chatbot_revision",
+        )
+        current = await self.engram.get_current(memory_id)
+        lineage = await self.engram.get_lineage(memory_id)
+        print(rule("revised"))
+        print_table(
+            [
+                ("new_memory_id", memory.memory_id),
+                ("current", current.memory_id),
+                ("lineage_id", lineage.lineage_id),
+                ("revisions", len(lineage.memories)),
+                ("content", preview(memory.content)),
+            ]
+        )
+
+    async def lineage(self, memory_id: str) -> None:
+        assert self.engram is not None
+        current = await self.engram.get_current(memory_id)
+        lineage = await self.engram.get_lineage(memory_id)
+        explanation = await self.engram.explain_memory(memory_id)
+        print(rule("lineage"))
+        print_table(
+            [
+                ("lineage_id", lineage.lineage_id),
+                ("current", current.memory_id),
+                ("selected", explanation.memory.memory_id),
+                ("selected_status", explanation.memory.status),
+                (
+                    "superseded_by",
+                    explanation.superseded_by.memory_id
+                    if explanation.superseded_by
+                    else None,
+                ),
+                ("supersedes", [m.memory_id for m in explanation.supersedes]),
+            ]
+        )
+        print(rule("revisions"))
+        for memory in lineage.memories:
+            marker = "*" if memory.memory_id == current.memory_id else " "
+            print(
+                f"{marker} {accent(memory.memory_id[:16])} "
+                f"{dim(f'r{memory.revision} {memory.status}')} "
                 f"{preview(memory.content, 120)}"
             )
 
@@ -795,6 +915,9 @@ class MemoryChatbot:
 
 COMMANDS = [
     ("/remember <fact>", "store a durable fact immediately"),
+    ("/revise <memory_id> <fact>", "create a new active revision"),
+    ("/lineage <memory_id>", "show current head and revision history"),
+    ("/history [active|limit|memory_id]", "show memory add/update timeline"),
     ("/memories", "list recent Engram memories"),
     ("/search <query>", "search memories and reinforce hits"),
     ("/context <query>", "show memory and task prompt context"),
@@ -818,6 +941,23 @@ def print_help() -> None:
     print(rule())
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run a real OpenAI-backed Engram memory chatbot."
+    )
+    parser.add_argument(
+        "--once",
+        metavar="MESSAGE",
+        help="send one message, print the response, and exit",
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="run one deterministic memory-backed demo turn and exit",
+    )
+    return parser.parse_args(argv)
+
+
 async def run_command(bot: MemoryChatbot, line: str) -> bool:
     command, _, rest = line.partition(" ")
     command = command.lower()
@@ -829,6 +969,16 @@ async def run_command(bot: MemoryChatbot, line: str) -> bool:
         print_help()
     elif command == "/remember" and rest:
         await bot.remember(rest)
+    elif command == "/revise" and rest:
+        memory_id, _, content = rest.partition(" ")
+        if memory_id and content.strip():
+            await bot.revise(memory_id, content.strip())
+        else:
+            print_notice("usage: /revise <memory_id> <fact>", level="warn")
+    elif command == "/lineage" and rest:
+        await bot.lineage(rest)
+    elif command == "/history":
+        await bot.show_history(rest)
     elif command == "/memories":
         await bot.memories()
     elif command == "/search" and rest:
@@ -856,7 +1006,63 @@ async def run_command(bot: MemoryChatbot, line: str) -> bool:
     return True
 
 
-async def main() -> None:
+async def run_once(bot: MemoryChatbot, message: str) -> None:
+    print(rule("once"))
+    print_table([("message", preview(message, 100))])
+    response = await bot.reply(message)
+    print_response(response)
+
+
+async def run_demo(bot: MemoryChatbot) -> None:
+    assert bot.engram is not None
+    old = await bot.engram.add(
+        "The user's live chatbot demo city is Dhaka.",
+        AGENT_ID,
+        user_id=USER_ID,
+        session_id=bot.session_id,
+        memory_type="profile",
+        metadata={
+            "source": "examples/chatbot.py --demo",
+            "conflict_key": f"{AGENT_ID}:{USER_ID}:demo:city",
+        },
+    )
+    new = await bot.engram.revise(
+        old.memory_id,
+        content="The user's live chatbot demo city is Singapore.",
+        metadata={"source": "examples/chatbot.py --demo"},
+        reason="demo_correction",
+    )
+    current = await bot.engram.get_current(old.memory_id)
+    lineage = await bot.engram.get_lineage(old.memory_id)
+    explanation = await bot.engram.explain_memory(old.memory_id)
+    print(rule("demo lineage"))
+    print_table(
+        [
+            ("old_memory_id", old.memory_id),
+            ("new_memory_id", new.memory_id),
+            ("lineage_id", lineage.lineage_id),
+            ("current", current.memory_id),
+            ("old_status", explanation.memory.status),
+            (
+                "old_superseded_by",
+                explanation.superseded_by.memory_id
+                if explanation.superseded_by
+                else None,
+            ),
+            (
+                "revisions",
+                [f"r{memory.revision}:{memory.status}" for memory in lineage.memories],
+            ),
+        ]
+    )
+    await run_once(
+        bot,
+        "Using Engram memory only, what is my live chatbot demo city?",
+    )
+
+
+async def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     bot = MemoryChatbot()
     try:
         await bot.connect()
@@ -869,10 +1075,20 @@ async def main() -> None:
             level="warn",
         )
         return
-    print_help()
     try:
+        if args.demo:
+            await run_demo(bot)
+            return
+        if args.once:
+            await run_once(bot, args.once)
+            return
+
+        print_help()
         while True:
-            line = (await asyncio.to_thread(input, prompt_text())).strip()
+            try:
+                line = (await asyncio.to_thread(input, prompt_text())).strip()
+            except EOFError:
+                break
             if not sys.stdin.isatty():
                 print()
             if not line:

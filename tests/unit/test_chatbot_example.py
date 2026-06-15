@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -20,10 +21,21 @@ def load_chatbot_module():
     return module
 
 
-def memory(content: str, memory_id: str = "mem_1"):
+def memory(
+    content: str,
+    memory_id: str = "mem_1",
+    *,
+    lineage_id: str = "lin_1",
+    revision: int = 1,
+    status: str = "active",
+):
     return SimpleNamespace(
         memory_id=memory_id,
+        lineage_id=lineage_id,
+        revision=revision,
+        status=status,
         memory_type="semantic",
+        importance=0.5,
         content=content,
     )
 
@@ -32,7 +44,44 @@ def search_result(content: str, memory_id: str = "mem_2"):
     return SimpleNamespace(memory=memory(content, memory_id))
 
 
+def history_event(
+    event_type: str,
+    content: str,
+    memory_id: str,
+    *,
+    previous_memory_id: str | None = None,
+    superseded_by_memory_id: str | None = None,
+    reason: str | None = None,
+):
+    return SimpleNamespace(
+        event_type=event_type,
+        occurred_at=datetime(2026, 6, 15, 10, 30, tzinfo=timezone.utc),
+        memory=memory(content, memory_id),
+        current_memory_id="mem_new",
+        previous_memory_id=previous_memory_id,
+        superseded_by_memory_id=superseded_by_memory_id,
+        reason=reason,
+    )
+
+
 def fake_engram():
+    old_memory = memory(
+        "The user's live chatbot demo city is Dhaka.",
+        "mem_old",
+        revision=1,
+        status="superseded",
+    )
+    new_memory = memory(
+        "The user's live chatbot demo city is Singapore.",
+        "mem_new",
+        revision=2,
+        status="active",
+    )
+    lineage = SimpleNamespace(
+        lineage_id="lin_1",
+        current_memory_id="mem_new",
+        memories=[new_memory, old_memory],
+    )
     engram = SimpleNamespace()
     engram.llm = SimpleNamespace(
         complete_full=AsyncMock(
@@ -52,9 +101,39 @@ def fake_engram():
     )
     engram.deep_search = AsyncMock(return_value=[search_result("Deep fact")])
     engram.list_recent = AsyncMock(return_value=[memory("Recent fact")])
+    engram.get_history = AsyncMock(
+        return_value=[
+            history_event(
+                "revised",
+                "The user's live chatbot demo city is Singapore.",
+                "mem_new",
+                previous_memory_id="mem_old",
+                reason="demo_correction",
+            ),
+            history_event(
+                "superseded",
+                "The user's live chatbot demo city is Dhaka.",
+                "mem_old",
+                superseded_by_memory_id="mem_new",
+            ),
+        ]
+    )
     engram.build_context = AsyncMock(return_value=SimpleNamespace(text="Task context"))
     engram.record_turn = AsyncMock()
     engram.process_memory_jobs = AsyncMock(return_value=[])
+    engram.add = AsyncMock(return_value=old_memory)
+    engram.revise = AsyncMock(return_value=new_memory)
+    engram.get_current = AsyncMock(return_value=new_memory)
+    engram.get_lineage = AsyncMock(return_value=lineage)
+    engram.explain_memory = AsyncMock(
+        return_value=SimpleNamespace(
+            memory=old_memory,
+            current=new_memory,
+            lineage=lineage,
+            supersedes=[],
+            superseded_by=new_memory,
+        )
+    )
     return engram
 
 
@@ -153,3 +232,88 @@ async def test_rerank_true_forces_fast_mode_reranking(monkeypatch):
     await bot.reply("What do you remember?")
 
     assert engram.get_context_block.call_args.kwargs["rerank"] is True
+
+
+@pytest.mark.asyncio
+async def test_lineage_command_uses_lineage_api(monkeypatch):
+    module = load_chatbot_module()
+    engram = fake_engram()
+    bot = make_bot(module, engram)
+
+    keep_running = await module.run_command(bot, "/lineage mem_old")
+
+    assert keep_running is True
+    engram.get_current.assert_awaited_once_with("mem_old")
+    engram.get_lineage.assert_awaited_once_with("mem_old")
+    engram.explain_memory.assert_awaited_once_with("mem_old")
+
+
+@pytest.mark.asyncio
+async def test_revise_command_creates_new_revision(monkeypatch):
+    module = load_chatbot_module()
+    engram = fake_engram()
+    bot = make_bot(module, engram)
+
+    keep_running = await module.run_command(
+        bot, "/revise mem_old The user's live chatbot demo city is Singapore."
+    )
+
+    assert keep_running is True
+    engram.revise.assert_awaited_once_with(
+        "mem_old",
+        content="The user's live chatbot demo city is Singapore.",
+        metadata={"source": "manual_chatbot_revision"},
+        reason="manual_chatbot_revision",
+    )
+    engram.get_current.assert_awaited_once_with("mem_old")
+    engram.get_lineage.assert_awaited_once_with("mem_old")
+
+
+@pytest.mark.asyncio
+async def test_history_command_uses_history_api(monkeypatch):
+    module = load_chatbot_module()
+    engram = fake_engram()
+    bot = make_bot(module, engram)
+
+    keep_running = await module.run_command(bot, "/history 25")
+
+    assert keep_running is True
+    engram.get_history.assert_awaited_once_with(
+        module.AGENT_ID,
+        user_id=module.USER_ID,
+        limit=25,
+        include_superseded=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_history_command_with_memory_id_uses_lineage(monkeypatch):
+    module = load_chatbot_module()
+    engram = fake_engram()
+    bot = make_bot(module, engram)
+
+    keep_running = await module.run_command(bot, "/history mem_old")
+
+    assert keep_running is True
+    engram.get_history.assert_not_awaited()
+    engram.get_lineage.assert_awaited_once_with("mem_old")
+    engram.explain_memory.assert_awaited_once_with("mem_old")
+
+
+@pytest.mark.asyncio
+async def test_demo_uses_lineage_api(monkeypatch):
+    module = load_chatbot_module()
+    monkeypatch.setattr(module, "RECALL_MODE", "fast")
+    monkeypatch.setattr(module, "MEMORY_JOBS_MODE", "deferred")
+    monkeypatch.setattr(module, "RERANK_MODE", "auto")
+    engram = fake_engram()
+    bot = make_bot(module, engram)
+
+    await module.run_demo(bot)
+
+    engram.add.assert_awaited_once()
+    engram.revise.assert_awaited_once()
+    engram.get_current.assert_awaited_once_with("mem_old")
+    engram.get_lineage.assert_awaited_once_with("mem_old")
+    engram.explain_memory.assert_awaited_once_with("mem_old")
+    engram.llm.complete_full.assert_awaited_once()
