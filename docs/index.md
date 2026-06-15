@@ -40,7 +40,7 @@ agent failures can be debugged.
 </div>
 
 !!! warning "Alpha status"
-    Engram is `0.3.0a1`. The codebase has unit and integration coverage, but
+    Engram is `0.3.0a2`. The codebase has unit and integration coverage, but
     public APIs and the schema may still change before a stable release. Back
     up data before migrations.
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0a2] - 2026-06-15
+
+### Added
+- Real OpenAI-backed memory chatbot example with command UI, Engram recall, task context, and memory cleanup commands.
+- End-to-end API examples and tested documentation coverage for public code snippets.
+- MkDocs Material theme customization with Mermaid diagram rendering and polished code block styling.
+
+### Changed
+- Reorganized documentation around quickstart, core concepts, long-running memory, API reference, examples, and operations.
+- Improved Docker setup so repeated runs preserve existing `.env` secrets and only add missing Docker defaults.
+
+### Fixed
+- Ruff formatting drift in source, tests, and examples.
+- Integration test environment setup no longer lets local `.env` redirect the caller database.
+
 ## [0.3.0a1] - 2026-06-09
 
 ### Added
