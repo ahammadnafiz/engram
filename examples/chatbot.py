@@ -20,6 +20,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shutil
+import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +44,11 @@ HISTORY_LIMIT = 10
 MEMORY_JOBS_MODE = os.environ.get("ENGRAM_CHATBOT_MEMORY_JOBS", "inline").lower()
 BROAD_MEMORY_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_BROAD_MEMORY_LIMIT", "60"))
 BROAD_MEMORY_CHARS = int(os.environ.get("ENGRAM_CHATBOT_BROAD_MEMORY_CHARS", "3600"))
+COLOR_ENABLED = (
+    sys.stdout.isatty()
+    and os.environ.get("NO_COLOR") is None
+    and os.environ.get("TERM") != "dumb"
+)
 
 SYSTEM_PROMPT = """You are a helpful assistant with persistent Engram memory.
 Use the supplied memory and task context as the only source for remembered facts.
@@ -67,9 +75,102 @@ def preview(text: str, limit: int = 180) -> str:
     return text if len(text) <= limit else f"{text[:limit]}..."
 
 
+def paint(text: str, code: str) -> str:
+    if not COLOR_ENABLED:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def dim(text: str) -> str:
+    return paint(text, "2")
+
+
+def bold(text: str) -> str:
+    return paint(text, "1")
+
+
+def accent(text: str) -> str:
+    return paint(text, "36")
+
+
+def good(text: str) -> str:
+    return paint(text, "32")
+
+
+def warn(text: str) -> str:
+    return paint(text, "33")
+
+
+def bad(text: str) -> str:
+    return paint(text, "31")
+
+
+def terminal_width() -> int:
+    return max(72, min(104, shutil.get_terminal_size((88, 20)).columns))
+
+
+def rule(label: str = "") -> str:
+    width = terminal_width()
+    if not label:
+        return dim("-" * width)
+    prefix = f" {label} "
+    return dim(prefix + "-" * max(0, width - len(prefix)))
+
+
+def print_header() -> None:
+    print()
+    print(rule("engram"))
+    print(f"{bold('Engram Memory Chat')} | {dim('persistent OpenAI-backed recall')}")
+    print(dim("Type a message to chat, or /help for commands."))
+
+
 def print_table(rows: list[tuple[str, Any]]) -> None:
     for key, value in rows:
-        print(f"{key:<20} {value}")
+        print(f"{dim(f'{key:<20}')} {value}")
+
+
+def print_status_panel(rows: list[tuple[str, Any]]) -> None:
+    print_header()
+    print(rule("session"))
+    print_table(rows)
+    print(rule())
+
+
+def print_notice(message: str, *, level: str = "info") -> None:
+    prefix = {
+        "info": accent("engram"),
+        "ok": good("engram"),
+        "warn": warn("engram"),
+        "error": bad("error"),
+    }.get(level, accent("engram"))
+    print(f"{prefix} {dim(message)}")
+
+
+def print_response(text: str) -> None:
+    width = terminal_width() - 4
+    print()
+    print(f"{accent('assistant')} {dim('-' * max(1, terminal_width() - 10))}")
+    for raw_line in text.splitlines() or [""]:
+        if not raw_line.strip():
+            print()
+            continue
+        if raw_line.lstrip().startswith(("-", "*")):
+            print(f"  {raw_line}")
+            continue
+        print(
+            textwrap.fill(
+                raw_line,
+                width=width,
+                initial_indent="  ",
+                subsequent_indent="  ",
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        )
+
+
+def prompt_text() -> str:
+    return f"{accent('you')} {dim('> ')}" if COLOR_ENABLED else "you> "
 
 
 def require_real_openai_config() -> None:
@@ -115,15 +216,27 @@ class MemoryChatbot:
 
         await self._resume_or_start_task()
         health = await self.engram.health_check()
-        print_table(
+        health_status = str(health.get("status"))
+        print_status_panel(
             [
-                ("health", health.get("status")),
+                (
+                    "health",
+                    good(health_status)
+                    if health_status == "healthy"
+                    else warn(health_status),
+                ),
                 ("agent", AGENT_ID),
                 ("user", USER_ID),
                 ("task", self.task_id),
                 ("session", self.session_id),
-                ("embedding_provider", os.environ.get("ENGRAM_EMBEDDING_PROVIDER", "openai")),
-                ("embedding_model", os.environ.get("ENGRAM_EMBEDDING_MODEL", "text-embedding-3-small")),
+                (
+                    "embedding_provider",
+                    os.environ.get("ENGRAM_EMBEDDING_PROVIDER", "openai"),
+                ),
+                (
+                    "embedding_model",
+                    os.environ.get("ENGRAM_EMBEDDING_MODEL", "text-embedding-3-small"),
+                ),
                 ("embedding_dim", os.environ.get("ENGRAM_EMBEDDING_DIMENSION", "auto")),
                 ("llm_provider", os.environ.get("ENGRAM_LLM_PROVIDER", "openai")),
                 ("llm_model", os.environ.get("ENGRAM_LLM_MODEL", "gpt-4o-mini")),
@@ -245,7 +358,7 @@ class MemoryChatbot:
             {
                 "role": "system",
                 "content": (
-                    "<engram_query_specific_must_use priority=\"highest\">\n"
+                    '<engram_query_specific_must_use priority="highest">\n'
                     f"{query_attention_block}\n"
                     "</engram_query_specific_must_use>"
                 ),
@@ -302,8 +415,8 @@ class MemoryChatbot:
             jobs = await self.engram.process_memory_jobs(limit=10)
         elif MEMORY_JOBS_MODE == "deferred":
             jobs = []
-            print(
-                "[engram] memory job queued; run process_memory_jobs() "
+            print_notice(
+                "memory job queued, run process_memory_jobs() "
                 "or run_memory_worker() later"
             )
         else:
@@ -317,10 +430,12 @@ class MemoryChatbot:
 
         processed = len([job for job in jobs if job.status == "completed"])
         if processed:
-            print(f"[engram] processed {processed} memory job(s)")
+            print_notice(f"processed {processed} memory job(s)", level="ok")
         return response
 
-    def _render_deep_memory_block(self, results: list[Any], max_chars: int = 2400) -> str:
+    def _render_deep_memory_block(
+        self, results: list[Any], max_chars: int = 2400
+    ) -> str:
         lines = []
         used = 0
         seen = set()
@@ -391,7 +506,14 @@ class MemoryChatbot:
                 ("shellfish", "allerg", "vegetarian", "quiet", "live music", "avoid"),
             ),
             (
-                ("older", "old plan", "superseded", "cancelled", "canceled", "replaced"),
+                (
+                    "older",
+                    "old plan",
+                    "superseded",
+                    "cancelled",
+                    "canceled",
+                    "replaced",
+                ),
                 ("superseded", "cancel", "no longer"),
             ),
             (
@@ -440,29 +562,39 @@ class MemoryChatbot:
             memory_type="semantic",
             metadata={"source": "manual_chatbot_memory"},
         )
-        print_table([("memory_id", memory.memory_id), ("content", preview(memory.content))])
+        print(rule("stored"))
+        print_table(
+            [("memory_id", memory.memory_id), ("content", preview(memory.content))]
+        )
 
     async def memories(self) -> None:
         assert self.engram is not None
         memories = await self.engram.list_recent(AGENT_ID, user_id=USER_ID, limit=15)
         if not memories:
-            print("No memories stored yet.")
+            print_notice("no memories stored yet", level="warn")
             return
+        print(rule("memories"))
         for memory in memories:
             print(
-                f"{memory.memory_id} [{memory.memory_type}] "
-                f"{memory.importance:.2f} {preview(memory.content)}"
+                f"  {accent(memory.memory_id[:16])} "
+                f"{dim(f'[{memory.memory_type} {memory.importance:.2f}]')} "
+                f"{preview(memory.content, 120)}"
             )
 
     async def search(self, query: str) -> None:
         assert self.engram is not None
         results = await self.engram.search(query, AGENT_ID, user_id=USER_ID, limit=8)
         if not results:
-            print("No matches.")
+            print_notice("no matches", level="warn")
             return
+        print(rule("search"))
         for result in results:
             await self.engram.reinforce(result.memory.memory_id, 0.02)
-            print(f"{result.score:.3f} {preview(result.memory.content)}")
+            print(
+                f"  {accent(f'{result.score:.3f}')} "
+                f"{dim(result.memory.memory_type)} "
+                f"{preview(result.memory.content)}"
+            )
 
     async def context(self, query: str) -> None:
         assert self.engram is not None
@@ -481,8 +613,10 @@ class MemoryChatbot:
             max_tokens=1400,
             include_graph=True,
         )
+        print(rule("memory context"))
         print(block or "No memory context.")
-        print("\nTask context:")
+        print()
+        print(rule("task context"))
         print(task_context.text or "No task context.")
 
     async def trace(self, query: str) -> None:
@@ -494,6 +628,7 @@ class MemoryChatbot:
             expected_terms=self._expected_terms(query),
             max_tokens=1200,
         )
+        print(rule("trace"))
         print(trace.context or "No recall context.")
         print_table(
             [
@@ -515,6 +650,7 @@ class MemoryChatbot:
             status=["active", "paused"],
             limit=5,
         )
+        print(rule("task"))
         print_table(
             [
                 ("current", f"{current.task_run_id} ({current.status})"),
@@ -526,31 +662,40 @@ class MemoryChatbot:
     async def forget(self, memory_id: str) -> None:
         assert self.engram is not None
         deleted = await self.engram.forget(memory_id)
+        print(rule("forget"))
         print_table([("deleted", deleted)])
 
     async def clear(self) -> None:
         assert self.engram is not None
         count = await self.engram.purge(AGENT_ID, user_id=USER_ID)
         self.history.clear()
+        print(rule("clear"))
         print_table([("purged", count)])
 
 
-HELP = """
-Commands:
-  /remember <fact>      Store a durable fact immediately with add()
-  /memories             List recent Engram memories for this user
-  /search <query>       Search memories and reinforce the retrieved hits
-  /context <query>      Show the prompt context Engram would send to the LLM
-  /trace <query>        Inspect trace_recall() retrieval decisions
-  /task                 Show the resumable task/session backing this chat
-  /forget <memory_id>   Delete one memory
-  /clear                Purge this chatbot user's memories
-  /help                 Show this help
-  /quit                 Exit
+COMMANDS = [
+    ("/remember <fact>", "store a durable fact immediately"),
+    ("/memories", "list recent Engram memories"),
+    ("/search <query>", "search memories and reinforce hits"),
+    ("/context <query>", "show memory and task prompt context"),
+    ("/trace <query>", "inspect trace_recall decisions"),
+    ("/task", "show the resumable task and session"),
+    ("/forget <memory_id>", "delete one memory"),
+    ("/clear", "purge this chatbot user's memories"),
+    ("/help", "show this command palette"),
+    ("/quit", "exit"),
+]
 
-Plain text sends a real OpenAI chat completion with Engram memory context,
-then records the turn and processes memory jobs so future replies can recall it.
-"""
+
+def print_help() -> None:
+    print()
+    print(rule("commands"))
+    width = max(len(command) for command, _ in COMMANDS)
+    for command, description in COMMANDS:
+        print(f"  {accent(command.ljust(width))}  {dim(description)}")
+    print()
+    print(dim("Plain text runs: recall -> OpenAI chat -> record_turn -> memory jobs."))
+    print(rule())
 
 
 async def run_command(bot: MemoryChatbot, line: str) -> bool:
@@ -561,7 +706,7 @@ async def run_command(bot: MemoryChatbot, line: str) -> bool:
     if command in {"/quit", "/q"}:
         return False
     if command == "/help":
-        print(HELP)
+        print_help()
     elif command == "/remember" and rest:
         await bot.remember(rest)
     elif command == "/memories":
@@ -577,11 +722,17 @@ async def run_command(bot: MemoryChatbot, line: str) -> bool:
     elif command == "/forget" and rest:
         await bot.forget(rest)
     elif command == "/clear":
-        confirm = await asyncio.to_thread(input, "Delete this user's chatbot memories? y/N: ")
+        clear_prompt = (
+            warn("clear") + " " + dim("Delete this user's chatbot memories? y/N: ")
+        )
+        confirm = await asyncio.to_thread(
+            input,
+            clear_prompt,
+        )
         if confirm.lower() == "y":
             await bot.clear()
     else:
-        print("Unknown or incomplete command. Type /help.")
+        print_notice("unknown or incomplete command, type /help", level="warn")
     return True
 
 
@@ -590,28 +741,35 @@ async def main() -> None:
     try:
         await bot.connect()
     except DatabaseConnectionError as exc:
-        print(f"Database connection failed: {exc}")
-        print(
+        print_notice(f"database connection failed: {exc}", level="error")
+        print_notice(
             "Check that ENGRAM_DATABASE_URL matches the running Postgres "
             "container credentials. If you used docker-setup.sh, the password "
-            "in .env may differ from an older existing Docker volume."
+            "in .env may differ from an older existing Docker volume.",
+            level="warn",
         )
         return
-    print(HELP)
+    print_help()
     try:
         while True:
-            line = (await asyncio.to_thread(input, "you> ")).strip()
+            line = (await asyncio.to_thread(input, prompt_text())).strip()
+            if not sys.stdin.isatty():
+                print()
             if not line:
                 continue
             if line.startswith("/"):
                 if not await run_command(bot, line):
                     break
             else:
+                if COLOR_ENABLED:
+                    print_notice("recalling memory and calling OpenAI")
                 response = await bot.reply(line)
-                print(f"bot> {response}")
+                print_response(response)
     finally:
         await bot.close()
-        print("bye")
+        if not sys.stdin.isatty():
+            print()
+        print_notice("bye", level="ok")
 
 
 if __name__ == "__main__":
