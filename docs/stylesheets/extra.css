@@ -8,7 +8,10 @@
   --engram-accent-strong: #065f55;
   --engram-green: #2f8f46;
   --engram-amber: #b26b00;
-  --engram-code-bg: #111827;
+  --engram-code-panel: #f7f9fc;
+  --engram-code-border: #d4dce8;
+  --engram-code-text: #34434f;
+  --engram-code-muted: #7a8794;
   --md-primary-fg-color: #0f766e;
   --md-accent-fg-color: #2f8f46;
   --md-typeset-a-color: #087f70;
@@ -25,7 +28,10 @@
   --engram-accent-strong: #99f6e4;
   --engram-green: #86efac;
   --engram-amber: #fbbf24;
-  --engram-code-bg: #0b1120;
+  --engram-code-panel: #101827;
+  --engram-code-border: #2a3749;
+  --engram-code-text: #d9e2ec;
+  --engram-code-muted: #8795a8;
   --md-primary-fg-color: #0f766e;
   --md-accent-fg-color: #86efac;
   --md-typeset-a-color: #5eead4;
@@ -103,13 +109,59 @@
 }
 
 .md-typeset .highlight {
-  border: 1px solid var(--engram-border);
+  background: var(--engram-code-panel);
+  border: 1px solid var(--engram-code-border);
   border-radius: 8px;
-  box-shadow: none;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  margin: 1rem 0 1.25rem;
+  overflow: hidden;
+  position: relative;
 }
 
 .md-typeset .highlight pre {
-  background: var(--engram-code-bg);
+  background: transparent !important;
+  margin: 0;
+  padding: 0.9rem 1rem;
+  scrollbar-color: var(--engram-code-muted) transparent;
+  scrollbar-width: thin;
+}
+
+.md-typeset .highlight pre > code {
+  background: transparent !important;
+  border: 0;
+  border-radius: 0;
+  color: var(--engram-code-text);
+  display: block;
+  font-size: 0.68rem;
+  line-height: 1.58;
+  min-width: max-content;
+  padding: 0;
+}
+
+.md-typeset .highlight pre code a {
+  color: inherit;
+}
+
+.md-typeset .highlight:hover {
+  border-color: color-mix(in srgb, var(--engram-accent) 45%, var(--engram-code-border));
+}
+
+.md-typeset .highlight .md-clipboard,
+.md-typeset .highlight button.md-clipboard {
+  background: color-mix(in srgb, var(--engram-panel) 82%, transparent);
+  border: 1px solid var(--engram-code-border);
+  border-radius: 6px;
+  color: var(--engram-code-muted);
+  height: 1.7rem;
+  right: 0.45rem;
+  top: 0.45rem;
+  width: 1.7rem;
+}
+
+.md-typeset .highlight .md-clipboard:hover,
+.md-typeset .highlight button.md-clipboard:hover {
+  background: var(--engram-panel);
+  color: var(--engram-accent-strong);
 }
 
 .md-typeset .admonition,
