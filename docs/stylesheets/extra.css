@@ -121,9 +121,13 @@
 .md-typeset .highlight pre {
   background: transparent !important;
   margin: 0;
+  max-height: min(70vh, 34rem);
+  overflow: auto;
   padding: 0.9rem 1rem;
+  padding-right: 2.8rem;
   scrollbar-color: var(--engram-code-muted) transparent;
   scrollbar-width: thin;
+  white-space: pre;
 }
 
 .md-typeset .highlight pre > code {
@@ -285,5 +289,10 @@
     display: block;
     text-align: center;
     width: 100%;
+  }
+
+  .md-typeset .highlight pre {
+    max-height: 24rem;
+    padding-right: 2.5rem;
   }
 }
