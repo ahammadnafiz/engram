@@ -135,7 +135,67 @@ generate_password() {
     fi
 }
 
-# Create or update .env file
+# Read a key from .env without sourcing secrets into this shell.
+get_env_value() {
+    local key=$1
+    if [ -f "$ENV_FILE" ]; then
+        awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE"
+    fi
+}
+
+env_has_key() {
+    local key=$1
+    [ -f "$ENV_FILE" ] && grep -q -E "^${key}=" "$ENV_FILE"
+}
+
+append_env_value() {
+    local key=$1
+    local value=$2
+
+    if [ -s "$ENV_FILE" ] && [ "$(tail -c 1 "$ENV_FILE")" != "" ]; then
+        printf '\n' >> "$ENV_FILE"
+    fi
+    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+}
+
+set_env_value() {
+    local key=$1
+    local value=$2
+    local tmp
+    tmp=$(mktemp "${ENV_FILE}.XXXXXX")
+
+    if [ -f "$ENV_FILE" ]; then
+        awk -v key="$key" -v value="$value" '
+            BEGIN { replaced = 0 }
+            $0 ~ "^" key "=" && replaced == 0 {
+                print key "=" value
+                replaced = 1
+                next
+            }
+            { print }
+            END {
+                if (replaced == 0) {
+                    print key "=" value
+                }
+            }
+        ' "$ENV_FILE" > "$tmp"
+    else
+        printf '%s=%s\n' "$key" "$value" > "$tmp"
+    fi
+
+    mv "$tmp" "$ENV_FILE"
+}
+
+is_managed_database_url() {
+    local url=$1
+    local user=$2
+    local port=$3
+    local db=$4
+
+    [[ "$url" =~ ^postgresql://${user}:.+@localhost:${port}/${db}$ ]]
+}
+
+# Create .env file for first-time setup.
 create_env_file() {
     local port=$1
     local password=${2:-$(generate_password)}
@@ -171,27 +231,118 @@ EOF
     log_success "Created .env file with port $port"
 }
 
+create_or_update_env_file() {
+    local port=$1
+    local force_port_update=${2:-false}
+
+    if [ ! -f "$ENV_FILE" ]; then
+        create_env_file "$port"
+        return
+    fi
+
+    local changed=false
+    local existing_port
+    existing_port=$(get_env_value POSTGRES_PORT)
+    local postgres_user
+    postgres_user=$(get_env_value POSTGRES_USER)
+    postgres_user=${postgres_user:-engram}
+    local postgres_db
+    postgres_db=$(get_env_value POSTGRES_DB)
+    postgres_db=${postgres_db:-engram}
+    local postgres_password
+    postgres_password=$(get_env_value POSTGRES_PASSWORD)
+
+    if env_has_key POSTGRES_PORT; then
+        if [ "$force_port_update" = "true" ] && [ "$existing_port" != "$port" ]; then
+            set_env_value POSTGRES_PORT "$port"
+            changed=true
+        else
+            port=$existing_port
+        fi
+    else
+        append_env_value POSTGRES_PORT "$port"
+        changed=true
+    fi
+
+    if ! env_has_key POSTGRES_USER; then
+        append_env_value POSTGRES_USER "$postgres_user"
+        changed=true
+    fi
+
+    if ! env_has_key POSTGRES_PASSWORD; then
+        postgres_password=$(generate_password)
+        append_env_value POSTGRES_PASSWORD "$postgres_password"
+        changed=true
+    fi
+
+    if ! env_has_key POSTGRES_DB; then
+        append_env_value POSTGRES_DB "$postgres_db"
+        changed=true
+    fi
+
+    local database_url
+    database_url=$(get_env_value ENGRAM_DATABASE_URL)
+    local managed_url
+    managed_url="postgresql://${postgres_user}:${postgres_password}@localhost:${port}/${postgres_db}"
+
+    if ! env_has_key ENGRAM_DATABASE_URL; then
+        append_env_value ENGRAM_DATABASE_URL "$managed_url"
+        changed=true
+    elif [ "$force_port_update" = "true" ] \
+        && [ -n "$existing_port" ] \
+        && is_managed_database_url "$database_url" "$postgres_user" "$existing_port" "$postgres_db"; then
+        set_env_value ENGRAM_DATABASE_URL "$managed_url"
+        changed=true
+    fi
+
+    if [ "$changed" = "true" ]; then
+        log_success "Updated .env with missing Docker settings"
+    else
+        log_success "Using existing .env configuration"
+    fi
+}
+
 # Load password from .env file
 get_postgres_password() {
-    if [ -f "$ENV_FILE" ]; then
-        grep -E "^POSTGRES_PASSWORD=" "$ENV_FILE" | cut -d= -f2-
-    else
-        echo ""
-    fi
+    get_env_value POSTGRES_PASSWORD
+}
+
+get_postgres_user() {
+    local user
+    user=$(get_env_value POSTGRES_USER)
+    echo "${user:-engram}"
+}
+
+get_postgres_db() {
+    local db
+    db=$(get_env_value POSTGRES_DB)
+    echo "${db:-engram}"
+}
+
+is_engram_postgres_running() {
+    docker ps --format '{{.Names}}' | grep -Fxq "engram-postgres"
 }
 
 # Run psql command with password
 run_psql() {
     local password
     password=$(get_postgres_password)
-    $DOCKER_COMPOSE exec -T -e PGPASSWORD="$password" postgres psql -U engram -d engram "$@"
+    local user
+    user=$(get_postgres_user)
+    local db
+    db=$(get_postgres_db)
+    $DOCKER_COMPOSE exec -T -e PGPASSWORD="$password" postgres psql -U "$user" -d "$db" "$@"
 }
 
 # Run pg_isready with password
 run_pg_isready() {
     local password
     password=$(get_postgres_password)
-    $DOCKER_COMPOSE exec -T -e PGPASSWORD="$password" postgres pg_isready -U engram -d engram "$@"
+    local user
+    user=$(get_postgres_user)
+    local db
+    db=$(get_postgres_db)
+    $DOCKER_COMPOSE exec -T -e PGPASSWORD="$password" postgres pg_isready -U "$user" -d "$db" "$@"
 }
 
 # Wait for PostgreSQL to be ready
@@ -245,6 +396,10 @@ verify_schema() {
 # Print connection info
 print_connection_info() {
     local port=$1
+    local user
+    user=$(get_postgres_user)
+    local db
+    db=$(get_postgres_db)
 
     echo ""
     log_header "🎉 Engram is Ready!"
@@ -252,11 +407,11 @@ print_connection_info() {
     echo -e "  ${GREEN}PostgreSQL:${NC}"
     echo -e "    Host:     localhost"
     echo -e "    Port:     $port"
-    echo -e "    Database: engram"
-    echo -e "    User:     engram"
+    echo -e "    Database: $db"
+    echo -e "    User:     $user"
     echo ""
     echo -e "  ${GREEN}Connection URL:${NC}"
-    echo -e "    postgresql://engram:***@localhost:$port/engram"
+    echo -e "    postgresql://$user:***@localhost:$port/$db"
     echo ""
     echo -e "  ${GREEN}Environment Variable:${NC}"
     echo -e "    export ENGRAM_DATABASE_URL=\"\$(grep ENGRAM_DATABASE_URL .env | cut -d= -f2-)\""
@@ -278,7 +433,9 @@ print_connection_info() {
 # -----------------------------------------------------------------------------
 
 cmd_up() {
-    local port=${1:-}
+    local requested_port=${1:-}
+    local port=""
+    local force_port_update=false
 
     log_header "🚀 Starting Engram"
 
@@ -287,7 +444,20 @@ cmd_up() {
 
     cd "$PROJECT_DIR"
 
-    # Find free port if not specified
+    # Reuse .env on repeat runs so secrets and ports stay stable.
+    if [ -n "$requested_port" ]; then
+        port=$requested_port
+        force_port_update=true
+        if ! is_port_available "$port" && ! is_engram_postgres_running; then
+            log_error "Port $port is already in use"
+            exit 1
+        fi
+        log_success "Using specified port: $port"
+    else
+        port=$(get_env_value POSTGRES_PORT)
+    fi
+
+    # Find a free port for first-time setup only.
     if [ -z "$port" ]; then
         log_info "Auto-detecting free port..."
         port=$(find_free_port $DEFAULT_PORT)
@@ -296,15 +466,18 @@ cmd_up() {
         fi
         log_success "Found free port: $port"
     else
-        if ! is_port_available "$port"; then
+        if [ "$force_port_update" != "true" ] && ! is_port_available "$port" && ! is_engram_postgres_running; then
             log_error "Port $port is already in use"
             exit 1
         fi
-        log_success "Using specified port: $port"
+        if [ "$force_port_update" != "true" ]; then
+            log_success "Using existing .env port: $port"
+        fi
     fi
 
-    # Create .env file
-    create_env_file "$port"
+    # Create .env once, then preserve user-managed secrets on later runs.
+    create_or_update_env_file "$port" "$force_port_update"
+    port=$(get_env_value POSTGRES_PORT)
 
     # Start containers
     log_info "Starting PostgreSQL container..."
@@ -423,7 +596,11 @@ cmd_shell() {
     log_info "Connecting to PostgreSQL shell..."
     local password
     password=$(get_postgres_password)
-    $DOCKER_COMPOSE exec -e PGPASSWORD="$password" postgres psql -U engram -d engram
+    local user
+    user=$(get_postgres_user)
+    local db
+    db=$(get_postgres_db)
+    $DOCKER_COMPOSE exec -e PGPASSWORD="$password" postgres psql -U "$user" -d "$db"
 }
 
 cmd_help() {
@@ -491,4 +668,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

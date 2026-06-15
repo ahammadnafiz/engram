@@ -46,6 +46,12 @@ The helper script wraps common compose flows:
 ./scripts/docker-setup.sh --reset
 ```
 
+The helper creates `.env` on the first run. On later runs it preserves existing
+values, including `ENGRAM_OPENAI_API_KEY`, embedding settings, and other local
+secrets. It only appends missing Docker defaults. Use
+`./scripts/docker-setup.sh --port 5433` when you intentionally want to change
+the local PostgreSQL port.
+
 ## Environment
 
 Local compose defaults:
