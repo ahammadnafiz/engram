@@ -1460,9 +1460,10 @@ class MemoryStore:
                         END AS event_type,
                         CASE
                             WHEN s.revision > 1 OR s.metadata ? 'previous_memory_id'
-                                THEN 1
+                                THEN 0
                             ELSE 2
                         END AS event_rank,
+                        s.created_at AS sort_at,
                         s.created_at AS occurred_at,
                         s.metadata->>'previous_memory_id' AS event_previous_memory_id,
                         s.superseded_by_memory_id AS event_superseded_by_memory_id,
@@ -1484,7 +1485,8 @@ class MemoryStore:
 
                     SELECT
                         'superseded' AS event_type,
-                        0 AS event_rank,
+                        1 AS event_rank,
+                        COALESCE(winner.created_at, s.superseded_at) AS sort_at,
                         s.superseded_at AS occurred_at,
                         NULL::text AS event_previous_memory_id,
                         s.superseded_by_memory_id AS event_superseded_by_memory_id,
@@ -1494,6 +1496,8 @@ class MemoryStore:
                     FROM scoped s
                     LEFT JOIN memory_lineages l
                         ON l.lineage_id = s.lineage_id
+                    LEFT JOIN agent_memory winner
+                        ON winner.memory_id = s.superseded_by_memory_id
                     WHERE $4::boolean = true
                         AND s.superseded_at IS NOT NULL
                 )
@@ -1501,7 +1505,8 @@ class MemoryStore:
                 FROM events
                 WHERE ($6::timestamptz IS NULL OR occurred_at >= $6)
                     AND ($7::timestamptz IS NULL OR occurred_at <= $7)
-                ORDER BY occurred_at DESC, event_rank ASC, revision DESC, memory_id DESC
+                ORDER BY sort_at DESC, event_rank ASC, occurred_at DESC,
+                    revision DESC, memory_id DESC
                 LIMIT $3
                 """,
                 agent_id,
