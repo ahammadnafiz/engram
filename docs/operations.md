@@ -165,6 +165,7 @@ docker compose exec -T postgres psql -U engram -d engram -c \
   "SELECT memory_type, fact, metadata->>'critical_slot' AS slot
    FROM agent_memory
    WHERE metadata->>'critical' = 'true'
+     AND status <> 'superseded'
      AND COALESCE(metadata->>'status', 'active') <> 'superseded'
    ORDER BY created_at DESC
    LIMIT 20;"
@@ -174,9 +175,9 @@ Superseded memories:
 
 ```bash
 docker compose exec -T postgres psql -U engram -d engram -c \
-  "SELECT fact, metadata->>'superseded_by' AS superseded_by
+  "SELECT fact, superseded_by_memory_id, lineage_id, revision
    FROM agent_memory
-   WHERE metadata->>'status' = 'superseded'
+   WHERE status = 'superseded'
    ORDER BY created_at DESC
    LIMIT 20;"
 ```
@@ -345,6 +346,9 @@ Chatbot commands:
 | Command | Behavior |
 |---------|----------|
 | `/remember <fact>` | store a durable fact immediately |
+| `/revise <memory_id> <fact>` | create a new active revision |
+| `/lineage <memory_id>` | show the current head and revision history |
+| `/history [active\|limit\|memory_id]` | show memory add/update timeline |
 | `/memories` | list recent chatbot memories |
 | `/search <query>` | run hybrid search and reinforce hits |
 | `/trace <query>` | inspect recall trace |

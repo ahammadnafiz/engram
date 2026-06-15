@@ -38,7 +38,7 @@ This is the broad API walkthrough. It covers:
 | Capability | APIs |
 |------------|------|
 | lifecycle | `connect()`, `close()`, async context manager |
-| memory CRUD | `add()`, `add_batch()`, `get()`, `update()`, `reinforce()`, `forget()`, `purge()` |
+| memory CRUD | `add()`, `add_batch()`, `get()`, `update()`, `revise()`, `get_current()`, `get_lineage()`, `explain_memory()`, `get_history()`, `reinforce()`, `forget()`, `purge()` |
 | search and recall | `search()`, `deep_search()`, `recall_critical()`, `trace_recall()` |
 | context blocks | `get_context_block()`, `get_memories()` |
 | evidence reading | composed from `deep_search()` + `get_memories()` + `engram.llm` |
@@ -148,7 +148,7 @@ export ENGRAM_CHATBOT_BROAD_MEMORY_CHARS=3600
 | fast prompt memory | `recall_critical()`, `get_context_block()` |
 | deep/debug prompt memory | `deep_search()`, `list_recent()`, hard-constraint and query-specific attention blocks, `build_context()` |
 | recall debugging | `trace_recall()` |
-| persistent facts | `add()`, `forget()`, `purge()`, `list_recent()` |
+| persistent facts | `add()`, `revise()`, `get_history()`, `forget()`, `purge()`, `list_recent()` |
 | search and reinforcement | `search()`, `reinforce()` |
 | durable conversation ledger | `record_turn()` |
 | background derivation | `process_memory_jobs()`, `run_memory_worker()` |
@@ -159,6 +159,9 @@ Chat commands:
 | Command | Behavior |
 |---------|----------|
 | `/remember <fact>` | store a durable fact immediately |
+| `/revise <memory_id> <fact>` | create a new active revision |
+| `/lineage <memory_id>` | show current head and revision history |
+| `/history [active\|limit\|memory_id]` | show memory add/update timeline |
 | `/memories` | show recent stored facts |
 | `/search <query>` | run hybrid search and reinforce hits |
 | `/trace <query>` | run `trace_recall()` |

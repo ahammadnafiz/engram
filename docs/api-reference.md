@@ -141,26 +141,55 @@ for memory in memories:
 ```text
 await engram.get(memory_id) -> Memory
 await engram.update(memory_id, *, content=None, importance=None, metadata=None) -> Memory
+await engram.revise(memory_id, *, content=None, importance=None, metadata=None, reason=None) -> Memory
+await engram.get_current(memory_id) -> Memory
+await engram.get_lineage(memory_id) -> MemoryLineage
+await engram.explain_memory(memory_id) -> MemoryExplanation
 await engram.reinforce(memory_id, importance_boost=0.1) -> Memory
 await engram.forget(memory_id) -> bool
 await engram.purge(agent_id, user_id=None) -> int
 await engram.list_recent(agent_id, user_id=None, limit=10) -> list[Memory]
+await engram.get_history(agent_id, *, user_id=None, limit=50, include_superseded=True, memory_types=None, since=None, until=None) -> list[MemoryHistoryEvent]
 await engram.get_memories(agent_id, *, user_id=None, session_id=None, metadata_filter=None, memory_types=None, limit=200) -> list[Memory]
 ```
 
 `get()` updates access metadata. `get_memories()` is a plain filtered read and
-does not rank by relevance.
+does not rank by relevance. Use `revise()` for user corrections: it creates a
+new active revision and marks the previous current memory superseded. Use
+`get_history()` for a user-facing timeline of added, revised, and superseded
+facts. Use `update()` only when you intentionally want an in-place edit.
 
 ```python
-memory = await engram.update(
-    memory.memory_id,
-    content="User is allergic to shellfish and cashews",
-    metadata={"source": "manual_correction"},
+old = await engram.add(
+    "User lives in Dhaka",
+    "assistant",
+    user_id="sarah",
+    metadata={"conflict_key": "assistant:sarah:profile:city"},
 )
 
-await engram.reinforce(memory.memory_id, importance_boost=0.2)
+new = await engram.revise(
+    old.memory_id,
+    content="User lives in Singapore",
+    metadata={"source": "manual_correction"},
+    reason="user_correction",
+)
+
+current = await engram.get_current(old.memory_id)
+lineage = await engram.get_lineage(old.memory_id)
+explanation = await engram.explain_memory(old.memory_id)
+
+assert current.memory_id == new.memory_id
+assert lineage.current_memory_id == new.memory_id
+assert explanation.memory.status == "superseded"
+
+await engram.reinforce(new.memory_id, importance_boost=0.2)
 recent = await engram.list_recent("assistant", user_id="sarah", limit=5)
-deleted = await engram.forget(memory.memory_id)
+history = await engram.get_history("assistant", user_id="sarah", limit=10)
+
+for event in history:
+    print(event.event_type, event.memory.revision, event.memory.content)
+
+deleted = await engram.forget(new.memory_id)
 ```
 
 ## Search And Recall
@@ -184,7 +213,8 @@ await engram.search(
 
 Modes are `"hybrid"`, `"semantic"`, and `"keyword"`. Hybrid search combines
 pgvector similarity, PostgreSQL full-text search, decay, and importance. Normal
-search hides memories where `metadata.status` is `"superseded"`.
+search hides memories whose first-class `status` column or compatibility
+`metadata.status` value is `"superseded"`.
 
 ```python
 results = await engram.search(

@@ -151,19 +151,70 @@ the search-ranked ones when it fills the prompt budget.
 
 ## Conflict resolution
 
-When a new memory shares a `conflict_key` with an older active one, Engram marks
-the old row superseded rather than deleting it.
+When a new memory shares a `conflict_key` with an older active one, Engram
+creates a new row in the same `lineage_id`, advances the lineage current head,
+and marks the old row superseded rather than deleting it.
 
 ```json
 {
   "status": "superseded",
+  "lineage_id": "lin_...",
+  "revision": 1,
   "superseded_by": "mem_new",
   "superseded_at": "2026-06-14T..."
 }
 ```
 
-Regular search hides superseded rows. The trace APIs still report their IDs, so
-when a correction goes wrong you can see exactly what got hidden and why.
+Regular search hides superseded rows by the first-class `status` column and the
+compatibility `metadata.status` value. Use `get_current(memory_id)` for the
+active head, `get_lineage(memory_id)` for all revisions, and
+`explain_memory(memory_id)` when you need to debug what superseded what.
+
+```python
+old = await engram.add(
+    "User lives in Dhaka",
+    "codex",
+    user_id="nafiz",
+    metadata={"conflict_key": "codex:nafiz:profile:city"},
+)
+new = await engram.revise(
+    old.memory_id,
+    content="User lives in Singapore",
+    reason="user_correction",
+)
+
+current = await engram.get_current(old.memory_id)
+lineage = await engram.get_lineage(old.memory_id)
+
+assert current.memory_id == new.memory_id
+assert [memory.status for memory in lineage.memories] == ["active", "superseded"]
+```
+
+The trace APIs still report superseded IDs, so when a correction goes wrong you
+can see exactly what got hidden and why.
+
+For user-facing history, use `get_history()`. It returns a timeline across the
+agent/user, not just one lineage.
+
+```python
+events = await engram.get_history(
+    "codex",
+    user_id="nafiz",
+    limit=20,
+    include_superseded=True,
+)
+
+for event in events:
+    print(event.event_type, event.occurred_at, event.memory.content)
+```
+
+Typical events are:
+
+| Event | Meaning |
+|-------|---------|
+| `added` | a first revision was stored |
+| `revised` | a new revision became the current memory |
+| `superseded` | an older memory was hidden from normal recall |
 
 ## Search
 
