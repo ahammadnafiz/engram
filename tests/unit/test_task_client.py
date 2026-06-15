@@ -262,8 +262,8 @@ class TestLongInputClient:
         eg._task_memory.create_checkpoint = AsyncMock(
             side_effect=lambda checkpoint: checkpoint
         )
-        eg.add = AsyncMock(
-            side_effect=[
+        eg.add_batch = AsyncMock(
+            return_value=[
                 Memory(
                     memory_id="mem_1",
                     agent_id="agent",
@@ -304,10 +304,12 @@ The agent must answer with citations. Next Wednesday is the review deadline.
         assert report.trace["time_notes"]
         checkpoint = eg._task_memory.create_checkpoint.call_args.args[0]
         assert checkpoint.metadata["long_input_manifest"]["title"] == "Vendor review"
-        first_add = eg.add.call_args_list[0].kwargs
-        assert first_add["metadata"]["source_event_id"] == "evt_1"
-        assert first_add["metadata"]["chunk_id"].startswith("chunk_")
-        assert first_add["metadata"]["quote_hash"]
+        batch_arg = eg.add_batch.call_args.args[0]
+        assert len(batch_arg) == 2
+        first_create = batch_arg[0]
+        assert first_create["metadata"]["source_event_id"] == "evt_1"
+        assert first_create["metadata"]["chunk_id"].startswith("chunk_")
+        assert first_create["metadata"]["quote_hash"]
 
     @pytest.mark.asyncio
     async def test_build_long_input_context_combines_recall_source_chunks_and_manifest(

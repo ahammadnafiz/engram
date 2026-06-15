@@ -951,31 +951,25 @@ REASON: [brief explanation]
                 if cand[2] >= similarity_threshold:
                     relevant_memories.append((cand[0], cand[1]))
 
-            # Quick duplicate check - if very high similarity to any memory, skip
+            # Quick duplicate check: skip facts whose raw cosine similarity to an
+            # existing memory is at/above the duplicate threshold. The embedding
+            # similarity is the authoritative signal; the prior lexical
+            # Jaccard/proper-noun heuristic silently mis-fired (it skipped
+            # distinct facts that shared entities and missed reworded
+            # duplicates), so it is gone.
             is_duplicate = False
             for cand in candidates:
-                content = cand[1]
                 if _similarity(cand) >= duplicate_threshold:
-                    # Check if this specific fact is the duplicate
-                    # (the existing_memories might match the user message, not the fact)
-                    # Do a quick content comparison
-                    fact_lower = fact.lower()
-                    content_lower = content.lower()
-                    if (
-                        fact_lower in content_lower
-                        or content_lower in fact_lower
-                        or self._similar_content(fact, content)
-                    ):
-                        is_duplicate = True
-                        result.operations.append(
-                            MemoryOperation(
-                                operation=MemoryOperationType.NOOP,
-                                content=fact,
-                                original_fact=fact,
-                                reason=f"Duplicate of existing memory: {content[:50]}...",
-                            )
+                    is_duplicate = True
+                    result.operations.append(
+                        MemoryOperation(
+                            operation=MemoryOperationType.NOOP,
+                            content=fact,
+                            original_fact=fact,
+                            reason=f"Duplicate of existing memory: {cand[1][:50]}...",
                         )
-                        break
+                    )
+                    break
 
             if is_duplicate:
                 continue
@@ -992,111 +986,6 @@ REASON: [brief explanation]
                 op.memory_type = mem_type
 
         return result
-
-    def _similar_content(self, a: str, b: str) -> bool:
-        """Quick check if two strings have similar content (without embeddings)."""
-        # Normalize
-        a_lower = a.lower()
-        b_lower = b.lower()
-
-        # Extract key entities (names, numbers, proper nouns pattern)
-
-        def extract_key_terms(text: str) -> set[str]:
-            words = set(text.split())
-            # Remove common words
-            stopwords = {
-                "the",
-                "a",
-                "an",
-                "is",
-                "are",
-                "was",
-                "were",
-                "user",
-                "user's",
-                "has",
-                "have",
-                "had",
-                "at",
-                "in",
-                "on",
-                "to",
-                "for",
-                "of",
-                "and",
-                "their",
-                "they",
-                "them",
-                "this",
-                "that",
-                "with",
-                "from",
-                "by",
-                "named",
-                "called",
-                "known",
-                "as",
-                "also",
-                "now",
-                "currently",
-            }
-            words -= stopwords
-            return words
-
-        a_words = extract_key_terms(a_lower)
-        b_words = extract_key_terms(b_lower)
-
-        if not a_words or not b_words:
-            return False
-
-        # Check for key entity overlap (names, places, etc.)
-        # These are likely proper nouns - capitalized in original
-        a_entities = {w for w in a.split() if w[0].isupper() and len(w) > 2}
-        b_entities = {w for w in b.split() if w[0].isupper() and len(w) > 2}
-
-        # If same entities mentioned, likely related
-        entity_overlap = len(a_entities & b_entities)
-        if entity_overlap >= 1 and len(a_entities | b_entities) <= 3:
-            # Same entity, check if same topic
-            topic_words = {
-                "linkedin",
-                "email",
-                "phone",
-                "birthday",
-                "bank",
-                "job",
-                "sister",
-                "brother",
-                "friend",
-                "girlfriend",
-                "boyfriend",
-                "cat",
-                "dog",
-                "pet",
-                "study",
-                "work",
-                "live",
-                "from",
-            }
-            a_topics = a_words & topic_words
-            b_topics = b_words & topic_words
-            if a_topics & b_topics:
-                return True
-
-        # Jaccard similarity - be conservative to avoid false positives
-        intersection = len(a_words & b_words)
-        union = len(a_words | b_words)
-
-        if union == 0:
-            return False
-
-        jaccard = intersection / union
-
-        # Higher threshold = fewer false positives (better to ADD than skip)
-        # 0.7 means 70% of words must overlap to be considered "similar"
-        threshold = 0.7
-
-        return jaccard > threshold
 
     async def summarize(
         self,

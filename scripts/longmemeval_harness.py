@@ -51,7 +51,9 @@ BENCHMARK_POLICY = MemoryPolicy(
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
+
+    from engram.memory.models import Memory, SearchResult
 
 
 DATASET_URLS = {
@@ -244,8 +246,8 @@ def parse_args() -> argparse.Namespace:
         "--deep-search",
         action="store_true",
         help=(
-            "Use Engram.search_evidence_set() with multi-query deep search "
-            "(LLM query expansion + merged hybrid searches) instead of "
+            "Use the harness search_evidence_set() with multi-query deep "
+            "search (LLM query expansion + merged hybrid searches) instead of "
             "single-query search. Improves recall for questions whose "
             "evidence spans sessions."
         ),
@@ -255,7 +257,7 @@ def parse_args() -> argparse.Namespace:
         choices=("none", "user", "assistant"),
         default="none",
         help=(
-            "Optional turn-role preference for Engram.search_evidence_set(). "
+            "Optional turn-role preference for the harness search_evidence_set(). "
             "Use 'user' for user-memory questions, 'assistant' for "
             "assistant-memory questions, or 'none' for neutral ranking."
         ),
@@ -607,6 +609,544 @@ async def build_expanded_context(
     return context
 
 
+# ============================================================================
+# Evidence selection and reading
+#
+# These helpers were relocated out of the Engram public API: they are
+# LongMemEval / QA-harness machinery (multi-call "chain-of-note" reading,
+# session-diversified evidence selection, and turn-window expansion keyed on
+# this benchmark's metadata schema), not general-purpose memory primitives.
+# They drive Engram only through its public API (search, deep_search,
+# get_memories, llm.complete), so the library itself stays domain-neutral.
+# ============================================================================
+
+
+async def search_evidence_set(
+    engram: Engram,
+    query: str,
+    agent_id: str,
+    *,
+    user_id: str | None = None,
+    limit: int = 10,
+    candidate_limit: int | None = None,
+    min_score: float = 0.0,
+    metadata_filter: dict[str, Any] | None = None,
+    memory_types: list[str] | None = None,
+    mode: str = "hybrid",
+    use_deep_search: bool = True,
+    rerank: bool = True,
+    diversify_metadata_key: str = "original_session_id",
+    max_per_group: int = 3,
+    preferred_role: str | None = None,
+    role_metadata_key: str = "turn_role",
+) -> list[SearchResult]:
+    """Retrieve a broad, diverse evidence set for aggregation questions.
+
+    Overfetches candidates (optionally via deep multi-query retrieval), applies
+    a small role-aware rank bias, then round-robins by session/group before
+    returning the final evidence set.
+    """
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    if max_per_group < 1:
+        raise ValueError("max_per_group must be >= 1")
+
+    max_search_limit = engram._settings.max_search_limit
+    overfetch = candidate_limit
+    if overfetch is None:
+        overfetch = limit * engram._settings.search_candidate_multiplier
+    overfetch = min(max(overfetch, limit), max_search_limit)
+
+    if use_deep_search:
+        candidates = await engram.deep_search(
+            query,
+            agent_id,
+            user_id=user_id,
+            limit=overfetch,
+            min_score=min_score,
+            metadata_filter=metadata_filter,
+            memory_types=memory_types,
+            mode=mode,
+            rerank=rerank,
+        )
+    else:
+        candidates = await engram.search(
+            query,
+            agent_id,
+            user_id=user_id,
+            limit=overfetch,
+            min_score=min_score,
+            metadata_filter=metadata_filter,
+            memory_types=memory_types,
+            mode=mode,
+            rerank=rerank,
+        )
+    if not candidates:
+        return []
+
+    preferred = preferred_role.strip().lower() if preferred_role else None
+
+    def role_rank_bias(result: SearchResult) -> float:
+        if preferred is None:
+            return 0.0
+        role = result.memory.metadata.get(role_metadata_key)
+        if not isinstance(role, str):
+            return 0.0
+        normalized = role.strip().lower()
+        if normalized == preferred:
+            return -1.5
+        if preferred == "user" and normalized in {"assistant", "system", "tool"}:
+            return 1.5
+        return 0.0
+
+    def group_key(result: SearchResult) -> str:
+        memory = result.memory
+        if memory.session_id:
+            return f"session:{memory.session_id}"
+        value = memory.metadata.get(diversify_metadata_key)
+        if value is not None:
+            return f"metadata:{value}"
+        return f"memory:{memory.memory_id}"
+
+    ranked = [
+        result
+        for _rank, result in sorted(
+            enumerate(candidates),
+            key=lambda item: (item[0] + role_rank_bias(item[1]), item[0]),
+        )
+    ]
+    groups: dict[str, list[SearchResult]] = {}
+    for result in ranked:
+        groups.setdefault(group_key(result), []).append(result)
+
+    selected: list[SearchResult] = []
+    selected_ids: set[str] = set()
+    for depth in range(max_per_group):
+        for group_results in groups.values():
+            if depth >= len(group_results):
+                continue
+            result = group_results[depth]
+            selected.append(result)
+            selected_ids.add(result.memory.memory_id)
+            if len(selected) >= limit:
+                return selected
+
+    for result in ranked:
+        if result.memory.memory_id in selected_ids:
+            continue
+        selected.append(result)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _metadata_int(metadata: dict[str, Any], key: str) -> int | None:
+    value = metadata.get(key)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _memory_window_group(memory: Memory, metadata_key: str) -> str | None:
+    if memory.session_id:
+        return str(memory.session_id)
+    value = memory.metadata.get(metadata_key)
+    return str(value) if value is not None else None
+
+
+async def get_neighboring_context_block(
+    engram: Engram,
+    results: list[SearchResult],
+    agent_id: str,
+    *,
+    user_id: str | None = None,
+    before: int = 2,
+    after: int = 2,
+    include_session_start: bool = False,
+    max_tokens: int | None = None,
+    token_counter: Callable[[str], int] | None = None,
+    memory_types: list[str] | None = None,
+    session_metadata_key: str = "original_session_id",
+    turn_metadata_key: str = "turn_index",
+    date_metadata_key: str = "haystack_date",
+    role_metadata_key: str = "turn_role",
+    group_limit: int = 200,
+    priority_window_results: int = 3,
+    prior_user_turns: int = 0,
+    context_order: str = "chronological",
+) -> tuple[str, list[dict[str, Any]]]:
+    """Expand retrieved turn memories with neighboring session memories.
+
+    Uses only stored Engram memories plus their session/turn metadata, read via
+    the public get_memories() API. Useful when a search hit is near the answer
+    but the necessary context is in adjacent turns from the same conversation.
+    """
+    if before < 0 or after < 0:
+        raise ValueError("before and after must be >= 0")
+    if group_limit < 1:
+        raise ValueError("group_limit must be >= 1")
+    if priority_window_results < 0:
+        raise ValueError("priority_window_results must be >= 0")
+    if prior_user_turns < 0:
+        raise ValueError("prior_user_turns must be >= 0")
+    if context_order not in {"chronological", "relevance"}:
+        raise ValueError("context_order must be 'chronological' or 'relevance'")
+
+    count = token_counter or (lambda text: max(1, len(text) // 4))
+    group_cache: dict[tuple[str, str], list[Memory]] = {}
+    selected: dict[str, tuple[tuple[int, int, int], Memory]] = {}
+    group_best_rank: dict[str, int] = {}
+
+    def remember(memory: Memory, priority: tuple[int, int, int]) -> None:
+        current = selected.get(memory.memory_id)
+        if current is None or priority < current[0]:
+            selected[memory.memory_id] = (priority, memory)
+
+    async def fetch_group(memory: Memory, group_key: str) -> list[Memory]:
+        cache_key = ("session" if memory.session_id else "metadata", group_key)
+        cached = group_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if memory.session_id:
+            group = await engram.get_memories(
+                agent_id,
+                user_id=user_id,
+                session_id=memory.session_id,
+                memory_types=memory_types,
+                limit=group_limit,
+            )
+        else:
+            group = await engram.get_memories(
+                agent_id,
+                user_id=user_id,
+                metadata_filter={session_metadata_key: group_key},
+                memory_types=memory_types,
+                limit=group_limit,
+            )
+        group_cache[cache_key] = group
+        return group
+
+    for rank, result in enumerate(results):
+        memory = result.memory
+        if rank < priority_window_results:
+            remember(memory, (rank, 0, 0))
+        else:
+            remember(memory, (priority_window_results, 0, rank))
+
+        turn_index = _metadata_int(memory.metadata, turn_metadata_key)
+        group_key = _memory_window_group(memory, session_metadata_key)
+        if turn_index is None or group_key is None:
+            continue
+        group_best_rank[group_key] = min(rank, group_best_rank.get(group_key, rank))
+
+        group = await fetch_group(memory, group_key)
+        by_turn = {
+            idx: item
+            for item in group
+            if (idx := _metadata_int(item.metadata, turn_metadata_key)) is not None
+        }
+        indexes = set(range(max(0, turn_index - before), turn_index + after + 1))
+        if include_session_start:
+            indexes.add(0)
+        for idx in indexes:
+            neighbor = by_turn.get(idx)
+            if neighbor is None:
+                continue
+            distance = abs(idx - turn_index)
+            if rank < priority_window_results:
+                remember(neighbor, (rank, 0 if distance == 0 else 1, distance))
+            else:
+                remember(neighbor, (priority_window_results + 1, rank, distance))
+        if prior_user_turns:
+            prior_users = [
+                item
+                for item in group
+                if (idx := _metadata_int(item.metadata, turn_metadata_key)) is not None
+                and idx < turn_index
+                and str(item.metadata.get(role_metadata_key, "")).lower() == "user"
+            ]
+            prior_users.sort(
+                key=lambda item: _metadata_int(item.metadata, turn_metadata_key) or 0,
+                reverse=True,
+            )
+            for prior in prior_users[:prior_user_turns]:
+                idx = _metadata_int(prior.metadata, turn_metadata_key)
+                assert idx is not None
+                distance = turn_index - idx
+                if rank < priority_window_results:
+                    remember(prior, (rank, 2, distance))
+                else:
+                    remember(prior, (priority_window_results + 1, rank, distance))
+
+    kept: list[Memory] = []
+    used = 0
+    for _priority, memory in sorted(selected.values(), key=lambda item: item[0]):
+        cost = count(memory.content)
+        if max_tokens is not None and kept and used + cost > max_tokens:
+            continue
+        kept.append(memory)
+        used += cost
+
+    def chronological_key(memory: Memory) -> tuple[str, str, int, str]:
+        return (
+            str(memory.metadata.get(date_metadata_key) or memory.created_at),
+            _memory_window_group(memory, session_metadata_key) or "",
+            _metadata_int(memory.metadata, turn_metadata_key) or 0,
+            memory.memory_id,
+        )
+
+    if context_order == "relevance":
+        kept.sort(
+            key=lambda memory: (
+                group_best_rank.get(
+                    _memory_window_group(memory, session_metadata_key) or "",
+                    len(results),
+                ),
+                *chronological_key(memory),
+            )
+        )
+    else:
+        kept.sort(key=chronological_key)
+    sources = [
+        {
+            "memory_id": memory.memory_id,
+            "session_id": memory.session_id,
+            "group": _memory_window_group(memory, session_metadata_key),
+            "turn_index": _metadata_int(memory.metadata, turn_metadata_key),
+            "date": memory.metadata.get(date_metadata_key),
+            "has_answer": bool(memory.metadata.get("has_answer")),
+        }
+        for memory in kept
+    ]
+    return "\n".join(memory.content for memory in kept), sources
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+
+    candidates = [stripped]
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start >= 0 and end > start:
+        candidates.insert(0, stripped[start : end + 1])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+async def _verify_aggregation_ledger(
+    engram: Engram,
+    *,
+    date_line: str,
+    context: str,
+    notes: str,
+    question: str,
+    slot_rules: str,
+    draft_ledger: dict[str, Any],
+    max_tokens: int,
+) -> str:
+    assert engram.llm is not None
+    return await engram.llm.complete(
+        f"{date_line}<memory_context>\n{context}\n</memory_context>\n\n"
+        f"<evidence_notes>\n{notes}\n</evidence_notes>\n\n"
+        f"<question>\n{question}\n</question>\n\n"
+        f"<slot_rules>\n{slot_rules}\n</slot_rules>\n\n"
+        "<draft_ledger>\n"
+        f"{json.dumps(draft_ledger, ensure_ascii=False)}\n"
+        "</draft_ledger>\n\n"
+        "Audit and correct the ledger against the raw memory context. "
+        "Return corrected JSON only, with no markdown or extra prose, using "
+        "the same schema as the draft. The final answer will be computed "
+        "from included rows, so missing or extra included rows directly "
+        "make the answer wrong. For count, list, or total questions, every "
+        "included row must be a distinct answer-bearing item, event, action, "
+        "or amount the question asks for. Exclude assistant tips, generic "
+        "examples, and anything outside the question's scope, moving it to "
+        "the excluded list with a reason rather than dropping it silently. "
+        "Merge only exact duplicates; keep genuinely separate items apart "
+        "even when they share an entity or category. For a single-answer "
+        "question about the current or latest state of a fact that changed "
+        "over time, keep only the most recent value by timestamp and exclude "
+        "earlier superseded values; never apply this recency rule to count, "
+        "sum, or list questions.",
+        system=(
+            "You audit structured evidence ledgers for memory QA. Be strict "
+            "about the requested slot and exhaustive about included rows."
+        ),
+        max_tokens=max(1536, max_tokens * 2),
+        temperature=0.0,
+    )
+
+
+async def answer_from_evidence(
+    engram: Engram,
+    *,
+    question: str,
+    context: str,
+    question_date: str | None = None,
+    max_tokens: int = 256,
+    reading: str = "direct",
+) -> str:
+    """Answer a question from an assembled memory evidence context.
+
+    ``reading="con"`` first extracts evidence notes, builds an include/exclude
+    aggregation ledger, then verifies the answer slot against both the ledger
+    and raw context. Returns "" if the engram has no LLM provider configured.
+    """
+    if engram.llm is None:
+        return ""
+    if reading not in {"direct", "con"}:
+        raise ValueError("reading must be 'direct' or 'con'")
+
+    date_line = f"Current date: {question_date}\n" if question_date else ""
+    system = (
+        "Answer the user's question using only the supplied memory evidence. "
+        "If the evidence is insufficient, say you do not know. Keep the "
+        "answer concise."
+    )
+    slot_rules = (
+        "Before answering, identify the exact slot requested by the "
+        "question. Do not substitute a related source, storage place, date, "
+        "or description for the requested entity. For where questions, "
+        "answer the place, merchant, or location of the action; do not "
+        "answer where a coupon, item, message, or information was found "
+        "unless that is exactly what was asked. If two nearby statements in "
+        "the same conversation identify the same event or entity, link them "
+        "internally before answering."
+    )
+
+    if reading == "con":
+        notes = await engram.llm.complete(
+            f"{date_line}<memory_context>\n{context}\n</memory_context>\n\n"
+            f"<question>\n{question}\n</question>\n\n"
+            "<instructions>\n"
+            "Work through the memory context turn by turn and quote every "
+            "part that could bear on the question. Do not skip a relevant "
+            "turn and do not summarize away detail. Then list the evidence, "
+            "including: "
+            "(1) candidate answers for the exact requested slot, "
+            "(2) nearby same-conversation facts that identify the same "
+            "event/entity, and (3) related but wrong-slot facts to avoid. "
+            "For count, total, or list questions, extract every distinct "
+            "candidate item/amount/event; do not stop after the first match. "
+            "Include category synonyms and subtypes that satisfy the "
+            "question, rather than relying only on exact surface words. "
+            "If a single statement describes several distinct things the "
+            "question asks about, extract each one separately. "
+            "Do not answer yet. If nothing is relevant, write exactly: "
+            "No relevant information.\n"
+            "</instructions>",
+            system=(
+                "You extract and verify evidence from conversation memory. "
+                "Be precise, exhaustive, and preserve dates. Miss nothing "
+                "that could answer the question."
+            ),
+            max_tokens=max(2048, max_tokens * 2),
+            temperature=0.0,
+        )
+        ledger = await engram.llm.complete(
+            f"{date_line}<memory_context>\n{context}\n</memory_context>\n\n"
+            f"<evidence_notes>\n{notes}\n</evidence_notes>\n\n"
+            f"<question>\n{question}\n</question>\n\n"
+            f"<slot_rules>\n{slot_rules}\n</slot_rules>\n\n"
+            "Build an aggregation ledger before answering. Return JSON only, "
+            "with no markdown or extra prose, in this shape: "
+            '{"operation":"count|sum|list|single",'
+            '"answer":"only for single-answer questions if known",'
+            '"insufficient":false,'
+            '"included":[{"entity":"...","action":"...","amount":null,'
+            '"source_quote":"...","reason":"..."}],'
+            '"excluded":[{"entity":"...","action":"...","amount":null,'
+            '"source_quote":"...","reason":"..."}]}. '
+            "The entity field must name the specific item, event, or "
+            "amount; do not use placeholder labels. "
+            "If the question asks how many, how much total, which items, or "
+            "asks for a list, make one row per candidate evidence item, as "
+            "either included or excluded. Deduplicate only true duplicates, "
+            "and keep genuinely separate items apart even when they share an "
+            "entity or category. Put anything that does not qualify in the "
+            "excluded list with a reason rather than dropping it silently. "
+            "The final count, sum, or list is computed from the included "
+            "rows, so each included row must be a distinct item the question "
+            "asks for. For totals, set the numeric amount on every included "
+            "row. Treat category synonyms and subtypes as candidates when "
+            "they satisfy the question. "
+            "For single-answer questions, use "
+            'operation "single" and set "answer" to the exact requested '
+            "slot. When the question asks for the current or latest state of "
+            "a fact that changed over time (a running total, status, amount, "
+            "or value the user updated), take the value from the most recent "
+            "memory by timestamp and mark earlier conflicting values as "
+            "excluded with reason 'superseded by a later update'. Do not "
+            "apply recency to count, sum, or list questions, where every "
+            "qualifying item counts regardless of when it was mentioned.",
+            system=(
+                "You build evidence ledgers for memory QA. Be exhaustive, "
+                "separate included from excluded evidence, and compute any "
+                "count or total explicitly."
+            ),
+            max_tokens=max(1536, max_tokens * 2),
+            temperature=0.0,
+        )
+        parsed_ledger = _parse_json_object(ledger)
+        if parsed_ledger is not None:
+            verified = await _verify_aggregation_ledger(
+                engram,
+                date_line=date_line,
+                context=context,
+                notes=notes,
+                question=question,
+                slot_rules=slot_rules,
+                draft_ledger=parsed_ledger,
+                max_tokens=max_tokens,
+            )
+            verified_ledger = _parse_json_object(verified)
+            if verified_ledger is not None:
+                ledger = json.dumps(verified_ledger, ensure_ascii=False)
+
+        prompt = (
+            f"{date_line}<memory_context>\n{context}\n</memory_context>\n\n"
+            f"<evidence_notes>\n{notes}\n</evidence_notes>\n\n"
+            f"<aggregation_ledger>\n{ledger}\n</aggregation_ledger>\n\n"
+            f"<question>\n{question}\n</question>\n\n"
+            f"<slot_rules>\n{slot_rules}\n</slot_rules>\n\n"
+            "Answer strictly from the included rows of the aggregation "
+            "ledger; ignore excluded rows. Derive the answer from the "
+            "operation: for a count question, count the included rows; for "
+            "a total, add the amounts on the included rows; for a list, "
+            "name each included row; for a single-answer question, give the "
+            "answer it records. Work the arithmetic out step by step over "
+            "the rows so the count or total is exact. If the ledger is "
+            "marked insufficient or has no included rows, reply exactly: "
+            "I do not know. Give only the final concise answer.\nAnswer:"
+        )
+    else:
+        prompt = (
+            f"{date_line}<memory_context>\n{context}\n</memory_context>\n\n"
+            f"<question>\n{question}\n</question>\n\n"
+            f"<slot_rules>\n{slot_rules}\n</slot_rules>\n\n"
+            "Give only the final concise answer.\nAnswer:"
+        )
+
+    return await engram.llm.complete(
+        prompt,
+        system=system,
+        max_tokens=max_tokens,
+        temperature=0.0,
+    )
+
+
 async def maybe_generate_answer(
     engram: Engram,
     *,
@@ -616,8 +1156,9 @@ async def maybe_generate_answer(
     max_tokens: int,
     reading: str = "direct",
 ) -> str:
-    """Generate an answer from retrieved context through public Engram APIs."""
-    return await engram.answer_from_evidence(
+    """Generate an answer from retrieved context through the harness reader."""
+    return await answer_from_evidence(
+        engram,
         question=question,
         question_date=question_date,
         context=context,
@@ -717,7 +1258,8 @@ async def run_sample(
                 await engram.add_batch(batch)
 
         if args.deep_search:
-            results = await engram.search_evidence_set(
+            results = await search_evidence_set(
+                engram,
                 query=sample["question"],
                 agent_id=agent_id,
                 limit=args.limit,
@@ -762,7 +1304,8 @@ async def run_sample(
                 max_tokens=args.max_context_tokens,
             )
         elif effective_context_strategy == "window":
-            context, context_sources = await engram.get_neighboring_context_block(
+            context, context_sources = await get_neighboring_context_block(
+                engram,
                 results,
                 agent_id,
                 before=args.evidence_window_size,

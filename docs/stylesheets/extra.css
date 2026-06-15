@@ -1,40 +1,76 @@
 :root {
-  --engram-ink: #111827;
+  --engram-ink: #1a1d21;
   --engram-muted: #5b6472;
-  --engram-border: #d8dee6;
+  --engram-border: #e6e8eb;
   --engram-panel: #ffffff;
-  --engram-panel-soft: #f6f8fa;
-  --engram-accent: #087f70;
-  --engram-accent-strong: #065f55;
+  --engram-panel-soft: #f7f8f9;
+  --engram-accent: #6d28d9;
+  --engram-accent-strong: #5b21b6;
+  --engram-accent-soft: #f2edfd;
   --engram-green: #2f8f46;
   --engram-amber: #b26b00;
-  --engram-code-panel: #f7f9fc;
-  --engram-code-border: #d4dce8;
-  --engram-code-text: #34434f;
-  --engram-code-muted: #7a8794;
-  --md-primary-fg-color: #0f766e;
-  --md-accent-fg-color: #2f8f46;
-  --md-typeset-a-color: #087f70;
+  --engram-code-panel: #fafafa;
+  --engram-code-border: #e6e8eb;
+  --engram-code-text: #2f3338;
+  --engram-code-muted: #8a929c;
+  --md-accent-fg-color: #6d28d9;
+  --md-typeset-a-color: #6d28d9;
   --md-default-fg-color: var(--engram-ink);
 }
 
 [data-md-color-scheme="slate"] {
   --engram-ink: #eef2f7;
   --engram-muted: #a7b0bf;
-  --engram-border: #2c3747;
-  --engram-panel: #111827;
-  --engram-panel-soft: #172033;
-  --engram-accent: #5eead4;
-  --engram-accent-strong: #99f6e4;
+  --engram-border: #2a2f37;
+  --engram-panel: #15181d;
+  --engram-panel-soft: #1b1f25;
+  --engram-accent: #b794f6;
+  --engram-accent-strong: #d6bcfa;
+  --engram-accent-soft: #211b33;
   --engram-green: #86efac;
   --engram-amber: #fbbf24;
-  --engram-code-panel: #101827;
-  --engram-code-border: #2a3749;
+  --engram-code-panel: #15181d;
+  --engram-code-border: #2a2f37;
   --engram-code-text: #d9e2ec;
   --engram-code-muted: #8795a8;
-  --md-primary-fg-color: #0f766e;
-  --md-accent-fg-color: #86efac;
-  --md-typeset-a-color: #5eead4;
+  --md-accent-fg-color: #b794f6;
+  --md-typeset-a-color: #b794f6;
+}
+
+/* Neural-violet active states in the sidebar nav and "On this page" TOC */
+.md-nav__link--active,
+.md-nav__link:hover,
+.md-nav__item .md-nav__link--active {
+  color: var(--engram-accent);
+}
+
+.md-nav__link--active {
+  font-weight: 700;
+}
+
+/* Soft highlighted active item, like the screenshot's left rail */
+.md-nav--primary .md-nav__item .md-nav__link--active {
+  background: var(--engram-accent-soft);
+  border-radius: 6px;
+}
+
+/* Primary CTA uses the neural accent (the white/black header leaves
+   --md-primary-fg-color neutral, which would otherwise wash the button out). */
+.md-typeset .md-button--primary {
+  background-color: var(--engram-accent);
+  border-color: var(--engram-accent);
+  color: #ffffff;
+}
+
+.md-typeset .md-button--primary:hover,
+.md-typeset .md-button--primary:focus {
+  background-color: var(--engram-accent-strong);
+  border-color: var(--engram-accent-strong);
+  color: #ffffff;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary {
+  color: #15181d;
 }
 
 .md-header,
@@ -233,22 +269,45 @@
   margin: 0;
 }
 
-.md-typeset .grid.cards.engram-doc-cards > ul {
-  gap: 0.8rem;
+.md-typeset .grid.cards > ul {
+  gap: 1rem;
 }
 
-.md-typeset .grid.cards.engram-doc-cards > ul > li {
-  border-color: var(--engram-border);
-  border-radius: 8px;
+.md-typeset .grid.cards > ul > li {
+  border: 1px solid var(--engram-border);
+  border-radius: 12px;
   box-shadow: none;
+  padding: 1.3rem 1.4rem;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
-.md-typeset .grid.cards.engram-doc-cards > ul > li:hover {
-  border-color: var(--engram-accent);
-  box-shadow: 0 8px 24px rgba(15, 118, 110, 0.12);
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: color-mix(in srgb, var(--engram-accent) 55%, var(--engram-border));
+  box-shadow: 0 6px 20px rgba(26, 29, 33, 0.06);
+  transform: translateY(-1px);
 }
 
-.md-typeset .grid.cards.engram-doc-cards .twemoji {
+/* Icon sits on its own line above the title, like the screenshot */
+.md-typeset .grid.cards > ul > li > p:first-child .twemoji,
+.md-typeset .grid.cards .twemoji {
+  color: var(--engram-accent);
+}
+
+.md-typeset .grid.cards > ul > li > p:first-child .twemoji svg {
+  height: 1.5rem;
+  width: 1.5rem;
+}
+
+.md-typeset .grid.cards > ul > li strong {
+  color: var(--engram-ink);
+  font-weight: 700;
+}
+
+.md-typeset .grid.cards > ul > li a {
+  color: var(--engram-ink);
+}
+
+.md-typeset .grid.cards > ul > li:hover a {
   color: var(--engram-accent);
 }
 

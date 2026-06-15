@@ -313,13 +313,30 @@ python examples/long_input_usage.py
 python examples/chatbot.py
 ```
 
-For the real OpenAI-backed chatbot, the default is inline memory-job processing:
-each answer is followed by `process_memory_jobs()` so new facts become
-available immediately. For lower interactive latency, set
-`ENGRAM_CHATBOT_MEMORY_JOBS=deferred` and run `run_memory_worker()` in a
-separate process.
+For the real OpenAI-backed chatbot, the production default is low-latency
+recall plus deferred memory-job processing:
 
-The chatbot also adds a bounded recent-memory safety net for broad recall
+```bash
+export ENGRAM_CHATBOT_RECALL_MODE=fast
+export ENGRAM_CHATBOT_MEMORY_JOBS=deferred
+export ENGRAM_CHATBOT_RERANK=auto
+python examples/chatbot.py
+```
+
+`fast` performs one embedding-backed memory context lookup and deterministic
+critical-memory recall before the OpenAI chat call. New facts are extracted
+after the reply by `process_memory_jobs()` or `run_memory_worker()` in a separate
+process.
+
+For broad recall evaluation, use `ENGRAM_CHATBOT_RECALL_MODE=deep`. For
+retrieval debugging, use `ENGRAM_CHATBOT_RECALL_MODE=debug`, which includes
+`trace_recall()` output in the prompt and turn metadata.
+
+`ENGRAM_CHATBOT_RERANK=auto` keeps reranking off in `fast` mode and enables it
+in `deep` and `debug`. Set it to `true` to force reranking for every mode, or
+`false` to disable it everywhere.
+
+`deep` and `debug` also add a bounded recent-memory safety net for broad recall
 questions. Tune `ENGRAM_CHATBOT_BROAD_MEMORY_LIMIT` and
 `ENGRAM_CHATBOT_BROAD_MEMORY_CHARS` if your prompt budget is tight.
 

@@ -41,7 +41,7 @@ This is the broad API walkthrough. It covers:
 | memory CRUD | `add()`, `add_batch()`, `get()`, `update()`, `reinforce()`, `forget()`, `purge()` |
 | search and recall | `search()`, `deep_search()`, `recall_critical()`, `trace_recall()` |
 | context blocks | `get_context_block()`, `get_memories()` |
-| evidence retrieval | `search_evidence_set()`, `get_neighboring_context_block()`, `answer_from_evidence()` |
+| evidence reading | composed from `deep_search()` + `get_memories()` + `engram.llm` |
 | graph | `relate()`, `traverse()`, `traverse_many()`, `render_graph_context()` |
 | sessions | `session()` |
 | task memory | `start_task()`, `record_event()`, `record_turn()`, `list_events()`, `create_checkpoint()`, `build_context()`, `process_memory_jobs()`, task status APIs |
@@ -68,9 +68,8 @@ Important APIs:
 - `record_long_input()`
 - `build_long_input_context()`
 - `trace_recall()`
-- `search_evidence_set()`
-- `get_neighboring_context_block()`
-- `answer_from_evidence()`
+- `deep_search()`
+- `get_context_block()`
 - `build_context()`
 
 The pattern is useful for legal documents, specifications, research packets, and
@@ -100,19 +99,43 @@ python examples/chatbot.py
 
 The chatbot is a real OpenAI-backed chat loop using Engram memory. It fails fast
 without `ENGRAM_OPENAI_API_KEY`, builds Engram context before every model call,
-records every turn, and processes memory jobs so later replies can recall
-durable facts from the conversation.
+records every turn, and queues memory jobs so later replies can recall durable
+facts from the conversation.
 
-By default the chatbot processes memory jobs inline after each reply. For lower
-chat latency, defer extraction and run a separate worker:
+By default the chatbot uses the production-oriented fast path:
 
 ```bash
+export ENGRAM_CHATBOT_RECALL_MODE=fast
 export ENGRAM_CHATBOT_MEMORY_JOBS=deferred
+export ENGRAM_CHATBOT_RERANK=auto
 ```
 
-For broad memory-evaluation questions, the chatbot also includes a bounded
-recent-memory safety net plus smaller hard-constraint and query-specific
-attention blocks in the prompt. Tune the safety net with:
+`fast` does one embedding-backed context lookup plus deterministic critical
+memory recall before the OpenAI chat call. Memory extraction is queued after the
+reply; run `run_memory_worker()` or call `process_memory_jobs()` from a separate
+process to ingest new facts.
+
+`ENGRAM_CHATBOT_RERANK=auto` keeps reranking off in `fast` mode and enables it
+in `deep` and `debug` mode. Set `ENGRAM_CHATBOT_RERANK=true` to force reranking
+for every mode, or `false` to disable it everywhere.
+
+For high-recall evaluation questions, enable the broader prompt context:
+
+```bash
+export ENGRAM_CHATBOT_RECALL_MODE=deep
+```
+
+For recall debugging, include `trace_recall()` metadata in the prompt and stored
+turn metadata:
+
+```bash
+export ENGRAM_CHATBOT_RECALL_MODE=debug
+```
+
+`deep` and `debug` include a bounded recent-memory safety net plus smaller
+hard-constraint and query-specific attention blocks in the prompt. They also
+rerank retrieved candidates when `ENGRAM_CHATBOT_RERANK=auto`. Tune the safety
+net with:
 
 ```bash
 export ENGRAM_CHATBOT_BROAD_MEMORY_LIMIT=60
@@ -122,7 +145,9 @@ export ENGRAM_CHATBOT_BROAD_MEMORY_CHARS=3600
 | Capability | API |
 |------------|-----|
 | real chat response | `engram.llm.complete_full()` |
-| prompt memory | `get_context_block()`, `trace_recall()`, `deep_search()`, `list_recent()`, hard-constraint and query-specific attention blocks, `build_context()` |
+| fast prompt memory | `recall_critical()`, `get_context_block()` |
+| deep/debug prompt memory | `deep_search()`, `list_recent()`, hard-constraint and query-specific attention blocks, `build_context()` |
+| recall debugging | `trace_recall()` |
 | persistent facts | `add()`, `forget()`, `purge()`, `list_recent()` |
 | search and reinforcement | `search()`, `reinforce()` |
 | durable conversation ledger | `record_turn()` |
@@ -146,18 +171,17 @@ Chat commands:
 
 ## How The Chatbot Builds Context
 
-The chatbot combines:
+In `fast` mode the chatbot combines:
 
 1. system prompt
-2. `get_context_block()` memory block
-3. `trace_recall()` recall trace
-4. `deep_search()` high-recall memory block
-5. bounded `list_recent()` memory safety net
-6. hard-constraint attention block for avoidances, cancellations, owners, and thresholds
-7. query-specific attention block for food, scheduling, update, and launch-rule questions
-8. `build_context()` task memory block
-9. recent in-process sliding window
-10. current user message
+2. `recall_critical()` deterministic critical memories
+3. `get_context_block()` memory block
+4. recent in-process sliding window
+5. current user message
+
+In `deep` mode it also adds `deep_search()`, bounded `list_recent()` safety-net
+memory, hard-constraint attention, query-specific attention, and `build_context()`
+task memory. In `debug` mode it adds `trace_recall()` on top of `deep`.
 
 That mix keeps the prompt useful for short sessions, long sessions, interrupted
 work, and resumed tasks.

@@ -1,15 +1,17 @@
 # Quickstart
 
-This guide starts a local PostgreSQL + pgvector database and runs the core
-memory flows against the current API.
+This walks you through a local Postgres setup and the main things Engram does:
+store a fact, search for it, pin a critical one, and trace why recall did or
+didn't include it. It should take about ten minutes.
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.10 or newer
 - Docker and Docker Compose
 - One embedding provider
 
-For a local setup with no embedding API key, use `sentence-transformers`.
+If you don't have an embedding API key, use `sentence-transformers`. It runs
+locally and needs nothing else.
 
 ## Install
 
@@ -19,7 +21,7 @@ cd engram
 pip install -e ".[dev,examples,sentence-transformers]"
 ```
 
-For OpenAI-backed embeddings and LLM features:
+If you'd rather use OpenAI for embeddings and the LLM features:
 
 ```bash
 pip install -e ".[dev,examples,openai]"
@@ -32,23 +34,27 @@ docker compose up -d postgres
 docker compose ps postgres
 ```
 
-The compose defaults match `.env.example`:
+The compose defaults line up with `.env.example`:
 
 ```bash
 export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
 ```
 
-Engram initializes the schema on `connect()`, including `vector`, `pg_trgm`,
-tables, indexes, migrations, text-search config, and vector dimension alignment.
+The first time you call `connect()`, Engram sets up everything it needs: the
+`vector` and `pg_trgm` extensions, the tables and indexes, the text-search
+config, and a vector column sized to your embedding model. You never run a
+migration by hand for normal use.
 
-## Configure Local Embeddings
+## Configure embeddings
+
+For the local option:
 
 ```bash
 export ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
 export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
 ```
 
-OpenAI alternative:
+For OpenAI instead:
 
 ```bash
 export ENGRAM_EMBEDDING_PROVIDER=openai
@@ -59,9 +65,9 @@ export ENGRAM_LLM_MODEL=gpt-4o-mini
 export ENGRAM_OPENAI_API_KEY=sk-...
 ```
 
-## Store And Search A Fact
+## Store and search a fact
 
-Create `quickstart_memory.py`:
+Save this as `quickstart_memory.py`:
 
 ```python
 import asyncio
@@ -99,10 +105,16 @@ Run it:
 python quickstart_memory.py
 ```
 
-## Trace Critical Memory
+The search query never mentions "dark mode," but the fact still comes back. That
+is the vector half of hybrid search doing its job. `main_content` holds the raw
+exchange for context and is not embedded; only the fact is.
 
-Policies can type and pin critical facts. The `coding_agent` policy marks repo
-constraints as critical and gives them deterministic conflict slots.
+## Pin and trace a critical fact
+
+Some facts should never drop out of the prompt just because a query ranked other
+things higher. A `MemoryPolicy` decides which ones. The `coding_agent` policy
+treats repo constraints as critical and gives them a stable conflict slot, so a
+later correction supersedes the old value instead of piling up next to it.
 
 ```python
 import asyncio
@@ -134,17 +146,18 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Expected behavior:
+Here's what you should see:
 
-- the memory is typed as `constraint`
-- metadata includes `critical`, `critical_slot`, and `conflict_key`
-- `trace_recall()` includes it before ordinary search-ranked memories
+- the memory is typed `constraint`
+- its metadata carries `critical`, `critical_slot`, and `conflict_key`
+- `trace_recall()` puts it ahead of the ordinary search-ranked memories, and
+  `missing_expected_terms` comes back empty
 
-## Store Conversation Facts
+## Store facts from a conversation
 
-`add_conversation()` needs an LLM provider. It extracts facts from a user and
-assistant exchange, compares them with existing memories, and stores only useful
-updates.
+`add_conversation()` needs an LLM provider. It reads a user/assistant exchange,
+pulls out the durable facts, checks them against what you already have, and only
+writes the ones that add something.
 
 ```python
 memories = await engram.add_conversation(
@@ -158,10 +171,10 @@ for memory in memories:
     print(memory.memory_type, memory.content, memory.metadata)
 ```
 
-## Use Task Memory
+## Track resumable work
 
-Task memory stores resumable agent work: the task record, raw events,
-checkpoints, and background jobs.
+Task memory is for work that outlives one reply: the task record, the raw events,
+checkpoints, and the background jobs that turn events into memories.
 
 ```python
 task = await engram.start_task(
@@ -188,13 +201,14 @@ context = await engram.build_context(
 print(context.text)
 ```
 
-For production, run `run_memory_worker()` in a separate worker process instead
-of processing jobs inline.
+`process_memory_jobs()` runs the queue inline, which is handy in a script. In
+production, run `run_memory_worker()` in its own process so ingestion doesn't
+block the request.
 
-## Use Long Input
+## Ingest a long document
 
-Use long input for legal documents, specs, large prompts, or task packets where
-the exact source matters.
+Reach for long input when the exact source matters: contracts, specs, large
+prompts, or a task packet you'll answer questions about later.
 
 ```python
 contract_text = """
@@ -230,7 +244,10 @@ print(context.text)
 print(context.trace["missing_expected_terms"])
 ```
 
-## Run Included Examples
+Each chunk keeps its character span and a content hash, so an answer can point
+back to the exact text it came from.
+
+## Run the examples
 
 ```bash
 python examples/basic_usage.py
@@ -238,12 +255,14 @@ python examples/long_input_usage.py
 python examples/chatbot.py
 ```
 
-`examples/chatbot.py` is a real OpenAI-backed chatbot. It retrieves Engram
-memory before each model call, records the turn, processes memory jobs, and
-offers small operational commands for search, trace, context, task state, and
-manual memory cleanup.
+`examples/chatbot.py` is a real OpenAI-backed chatbot. It pulls Engram memory
+before each model call, records the turn, and queues memory jobs by default. Set
+`ENGRAM_CHATBOT_RECALL_MODE=deep` for broad high-recall retrieval, or `debug` to
+see `trace_recall()` in the prompt and turn metadata. With
+`ENGRAM_CHATBOT_RERANK=auto`, the deep and debug modes rerank candidates while
+fast mode stays low-latency.
 
-## Verify Health
+## Check health
 
 ```python
 async with Engram() as engram:
@@ -252,15 +271,15 @@ async with Engram() as engram:
     print(health["components"])
 ```
 
-## Clean Up
+## Clean up
 
-Stop containers without deleting data:
+Stop the containers but keep the data:
 
 ```bash
 docker compose down
 ```
 
-Delete the local database volume:
+Drop the local database volume too:
 
 ```bash
 docker compose down -v

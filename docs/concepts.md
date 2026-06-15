@@ -1,26 +1,27 @@
-# Core Concepts
+# Core concepts
 
-This page explains the memory model behind the current Engram API.
+This page covers the memory model behind the Engram API: how memories are
+stored, typed, pinned, searched, and traced.
 
-## Memory Is Layered
+## Memory is layered
 
-Engram does not treat memory as one table of text. It separates durable state by
-what the agent needs to do with it.
+Engram doesn't dump everything into one table of text. It splits durable state
+by what the agent actually needs to do with it.
 
 | Layer | Stored in | Used for |
 |-------|-----------|----------|
 | Fact memory | `agent_memory` | search, deterministic recall, conflict resolution |
-| Graph memory | `memory_relations` | related decisions, constraints, facts, and tool results |
-| Session memory | `agent_sessions` | conversation grouping and rolling summaries |
+| Graph memory | `memory_relations` | linking related decisions, constraints, facts, and tool results |
+| Session memory | `agent_sessions` | grouping a conversation and its rolling summary |
 | Task memory | `agent_task_runs`, `agent_events`, `agent_checkpoints`, `memory_jobs` | resumable long-running work |
 
-Small chatbots can start with fact memory. Coding agents, legal review agents,
-research agents, and assistants that run for days should use task memory and
-fact memory together.
+A small chatbot can live entirely in fact memory. Agents that run for hours or
+days, such as coding, legal-review, or research agents, will want task memory
+and fact memory together.
 
-## Two-Column Fact Memory
+## Facts have two columns
 
-A memory stores a concise fact and optional source context.
+A memory holds a short fact and, optionally, the context it came from.
 
 ```python
 memory = await engram.add(
@@ -33,30 +34,33 @@ memory = await engram.add(
 
 | Field | Embedded | Role |
 |-------|----------|------|
-| `content` / `fact` | yes | concise fact for vector and keyword search |
-| `main_content` | no | source conversation, quote, document chunk, or other support |
+| `fact` | yes | the concise fact, used for vector and keyword search |
+| `content` | yes | backward-compatible alias of `fact` |
+| `main_content` | no | the source conversation, quote, or document chunk |
 
-This keeps embedding cost low while preserving the context that produced the
-fact.
+Only the fact gets embedded, so you keep embedding costs down without throwing
+away the context that produced it. Write new code against `fact` and
+`main_content`. `content` is kept so older `engram.add(content=...)` calls and
+existing rows keep working.
 
-## Memory Types
+## Memory types
 
-Every memory has a `memory_type`.
+Every memory carries a `memory_type`.
 
 | Type | Example |
 |------|---------|
-| `semantic` | generic durable fact |
-| `episodic` | dated event or narrative |
-| `procedural` | rule or process |
+| `semantic` | a generic durable fact |
+| `episodic` | a dated event or narrative |
+| `procedural` | a rule or process |
 | `profile` | name, city, allergy, manager |
 | `project` | codename, owner, launch date, target metric |
-| `task` | requirement, pending work, completed work |
+| `task` | a requirement, pending work, or completed work |
 | `preference` | communication style, UI preference |
-| `constraint` | hard rule, deadline, safety limit |
-| `decision` | correction, approval, chosen approach |
-| `tool_result` | pytest output, load test result, API response |
+| `constraint` | a hard rule, deadline, or safety limit |
+| `decision` | a correction, approval, or chosen approach |
+| `tool_result` | pytest output, a load-test result, an API response |
 
-Filter by type when a prompt has a narrow purpose.
+Filter by type when a prompt only needs one slice of memory.
 
 ```python
 constraints = await engram.search(
@@ -67,14 +71,11 @@ constraints = await engram.search(
 )
 ```
 
-## Memory Policies
+## Policies
 
-`MemoryPolicy` runs before storage. It can:
-
-- infer a more specific `memory_type`
-- mark a memory as critical
-- assign a deterministic `critical_slot`
-- derive a scoped `conflict_key`
+A `MemoryPolicy` runs just before a memory is stored. It can infer a more
+specific `memory_type`, flag the memory as critical, give it a stable
+`critical_slot`, and derive a scoped `conflict_key`.
 
 ```python
 async with Engram(memory_policy="coding_agent") as engram:
@@ -88,15 +89,18 @@ async with Engram(memory_policy="coding_agent") as engram:
     print(memory.metadata["critical_slot"])
 ```
 
-Built-in policies:
+Three policies ship with Engram:
 
-| Policy | Use |
-|--------|-----|
+| Policy | Use it for |
+|--------|------------|
 | `default` | personal assistants and general agents |
 | `legal` | legal or exact-document review |
-| `coding_agent` | repository constraints, implementation decisions, tool output |
+| `coding_agent` | repo constraints, implementation decisions, tool output |
 
-Custom policies use `TypeRule` and `SlotRule`.
+The default ships with generic rules only: durable personal facts (name, city,
+manager, communication style) plus allergy handling. Domain vocabulary belongs
+in `legal`, `coding_agent`, or a policy you write yourself with `TypeRule` and
+`SlotRule`.
 
 ```python
 from engram import MemoryPolicy, SlotRule, TypeRule
@@ -117,10 +121,10 @@ async with Engram(memory_policy=support_policy) as engram:
     await engram.add("Account plan is Enterprise", "support-agent")
 ```
 
-## Critical Memory
+## Critical memory
 
-Critical facts should not depend only on vector similarity. Policy metadata lets
-Engram recall them directly.
+Some facts are too important to leave to vector similarity. Policy metadata lets
+Engram recall them directly, no query required.
 
 ```json
 {
@@ -132,7 +136,7 @@ Engram recall them directly.
 }
 ```
 
-Use `recall_critical()` when you need the pinned facts directly.
+Call `recall_critical()` when you want those pinned facts on their own:
 
 ```python
 critical = await engram.recall_critical(
@@ -142,13 +146,13 @@ critical = await engram.recall_critical(
 )
 ```
 
-`trace_recall()` puts critical memories ahead of search-ranked memories in the
-prompt budget.
+`trace_recall()` already does this for you: it places critical memories ahead of
+the search-ranked ones when it fills the prompt budget.
 
-## Conflict Resolution
+## Conflict resolution
 
-When a new memory has the same `conflict_key` as an older active memory, Engram
-marks the older row as superseded instead of deleting it.
+When a new memory shares a `conflict_key` with an older active one, Engram marks
+the old row superseded rather than deleting it.
 
 ```json
 {
@@ -158,41 +162,41 @@ marks the older row as superseded instead of deleting it.
 }
 ```
 
-Normal search hides superseded rows. Trace APIs still report superseded IDs so
-you can debug corrections.
+Regular search hides superseded rows. The trace APIs still report their IDs, so
+when a correction goes wrong you can see exactly what got hidden and why.
 
 ## Search
 
-`search()` supports three modes:
+`search()` runs in one of three modes.
 
-| Mode | Behavior |
-|------|----------|
-| `hybrid` | vector search + full-text search + decay + importance |
-| `semantic` | vector similarity |
-| `keyword` | PostgreSQL full-text search |
+| Mode | What it does |
+|------|--------------|
+| `hybrid` | vector search, full-text search, recency decay, and importance, fused together |
+| `semantic` | vector similarity only |
+| `keyword` | PostgreSQL full-text search only |
 
-Search also supports `metadata_filter`, `memory_types`, `min_score`, and
-optional local reranking.
+It also takes `metadata_filter`, `memory_types`, `min_score`, and optional local
+reranking.
 
 ```python
 results = await engram.search(
-    "black friday latency target",
+    "API latency budget for launch",
     "codex",
     user_id="nafiz",
-    metadata_filter={"project": "atlas_checkout"},
+    metadata_filter={"project": "payments"},
     memory_types=["project", "constraint", "tool_result"],
     mode="hybrid",
 )
 ```
 
-Use `deep_search()` for broad prompts. It asks the configured LLM for query
-variants and fuses the result ranks. Without an LLM provider, it behaves like
-one `search()` call.
+For broad or open-ended prompts, use `deep_search()`. It asks the configured LLM
+for a few query variants, runs them, and fuses the rankings. With no LLM
+provider it just falls back to a single `search()`.
 
-## Recall Observability
+## Recall observability
 
-`trace_recall()` answers the question "why did this memory appear or disappear
-from the prompt?"
+`trace_recall()` answers one question: why did this memory show up in the prompt,
+or why didn't it?
 
 ```python
 trace = await engram.trace_recall(
@@ -204,20 +208,20 @@ trace = await engram.trace_recall(
 )
 ```
 
-| Field | Debug question |
-|-------|----------------|
-| `critical_memory_ids` | Was it pinned as critical? |
-| `search_memory_ids` | Did search retrieve it? |
-| `ranked_memory_ids` | Was it eligible after dedupe? |
-| `kept_memory_ids` | Did it fit in the final context? |
-| `trimmed_memory_ids` | Was it cut by token budget? |
-| `superseded_memory_ids` | Was an old fact hidden by conflict rules? |
-| `missing_expected_terms` | Did caller-provided required terms fail to appear? |
+| Field | Tells you |
+|-------|-----------|
+| `critical_memory_ids` | was it pinned as critical? |
+| `search_memory_ids` | did search retrieve it? |
+| `ranked_memory_ids` | did it survive dedupe? |
+| `kept_memory_ids` | did it fit the final context? |
+| `trimmed_memory_ids` | did the token budget cut it? |
+| `superseded_memory_ids` | did conflict resolution hide an older value? |
+| `missing_expected_terms` | did a term you required fail to appear? |
 
-## Graph Relations
+## Graph relations
 
-Graph relations connect memories, not tasks. Use them when one retrieved fact
-should bring along related decisions, constraints, or tool results.
+Relations connect memories to each other. Reach for them when one retrieved fact
+should drag along the decisions, constraints, or results tied to it.
 
 ```python
 requirement = await engram.add(
@@ -247,18 +251,18 @@ graph = await engram.traverse_many(
 block = engram.render_graph_context(graph, max_tokens=800)
 ```
 
-## Task Memory
+## Task memory
 
-Task memory is for work that spans turns or process restarts.
+Task memory holds work that spans turns or survives a process restart.
 
-| Model | Meaning |
-|-------|---------|
-| `TaskRun` | goal, status, owner, outcome |
-| `AgentEvent` | raw ledger event |
-| `TaskCheckpoint` | compact state snapshot |
-| `MemoryJob` | background derivation work |
+| Model | What it is |
+|-------|------------|
+| `TaskRun` | the goal, status, owner, and outcome |
+| `AgentEvent` | a raw ledger event |
+| `TaskCheckpoint` | a compact state snapshot |
+| `MemoryJob` | a background derivation job |
 
-Typical loop:
+The usual loop:
 
 ```python
 task = await engram.start_task("Refactor the memory framework", "codex")
@@ -268,11 +272,12 @@ await engram.record_turn(task.task_run_id, user_message, response)
 await engram.process_memory_jobs(limit=10)
 ```
 
-Run `run_memory_worker()` in a worker process for production.
+In production, run `run_memory_worker()` in its own process instead of
+processing jobs inline.
 
-## Long Input
+## Long input
 
-Long prompts and documents should be chunked and source-anchored.
+Long prompts and documents get chunked and anchored to their source.
 
 ```python
 report = await engram.record_long_input(
@@ -288,25 +293,25 @@ context = await engram.build_long_input_context(
 )
 ```
 
-Each chunk records a chunk ID, kind, heading, character span, quote hash, source
-event ID, and metadata. Use source chunks for legal, financial, compliance, or
-exact-document answers. Use distilled memories for speed and continuity.
+Each chunk records a chunk ID, kind, heading, character span, quote hash, and
+source event ID. Use the source chunks when an answer has to be exact (legal,
+financial, compliance). Use the distilled memories when you care more about speed
+and continuity.
 
-## Which API To Use
+## Which API to use
 
-| Need | API |
-|------|-----|
+| You want to | Use |
+|-------------|-----|
 | Store one fact | `add()` |
 | Store many facts | `add_batch()` |
-| Extract facts from a conversation | `add_conversation()` |
+| Pull facts out of a conversation | `add_conversation()` |
 | Search relevant facts | `search()` |
-| Search broad prompts | `deep_search()` |
-| Build debuggable prompt memory | `trace_recall()` |
-| Build compact prompt memory | `get_context_block()` |
+| Search broad or vague prompts | `deep_search()` |
+| Build prompt memory you can debug | `trace_recall()` |
+| Build a compact prompt block | `get_context_block()` |
 | Start resumable work | `start_task()` |
-| Record raw turns or tools | `record_turn()` / `record_event()` |
-| Build task-resume context | `build_context()` |
+| Record raw turns or tool calls | `record_turn()` / `record_event()` |
+| Build resume context for a task | `build_context()` |
 | Ingest a huge prompt or document | `record_long_input()` |
 | Build source-anchored answer context | `build_long_input_context()` |
-| Retrieve diverse evidence | `search_evidence_set()` |
-| Add neighboring turn context | `get_neighboring_context_block()` |
+| Pull a session or group for neighbor context | `get_memories()` |

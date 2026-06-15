@@ -251,35 +251,40 @@ Use the trace to distinguish:
 ## Evidence Retrieval For Aggregation
 
 Aggregation questions often need coverage across sessions rather than the
-single highest-ranked memory. Use evidence APIs for those cases.
+single highest-ranked memory. Compose this from the public primitives:
+`deep_search()` for high-recall retrieval, `get_memories()` to pull surrounding
+turns from a session group, and `engram.llm` for a custom reader.
 
 ```python
-hits = await engram.search_evidence_set(
+hits = await engram.deep_search(
     "Which payments did Sarah make in March?",
     "assistant",
     user_id="sarah",
     limit=12,
-    preferred_role="user",
 )
 
-context, sources = await engram.get_neighboring_context_block(
-    hits,
+# Expand a hit with the rest of its source session.
+session_id = hits[0].memory.metadata.get("original_session_id")
+group = await engram.get_memories(
     "assistant",
     user_id="sarah",
-    before=2,
-    after=1,
-    prior_user_turns=1,
-    max_tokens=6000,
+    metadata_filter={"original_session_id": session_id},
 )
+context = "\n".join(m.content for m in group)
 
-answer = await engram.answer_from_evidence(
-    question="Which payments did Sarah make in March?",
-    context=context,
-    reading="con",
-)
+if engram.llm is not None:
+    answer = await engram.llm.complete(
+        f"Context:\n{context}\n\n"
+        "Which payments did Sarah make in March? Answer concisely.",
+    )
 ```
 
-This pattern is useful for LongMemEval-style workloads, support history, and
+A fuller reference implementation of this pattern — session-diversified
+evidence selection, turn-window expansion, and a multi-call evidence-ledger
+reader — lives in `scripts/longmemeval_harness.py`
+(`search_evidence_set`, `get_neighboring_context_block`,
+`answer_from_evidence`). It is QA-harness machinery built on these same public
+APIs, useful for LongMemEval-style workloads, support history, and
 multi-session personal memory.
 
 ## Current Limits

@@ -40,4 +40,4 @@ def test_mkdocs_mermaid_and_cards_are_configured() -> None:
     assert "class: mermaid" in config
     assert "cdn.jsdelivr.net/npm/mermaid@" in config
     assert "javascripts/mermaid.js" in config
-    assert '<div class="grid cards engram-doc-cards" markdown="1">' in index
+    assert '<div class="grid cards" markdown="1">' in index

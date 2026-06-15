@@ -15,14 +15,14 @@ theme:
     code: JetBrains Mono
   palette:
     - scheme: default
-      primary: teal
-      accent: green
+      primary: white
+      accent: custom
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - scheme: slate
-      primary: teal
-      accent: green
+      primary: black
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -42,19 +42,23 @@ theme:
     - toc.follow
 
 nav:
-  - Home: index.md
-  - Quickstart: quickstart.md
-  - Core Concepts: concepts.md
-  - Task Memory: task-memory.md
-  - API Reference: api-reference.md
-  - Configuration: configuration.md
-  - Architecture: architecture.md
-  - Diagrams: diagrams.md
-  - Production Guide: production-guide.md
-  - Migrations: migrations.md
-  - Operations: operations.md
-  - Reliability Testing: reliability-testing.md
-  - Examples: examples.md
+  - Overview: index.md
+  - Get started:
+      - Quickstart: quickstart.md
+      - Core concepts: concepts.md
+      - Examples: examples.md
+  - Guides:
+      - Task memory: task-memory.md
+      - Configuration: configuration.md
+  - Reference:
+      - API reference: api-reference.md
+      - Architecture: architecture.md
+      - Diagrams: diagrams.md
+  - Operations:
+      - Production guide: production-guide.md
+      - Migrations: migrations.md
+      - Running in production: operations.md
+      - Reliability testing: reliability-testing.md
 
 plugins:
   - search

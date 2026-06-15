@@ -11,8 +11,8 @@ Local setup:
     export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
 
 This script keeps LLM-backed calls optional. If no LLM provider is configured,
-conversation extraction and answer_from_evidence are skipped or return an empty
-answer, while the rest of the API still runs.
+conversation extraction and LLM answer generation are skipped or return an
+empty answer, while the rest of the API still runs.
 """
 
 from __future__ import annotations
@@ -290,30 +290,28 @@ async def main() -> None:
         item("anchored_memories", len(report.memory_ids))
         item("long_missing", long_context.trace["missing_expected_terms"])
 
-        section("10. Evidence Set And Reader")
-        evidence = await engram.search_evidence_set(
-            "Who owns rollback and what test result matters?",
+        section("10. Evidence Retrieval And Reading")
+        # Evidence/aggregation reading is composed from public primitives:
+        # high-recall retrieval, a rendered context block, then the LLM.
+        question = "Who owns rollback and what test result matters?"
+        evidence = await engram.deep_search(
+            question,
             agent_id,
             user_id=user_id,
             limit=5,
-            preferred_role="user",
-            rerank=False,
         )
-        evidence_context, sources = await engram.get_neighboring_context_block(
-            evidence,
+        evidence_context = await engram.get_context_block(
+            question,
             agent_id,
             user_id=user_id,
-            before=1,
-            after=1,
             max_tokens=1200,
         )
-        answer = await engram.answer_from_evidence(
-            question="Who owns rollback and what test result matters?",
-            context=evidence_context,
-            reading="direct",
-        )
+        answer = ""
+        if engram.llm is not None:
+            answer = await engram.llm.complete(
+                f"Context:\n{evidence_context}\n\n{question}\nAnswer concisely.",
+            )
         item("evidence_hits", len(evidence))
-        item("neighbor_sources", len(sources))
         item("llm_answer", answer or "skipped because no LLM provider is configured")
 
         section("11. Optional LLM Conversation Extraction")

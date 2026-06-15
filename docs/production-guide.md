@@ -21,8 +21,8 @@ the API and schema continue to evolve.
 
 ```text
 API / agent process
-  - builds context with trace_recall(), get_context_block(), or build_context()
-  - calls the application LLM
+  - builds compact context with get_context_block() and critical recall
+  - calls the application LLM, preferably with streaming in user-facing apps
   - records turns and events
 
 Memory worker process
@@ -35,23 +35,35 @@ PostgreSQL
   - monitoring
 ```
 
+Use heavier recall paths such as `deep_search()`, graph context, and
+`trace_recall()` for high-recall evaluation or debugging. Keep them out of the
+default chat hot path unless the added latency is intentional.
+
 ## Basic Turn Loop
 
 ```python
-async def handle_turn(engram, task_id, user_message):
-    context = await engram.build_context(
-        task_id,
+async def handle_turn(engram, task_id, agent_id, user_id, user_message):
+    critical = await engram.recall_critical(agent_id, user_id=user_id, limit=12)
+    relevant = await engram.get_context_block(
         query=user_message,
-        max_tokens=120000,
-        include_graph=True,
+        agent_id=agent_id,
+        user_id=user_id,
+        limit=8,
+        max_tokens=900,
     )
+    critical_block = "\n".join(f"- {memory.content}" for memory in critical)
 
-    response = await call_your_llm(context.text, user_message)
+    response = await call_your_llm(
+        memory_context=f"{critical_block}\n\n{relevant}",
+        user_message=user_message,
+    )
 
     await engram.record_turn(
         task_id,
         user_message=user_message,
         assistant_response=response,
+        agent_id=agent_id,
+        user_id=user_id,
         enqueue_processing=True,
     )
 

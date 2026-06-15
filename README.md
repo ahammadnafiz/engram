@@ -223,7 +223,8 @@ Engram uses a converged architecture where all operations run in PostgreSQL:
 
 | Column | Embedded | Purpose |
 |--------|----------|---------|
-| `fact` | Yes | Concise user facts for semantic search |
+| `fact` | Yes | Canonical concise facts for semantic and keyword search |
+| `content` | Yes | Backward-compatible alias of `fact` in the API |
 | `main_content` | No | Full conversation context (cost-effective storage) |
 
 ### Long-Running Task Memory
@@ -339,6 +340,13 @@ class CustomEmbeddingProvider(EmbeddingProvider):
 ```bash
 python examples/chatbot.py
 ```
+
+The chatbot defaults to `ENGRAM_CHATBOT_RECALL_MODE=fast` and
+`ENGRAM_CHATBOT_MEMORY_JOBS=deferred` for production-style latency. Use
+`ENGRAM_CHATBOT_RECALL_MODE=deep` for high-recall evaluation and `debug` when
+you need `trace_recall()` in the prompt and turn metadata. Reranking defaults to
+`ENGRAM_CHATBOT_RERANK=auto`, which enables rerank in `deep` and `debug` while
+keeping `fast` low-latency.
 
 ### Programmatic Usage
 

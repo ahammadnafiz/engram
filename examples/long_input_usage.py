@@ -6,7 +6,7 @@ Run:
 
 This example uses heuristic extraction by default so it works without an LLM
 provider. Set ENGRAM_LLM_PROVIDER and provider credentials to enable richer
-fact extraction and answer_from_evidence output.
+fact extraction and LLM answer generation over the retrieved context.
 """
 
 from __future__ import annotations
@@ -128,34 +128,34 @@ async def main() -> None:
         item("trimmed_memories", len(recall["trimmed_memory_ids"]))
         item("superseded_hidden", len(recall["superseded_memory_ids"]))
 
-        section("5. Evidence Set And Neighboring Context")
-        evidence = await engram.search_evidence_set(
+        section("5. Evidence Retrieval And Context")
+        # Compose evidence reading from public primitives: high-recall
+        # retrieval plus a rendered context block.
+        evidence = await engram.deep_search(
             "What audit log and liability obligations matter?",
             agent_id,
             user_id=user_id,
             limit=6,
             memory_types=["constraint", "task", "tool_result", "semantic"],
-            rerank=False,
         )
-        neighbor_context, sources = await engram.get_neighboring_context_block(
-            evidence,
+        evidence_context = await engram.get_context_block(
+            "What audit log and liability obligations matter?",
             agent_id,
             user_id=user_id,
-            before=1,
-            after=1,
             max_tokens=1800,
         )
         item("evidence_hits", len(evidence))
-        item("neighbor_sources", len(sources))
-        print(preview(neighbor_context, 1200))
+        print(preview(evidence_context, 1200))
 
         section("6. Optional Evidence Answer")
-        answer = await engram.answer_from_evidence(
-            question="Which audit log and liability obligations matter?",
-            context=context.text,
-            reading="con",
-        )
-        print(answer or "Skipped because no LLM provider is configured.")
+        question = "Which audit log and liability obligations matter?"
+        if engram.llm is None:
+            print("Skipped because no LLM provider is configured.")
+        else:
+            answer = await engram.llm.complete(
+                f"Context:\n{context.text}\n\n{question}\nAnswer concisely.",
+            )
+            print(answer)
 
         section("7. Task Resume Context And Cleanup")
         task_context = await engram.build_context(

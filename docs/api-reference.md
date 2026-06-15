@@ -54,7 +54,9 @@ await engram.add(
 ) -> Memory
 ```
 
-`content` is the concise fact that gets embedded. `main_content` stores source
+`content` is the concise fact passed by callers. Engram stores the same value in
+`fact`, the canonical field used for vector and keyword search, while preserving
+`content` as a backward-compatible alias. `main_content` stores source
 conversation or document context and is not embedded.
 
 ```python
@@ -66,6 +68,8 @@ memory = await engram.add(
 )
 
 print(memory.memory_id)
+print(memory.fact)      # canonical searched fact
+print(memory.content)   # compatibility alias for fact
 print(memory.memory_type)
 print(memory.metadata)
 ```
@@ -80,7 +84,9 @@ await engram.add_batch(memories: list[dict[str, Any]]) -> list[Memory]
 ```
 
 Each dictionary can contain `content`, `agent_id`, `main_content`, `user_id`,
-`session_id`, `memory_type`, and `metadata`.
+`session_id`, `memory_type`, and `metadata`. Use `content` for the fact text in
+create calls; returned `Memory` objects expose both `fact` and the compatibility
+alias `content`.
 
 ```python
 memories = await engram.add_batch(
@@ -310,94 +316,45 @@ block = await engram.get_context_block(
 )
 ```
 
-## Evidence APIs
+## Evidence and aggregation reading
 
-These methods support aggregation and evidence-reading workloads where one
-ranked memory is not enough.
+Aggregation and evidence-reading workloads — where one ranked memory is not
+enough — are built from the public primitives above rather than a dedicated
+method:
 
-```text
-await engram.search_evidence_set(
-    query,
-    agent_id,
-    *,
-    user_id=None,
-    limit=10,
-    candidate_limit=None,
-    min_score=0.0,
-    metadata_filter=None,
-    memory_types=None,
-    mode="hybrid",
-    use_deep_search=True,
-    rerank=True,
-    diversify_metadata_key="original_session_id",
-    max_per_group=3,
-    preferred_role=None,
-    role_metadata_key="turn_role",
-) -> list[SearchResult]
-```
+- `deep_search()` for high-recall multi-query retrieval.
+- `get_memories()` to pull a known group (e.g. every memory from one source
+  session via `metadata_filter`) for window/neighbor expansion.
+- `get_context_block()` to render a budgeted, prompt-ready block.
+- `engram.llm` to run any custom reader prompt over the assembled context.
 
-`search_evidence_set()` overfetches, optionally deep-searches and reranks, then
-diversifies by session or metadata group.
-
-```text
-await engram.get_neighboring_context_block(
-    results,
-    agent_id,
-    *,
-    user_id=None,
-    before=2,
-    after=2,
-    include_session_start=False,
-    max_tokens=None,
-    token_counter=None,
-    memory_types=None,
-    session_metadata_key="original_session_id",
-    turn_metadata_key="turn_index",
-    date_metadata_key="haystack_date",
-    role_metadata_key="turn_role",
-    group_limit=200,
-    priority_window_results=3,
-    prior_user_turns=0,
-    context_order="chronological",
-) -> tuple[str, list[dict[str, Any]]]
-```
-
-`get_neighboring_context_block()` expands retrieved turn memories with nearby
-turns from the same session or metadata group.
+The session-diversified evidence selection, turn-window expansion, and the
+multi-call "chain-of-note" reader that the LongMemEval benchmark uses are
+QA-harness machinery, not part of the library's public surface. They live in
+`scripts/longmemeval_harness.py` (`search_evidence_set`,
+`get_neighboring_context_block`, `answer_from_evidence`) and drive Engram only
+through the public APIs above — use them as a reference implementation if you
+need that composition.
 
 ```python
-hits = await engram.search_evidence_set(
+# A simple evidence-reading recipe on public primitives:
+hits = await engram.deep_search(
     "Where did the user buy the replacement charger?",
     "assistant",
     user_id="sarah",
     limit=8,
-    preferred_role="user",
 )
-
-context, sources = await engram.get_neighboring_context_block(
-    hits,
+context = await engram.get_context_block(
+    "Where did the user buy the replacement charger?",
     "assistant",
     user_id="sarah",
-    before=2,
-    after=1,
     max_tokens=3000,
 )
+if engram.llm is not None:
+    answer = await engram.llm.complete(
+        f"Context:\n{context}\n\nAnswer concisely.",
+    )
 ```
-
-```text
-await engram.answer_from_evidence(
-    *,
-    question,
-    context,
-    question_date=None,
-    max_tokens=256,
-    reading="direct",
-) -> str
-```
-
-`answer_from_evidence()` uses the configured LLM to answer from a supplied
-context. Use `reading="con"` for aggregation questions that need an evidence
-ledger before the final answer.
 
 ## Task Memory
 

@@ -11,8 +11,8 @@ Application / Agent
         |
         v
 Engram Client
-  |-- Memory API: add, search, trace_recall
-  |-- Evidence API: search_evidence_set, neighboring context, answer_from_evidence
+  |-- Memory API: add, search, deep_search, trace_recall
+  |-- Context API: get_context_block, get_memories
   |-- Policy: memory typing, critical slots, conflict keys
   |-- Task API: tasks, events, checkpoints, jobs
   |-- Long Input API: source events, chunks, anchored memories
@@ -180,27 +180,26 @@ RecallTrace(context, kept, trimmed, missing, superseded)
 
 ## Evidence Flow
 
+Aggregation questions, where the answer may be spread across several turns or
+sessions, are composed from public primitives:
+
 ```text
-search_evidence_set(query)
+deep_search(query)            high-recall multi-query retrieval
         |
         v
-overfetch candidates
+get_memories(session group)   pull neighboring turns for a hit
         |
         v
-deep_search/search + optional rerank
+get_context_block(query)      render a budgeted, prompt-ready block
         |
         v
-round-robin by session or metadata group
-        |
-        v
-get_neighboring_context_block()
-        |
-        v
-answer_from_evidence()
+engram.llm.complete(...)      run a reader prompt over the context
 ```
 
-This path supports aggregation questions where the answer may be spread across
-several turns or sessions.
+The session-diversified selection, turn-window expansion, and multi-call
+evidence-ledger reader used by the LongMemEval benchmark are a reference
+implementation of this flow in `scripts/longmemeval_harness.py`, built on these
+same public APIs rather than baked into the library.
 
 ## Task Flow
 

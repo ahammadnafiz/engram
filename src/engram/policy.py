@@ -93,7 +93,6 @@ class MemoryPolicy:
 
     def critical_slot(self, content: str, memory_type: MemoryType) -> str | None:
         text = content.lower()
-        project = self._project_slug(text)
 
         allergy_slot = self._allergy_slot(text)
         if allergy_slot:
@@ -103,7 +102,7 @@ class MemoryPolicy:
             if rule.memory_types and memory_type not in rule.memory_types:
                 continue
             if any(re.search(pattern, text) for pattern in rule.patterns):
-                return rule.slot.format(project=project)
+                return rule.slot
 
         if self.generic_critical_slots and memory_type in self.critical_memory_types:
             digest = hashlib.sha1(content.lower().encode()).hexdigest()[:12]
@@ -154,12 +153,11 @@ class MemoryPolicy:
             return f"profile:allergy:{allergen or 'unknown'}"
         return "profile:allergy"
 
-    def _project_slug(self, text: str) -> str:
-        if "atlas checkout" in text or "checkout" in text:
-            return "atlas_checkout"
-        return "project"
 
-
+# Generic, domain-neutral typing rules for a general-purpose assistant.
+# Domain-specific vocabulary (ops metrics, project codenames, legal/coding
+# terms) belongs in a named preset (LEGAL_MEMORY_POLICY, CODING_AGENT_MEMORY_POLICY)
+# or a caller-supplied MemoryPolicy, not in the default.
 DEFAULT_TYPE_RULES: tuple[TypeRule, ...] = (
     TypeRule(
         "profile",
@@ -180,8 +178,6 @@ DEFAULT_TYPE_RULES: tuple[TypeRule, ...] = (
             r"\bpreference\b",
             r"\bno fluff\b",
             r"\bconcise\b",
-            r"\brisk table\b",
-            r"\bwhen discussing\b",
         ),
     ),
     TypeRule(
@@ -203,26 +199,19 @@ DEFAULT_TYPE_RULES: tuple[TypeRule, ...] = (
             r"\bdecision\b",
             r"\bchanged\b",
             r"\bcorrection\b",
-            r"\bupdated target\b",
         ),
     ),
     TypeRule(
         "tool_result",
         (
-            r"\btool note\b",
-            r"\bload test\b",
             r"\btest result\b",
             r"\bapi call\b",
-            r"\bpytest\b",
-            r"\berror rate\b",
-            r"\bp95\b",
         ),
     ),
     TypeRule(
         "project",
         (
             r"\bproject\b",
-            r"\bcheckout\b",
             r"\blaunch\b",
             r"\bcodename\b",
             r"\bowner\b",
@@ -242,31 +231,17 @@ DEFAULT_TYPE_RULES: tuple[TypeRule, ...] = (
 )
 
 
+# Generic conflict slots only: durable personal facts a correction should
+# supersede. Allergy slotting is handled in code (_allergy_slot), independent
+# of these rules. Project/ops/domain slots live in the named presets below.
 DEFAULT_SLOT_RULES: tuple[SlotRule, ...] = (
-    SlotRule(
-        "tool_result:{project}:load_test",
-        (r"\b(load test|tool note|today's result)\b",),
-    ),
     SlotRule(
         "profile:current_city",
         (r"\bcurrent city\b", r"\bmoved from\b", r"\blives in\b"),
     ),
     SlotRule("profile:name", (r"\bmy name\b", r"\buser's name\b")),
     SlotRule("profile:manager", (r"\bmanager\b",)),
-    SlotRule("project:{project}:old_codename", (r"\bold codename\b",)),
-    SlotRule("project:{project}:codename", (r"\bcodename\b",)),
-    SlotRule("project:{project}:rollback_owner", (r"\brollback owner\b",)),
-    SlotRule("project:{project}:metrics_owner", (r"\bmetrics owner\b",)),
-    SlotRule("project:{project}:launch_date", (r"\blaunch date\b",)),
-    SlotRule("project:{project}:p95_target_or_result", (r"\bp95\b",)),
-    SlotRule("project:{project}:error_rate_target_or_result", (r"\berror rate\b",)),
-    SlotRule("project:{project}:traffic_requirement", (r"\bblack friday\b",)),
-    SlotRule("preference:risk_table_columns", (r"\brisk table\b",)),
-    SlotRule("preference:incident_order", (r"\bincident\b",)),
     SlotRule("preference:communication_style", (r"\bconcise\b", r"\bno fluff\b")),
-    SlotRule("preference:meeting_time", (r"\bfriday meetings\b",)),
-    SlotRule("constraint:repo", (r"\brepo constraint\b",)),
-    SlotRule("task:requirement", (r"\btask requirement\b",)),
 )
 
 

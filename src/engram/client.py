@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
-import json
 import logging
 import re
 from contextlib import asynccontextmanager, suppress
@@ -867,13 +866,17 @@ class Engram:
 
         return affected
 
-    async def get(self, memory_id: MemoryId) -> Memory:
+    async def get(self, memory_id: MemoryId, *, track_access: bool = True) -> Memory:
         """Get a memory by ID.
 
-        Also updates the access timestamp and count.
+        By default this updates the access timestamp and count (these feed
+        time-decay ranking). Pass track_access=False for a pure read with no
+        write — appropriate for read-replica routing or read-heavy paths.
 
         Args:
             memory_id: The memory ID to retrieve.
+            track_access: When True (default) update access metadata; when False
+                perform a plain read.
 
         Returns:
             The memory.
@@ -884,7 +887,7 @@ class Engram:
         self._ensure_connected()
         assert self._memory_store is not None
 
-        return await self._memory_store.get(memory_id)
+        return await self._memory_store.get(memory_id, track_access=track_access)
 
     async def update(
         self,
@@ -1070,156 +1073,6 @@ class Engram:
             results = await self._get_reranker().rerank(query, results, top_k=limit)
         return results
 
-    async def search_evidence_set(
-        self,
-        query: str,
-        agent_id: AgentId,
-        *,
-        user_id: UserId | None = None,
-        limit: int = 10,
-        candidate_limit: int | None = None,
-        min_score: float = 0.0,
-        metadata_filter: Metadata | None = None,
-        memory_types: list[MemoryType] | None = None,
-        mode: SearchMode = "hybrid",
-        use_deep_search: bool = True,
-        rerank: bool = True,
-        diversify_metadata_key: str = "original_session_id",
-        max_per_group: int = 3,
-        preferred_role: str | None = None,
-        role_metadata_key: str = "turn_role",
-    ) -> list[SearchResult]:
-        """Retrieve a broad, diverse evidence set for aggregation questions.
-
-        ``search()`` returns the best individual memories. Aggregation tasks
-        often need coverage across several sessions, so this method overfetches
-        candidates, optionally uses deep multi-query retrieval, applies a small
-        role-aware rank bias, and then round-robins by session/group before
-        returning the final evidence set.
-
-        Pair this with :meth:`get_neighboring_context_block` when building a
-        prompt: direct evidence hits are selected first here, then neighboring
-        turns can be added around those protected hits under a context budget.
-
-        Args:
-            query: The search query text.
-            agent_id: Filter by agent ID.
-            user_id: Optional filter by user ID.
-            limit: Maximum evidence memories to return.
-            candidate_limit: Number of candidates to inspect before diversity
-                selection. Defaults to ``limit * search_candidate_multiplier``.
-            min_score: Minimum score threshold.
-            metadata_filter: Optional JSONB containment filter.
-            memory_types: Optional list of memory types to restrict to.
-            mode: Search mode for the underlying single-query search.
-            use_deep_search: Use multi-query deep search for candidate recall.
-            rerank: Re-order candidates with the configured cross-encoder.
-            diversify_metadata_key: Metadata key used as a group/session key
-                when a memory has no concrete ``session_id``.
-            max_per_group: Maximum memories to take from any one group before
-                relaxing diversity to fill the requested limit.
-            preferred_role: Optional turn role to prefer, e.g. ``"user"`` for
-                user-memory questions or ``"assistant"`` for assistant-memory
-                questions.
-            role_metadata_key: Metadata key containing the turn role.
-
-        Returns:
-            Diverse search results ordered for evidence coverage.
-        """
-        self._ensure_connected()
-        if limit < 1:
-            raise ValueError("limit must be >= 1")
-        if max_per_group < 1:
-            raise ValueError("max_per_group must be >= 1")
-
-        max_search_limit = self._settings.max_search_limit
-        overfetch = candidate_limit
-        if overfetch is None:
-            overfetch = limit * self._settings.search_candidate_multiplier
-        overfetch = min(max(overfetch, limit), max_search_limit)
-
-        if use_deep_search:
-            candidates = await self.deep_search(
-                query,
-                agent_id,
-                user_id=user_id,
-                limit=overfetch,
-                min_score=min_score,
-                metadata_filter=metadata_filter,
-                memory_types=memory_types,
-                mode=mode,
-                rerank=rerank,
-            )
-        else:
-            candidates = await self.search(
-                query,
-                agent_id,
-                user_id=user_id,
-                limit=overfetch,
-                min_score=min_score,
-                metadata_filter=metadata_filter,
-                memory_types=memory_types,
-                mode=mode,
-                rerank=rerank,
-            )
-        if not candidates:
-            return []
-
-        preferred = preferred_role.strip().lower() if preferred_role else None
-
-        def role_rank_bias(result: SearchResult) -> float:
-            if preferred is None:
-                return 0.0
-            role = result.memory.metadata.get(role_metadata_key)
-            if not isinstance(role, str):
-                return 0.0
-            normalized = role.strip().lower()
-            if normalized == preferred:
-                return -1.5
-            if preferred == "user" and normalized in {"assistant", "system", "tool"}:
-                return 1.5
-            return 0.0
-
-        def group_key(result: SearchResult) -> str:
-            memory = result.memory
-            if memory.session_id:
-                return f"session:{memory.session_id}"
-            value = memory.metadata.get(diversify_metadata_key)
-            if value is not None:
-                return f"metadata:{value}"
-            return f"memory:{memory.memory_id}"
-
-        ranked = [
-            result
-            for _rank, result in sorted(
-                enumerate(candidates),
-                key=lambda item: (item[0] + role_rank_bias(item[1]), item[0]),
-            )
-        ]
-        groups: dict[str, list[SearchResult]] = {}
-        for result in ranked:
-            groups.setdefault(group_key(result), []).append(result)
-
-        selected: list[SearchResult] = []
-        selected_ids: set[str] = set()
-        for depth in range(max_per_group):
-            for group_results in groups.values():
-                if depth >= len(group_results):
-                    continue
-                result = group_results[depth]
-                selected.append(result)
-                selected_ids.add(result.memory.memory_id)
-                if len(selected) >= limit:
-                    return selected
-
-        for result in ranked:
-            if result.memory.memory_id in selected_ids:
-                continue
-            selected.append(result)
-            if len(selected) >= limit:
-                break
-        return selected
-
     def _get_reranker(self) -> CrossEncoderReranker:
         if self._reranker is None:
             self._reranker = CrossEncoderReranker(
@@ -1265,456 +1118,6 @@ class Engram:
             metadata_filter=metadata_filter,
             memory_types=memory_types,
             limit=limit,
-        )
-
-    def _metadata_int(self, metadata: Metadata, key: str) -> int | None:
-        value = metadata.get(key)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and value.isdigit():
-            return int(value)
-        return None
-
-    def _memory_window_group(self, memory: Memory, metadata_key: str) -> str | None:
-        if memory.session_id:
-            return str(memory.session_id)
-        value = memory.metadata.get(metadata_key)
-        return str(value) if value is not None else None
-
-    async def get_neighboring_context_block(
-        self,
-        results: list[SearchResult],
-        agent_id: AgentId,
-        *,
-        user_id: UserId | None = None,
-        before: int = 2,
-        after: int = 2,
-        include_session_start: bool = False,
-        max_tokens: int | None = None,
-        token_counter: Callable[[str], int] | None = None,
-        memory_types: list[MemoryType] | None = None,
-        session_metadata_key: str = "original_session_id",
-        turn_metadata_key: str = "turn_index",
-        date_metadata_key: str = "haystack_date",
-        role_metadata_key: str = "turn_role",
-        group_limit: int = 200,
-        priority_window_results: int = 3,
-        prior_user_turns: int = 0,
-        context_order: str = "chronological",
-    ) -> tuple[str, list[dict[str, Any]]]:
-        """Expand retrieved turn memories with neighboring session memories.
-
-        This is a production memory primitive, not a benchmark oracle: it uses
-        only stored Engram memories plus their session/turn metadata. It is
-        useful when a search hit is near the answer but the necessary context is
-        in adjacent turns from the same conversation.
-
-        Args:
-            results: Search results to expand.
-            agent_id: Agent whose memories are being read.
-            user_id: Optional user filter.
-            before: Number of prior turns to include around each hit.
-            after: Number of following turns to include around each hit.
-            include_session_start: Also include turn 0 for each hit's session.
-            max_tokens: Optional prompt budget using ``token_counter``.
-            token_counter: Function used to estimate rendered line cost.
-            memory_types: Optional type filter for neighbor fetches.
-            session_metadata_key: Metadata key used when ``session_id`` is not
-                set on memories.
-            turn_metadata_key: Metadata key containing the turn index.
-            date_metadata_key: Metadata key used for chronological sorting.
-            role_metadata_key: Metadata key containing the turn role.
-            group_limit: Maximum memories fetched per session/group.
-            priority_window_results: Number of top-ranked results whose full
-                neighbor windows are budgeted before lower-ranked direct hits.
-            prior_user_turns: Include this many earlier user turns from the
-                same group for each hit. Useful when a retrieved turn depends
-                on an entity established earlier in the conversation.
-            context_order: "chronological" sorts the final block by date/group;
-                "relevance" puts the highest-ranked retrieved groups first,
-                while keeping each group chronological.
-
-        Returns:
-            ``(context, sources)`` where context is newline-joined memory
-            content, and sources records the memories kept in the block.
-        """
-        self._ensure_connected()
-        if before < 0 or after < 0:
-            raise ValueError("before and after must be >= 0")
-        if group_limit < 1:
-            raise ValueError("group_limit must be >= 1")
-        if priority_window_results < 0:
-            raise ValueError("priority_window_results must be >= 0")
-        if prior_user_turns < 0:
-            raise ValueError("prior_user_turns must be >= 0")
-        if context_order not in {"chronological", "relevance"}:
-            raise ValueError("context_order must be 'chronological' or 'relevance'")
-
-        count = token_counter or (lambda text: max(1, len(text) // 4))
-        group_cache: dict[tuple[str, str], list[Memory]] = {}
-        selected: dict[str, tuple[tuple[int, int, int], Memory]] = {}
-        group_best_rank: dict[str, int] = {}
-
-        def remember(memory: Memory, priority: tuple[int, int, int]) -> None:
-            current = selected.get(memory.memory_id)
-            if current is None or priority < current[0]:
-                selected[memory.memory_id] = (priority, memory)
-
-        async def fetch_group(memory: Memory, group_key: str) -> list[Memory]:
-            cache_key = ("session" if memory.session_id else "metadata", group_key)
-            cached = group_cache.get(cache_key)
-            if cached is not None:
-                return cached
-            if memory.session_id:
-                group = await self.get_memories(
-                    agent_id,
-                    user_id=user_id,
-                    session_id=memory.session_id,
-                    memory_types=memory_types,
-                    limit=group_limit,
-                )
-            else:
-                group = await self.get_memories(
-                    agent_id,
-                    user_id=user_id,
-                    metadata_filter={session_metadata_key: group_key},
-                    memory_types=memory_types,
-                    limit=group_limit,
-                )
-            group_cache[cache_key] = group
-            return group
-
-        for rank, result in enumerate(results):
-            memory = result.memory
-            if rank < priority_window_results:
-                remember(memory, (rank, 0, 0))
-            else:
-                remember(memory, (priority_window_results, 0, rank))
-
-            turn_index = self._metadata_int(memory.metadata, turn_metadata_key)
-            group_key = self._memory_window_group(memory, session_metadata_key)
-            if turn_index is None or group_key is None:
-                continue
-            group_best_rank[group_key] = min(rank, group_best_rank.get(group_key, rank))
-
-            group = await fetch_group(memory, group_key)
-            by_turn = {
-                idx: item
-                for item in group
-                if (idx := self._metadata_int(item.metadata, turn_metadata_key))
-                is not None
-            }
-            indexes = set(range(max(0, turn_index - before), turn_index + after + 1))
-            if include_session_start:
-                indexes.add(0)
-            for idx in indexes:
-                neighbor = by_turn.get(idx)
-                if neighbor is None:
-                    continue
-                distance = abs(idx - turn_index)
-                if rank < priority_window_results:
-                    remember(neighbor, (rank, 0 if distance == 0 else 1, distance))
-                else:
-                    remember(neighbor, (priority_window_results + 1, rank, distance))
-            if prior_user_turns:
-                prior_users = [
-                    item
-                    for item in group
-                    if (idx := self._metadata_int(item.metadata, turn_metadata_key))
-                    is not None
-                    and idx < turn_index
-                    and str(item.metadata.get(role_metadata_key, "")).lower() == "user"
-                ]
-                prior_users.sort(
-                    key=lambda item: (
-                        self._metadata_int(item.metadata, turn_metadata_key) or 0
-                    ),
-                    reverse=True,
-                )
-                for prior in prior_users[:prior_user_turns]:
-                    idx = self._metadata_int(prior.metadata, turn_metadata_key)
-                    assert idx is not None
-                    distance = turn_index - idx
-                    if rank < priority_window_results:
-                        remember(prior, (rank, 2, distance))
-                    else:
-                        remember(prior, (priority_window_results + 1, rank, distance))
-
-        kept: list[Memory] = []
-        used = 0
-        for _priority, memory in sorted(selected.values(), key=lambda item: item[0]):
-            cost = count(memory.content)
-            if max_tokens is not None and kept and used + cost > max_tokens:
-                continue
-            kept.append(memory)
-            used += cost
-
-        def chronological_key(memory: Memory) -> tuple[str, str, int, str]:
-            return (
-                str(memory.metadata.get(date_metadata_key) or memory.created_at),
-                self._memory_window_group(memory, session_metadata_key) or "",
-                self._metadata_int(memory.metadata, turn_metadata_key) or 0,
-                memory.memory_id,
-            )
-
-        if context_order == "relevance":
-            kept.sort(
-                key=lambda memory: (
-                    group_best_rank.get(
-                        self._memory_window_group(memory, session_metadata_key) or "",
-                        len(results),
-                    ),
-                    *chronological_key(memory),
-                )
-            )
-        else:
-            kept.sort(key=chronological_key)
-        sources = [
-            {
-                "memory_id": memory.memory_id,
-                "session_id": memory.session_id,
-                "group": self._memory_window_group(memory, session_metadata_key),
-                "turn_index": self._metadata_int(memory.metadata, turn_metadata_key),
-                "date": memory.metadata.get(date_metadata_key),
-                "has_answer": bool(memory.metadata.get("has_answer")),
-            }
-            for memory in kept
-        ]
-        return "\n".join(memory.content for memory in kept), sources
-
-    def _parse_json_object(self, text: str) -> dict[str, Any] | None:
-        stripped = text.strip()
-        if stripped.startswith("```"):
-            stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
-            stripped = re.sub(r"\s*```$", "", stripped)
-
-        candidates = [stripped]
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start >= 0 and end > start:
-            candidates.insert(0, stripped[start : end + 1])
-
-        for candidate in candidates:
-            try:
-                parsed = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                return parsed
-        return None
-
-    async def _verify_aggregation_ledger(
-        self,
-        *,
-        date_line: str,
-        context: str,
-        notes: str,
-        question: str,
-        slot_rules: str,
-        draft_ledger: dict[str, Any],
-        max_tokens: int,
-    ) -> str:
-        assert self._llm is not None
-        return await self._llm.complete(
-            f"{date_line}<memory_context>\n{context}\n</memory_context>\n\n"
-            f"<evidence_notes>\n{notes}\n</evidence_notes>\n\n"
-            f"<question>\n{question}\n</question>\n\n"
-            f"<slot_rules>\n{slot_rules}\n</slot_rules>\n\n"
-            "<draft_ledger>\n"
-            f"{json.dumps(draft_ledger, ensure_ascii=False)}\n"
-            "</draft_ledger>\n\n"
-            "Audit and correct the ledger against the raw memory context. "
-            "Return corrected JSON only, with no markdown or extra prose, using "
-            "the same schema as the draft. The final answer will be computed "
-            "from included rows, so missing or extra included rows directly "
-            "make the answer wrong. For count, list, or total questions, every "
-            "included row must be a distinct answer-bearing item, event, action, "
-            "or amount the question asks for. Exclude assistant tips, generic "
-            "examples, and anything outside the question's scope, moving it to "
-            "the excluded list with a reason rather than dropping it silently. "
-            "Merge only exact duplicates; keep genuinely separate items apart "
-            "even when they share an entity or category. For a single-answer "
-            "question about the current or latest state of a fact that changed "
-            "over time, keep only the most recent value by timestamp and exclude "
-            "earlier superseded values; never apply this recency rule to count, "
-            "sum, or list questions.",
-            system=(
-                "You audit structured evidence ledgers for memory QA. Be strict "
-                "about the requested slot and exhaustive about included rows."
-            ),
-            max_tokens=max(1536, max_tokens * 2),
-            temperature=0.0,
-        )
-
-    async def answer_from_evidence(
-        self,
-        *,
-        question: str,
-        context: str,
-        question_date: str | None = None,
-        max_tokens: int = 256,
-        reading: str = "direct",
-    ) -> str:
-        """Answer a question from an assembled memory evidence context.
-
-        This is the reader counterpart to ``search_evidence_set()`` and
-        ``get_neighboring_context_block()``. It keeps the final answer grounded
-        in the supplied context and adds a small slot-verification step so the
-        model does not substitute a nearby fact, such as where information was
-        found, for the entity the question actually asks for.
-
-        Args:
-            question: User question to answer.
-            context: Rendered memory context.
-            question_date: Optional current/evaluation date.
-            max_tokens: Maximum final-answer tokens.
-            reading: ``"direct"`` or ``"con"``. ``"con"`` first extracts
-                evidence notes, builds an include/exclude aggregation ledger,
-                then verifies the answer slot against both the ledger and raw
-                context.
-
-        Returns:
-            Concise answer string, or "" if no LLM provider is configured.
-        """
-        if self._llm is None:
-            return ""
-        if reading not in {"direct", "con"}:
-            raise ValueError("reading must be 'direct' or 'con'")
-
-        date_line = f"Current date: {question_date}\n" if question_date else ""
-        system = (
-            "Answer the user's question using only the supplied memory evidence. "
-            "If the evidence is insufficient, say you do not know. Keep the "
-            "answer concise."
-        )
-        slot_rules = (
-            "Before answering, identify the exact slot requested by the "
-            "question. Do not substitute a related source, storage place, date, "
-            "or description for the requested entity. For where questions, "
-            "answer the place, merchant, or location of the action; do not "
-            "answer where a coupon, item, message, or information was found "
-            "unless that is exactly what was asked. If two nearby statements in "
-            "the same conversation identify the same event or entity, link them "
-            "internally before answering."
-        )
-
-        if reading == "con":
-            notes = await self._llm.complete(
-                f"{date_line}<memory_context>\n{context}\n</memory_context>\n\n"
-                f"<question>\n{question}\n</question>\n\n"
-                "<instructions>\n"
-                "Work through the memory context turn by turn and quote every "
-                "part that could bear on the question. Do not skip a relevant "
-                "turn and do not summarize away detail. Then list the evidence, "
-                "including: "
-                "(1) candidate answers for the exact requested slot, "
-                "(2) nearby same-conversation facts that identify the same "
-                "event/entity, and (3) related but wrong-slot facts to avoid. "
-                "For count, total, or list questions, extract every distinct "
-                "candidate item/amount/event; do not stop after the first match. "
-                "Include category synonyms and subtypes that satisfy the "
-                "question, rather than relying only on exact surface words. "
-                "If a single statement describes several distinct things the "
-                "question asks about, extract each one separately. "
-                "Do not answer yet. If nothing is relevant, write exactly: "
-                "No relevant information.\n"
-                "</instructions>",
-                system=(
-                    "You extract and verify evidence from conversation memory. "
-                    "Be precise, exhaustive, and preserve dates. Miss nothing "
-                    "that could answer the question."
-                ),
-                max_tokens=max(2048, max_tokens * 2),
-                temperature=0.0,
-            )
-            ledger = await self._llm.complete(
-                f"{date_line}<memory_context>\n{context}\n</memory_context>\n\n"
-                f"<evidence_notes>\n{notes}\n</evidence_notes>\n\n"
-                f"<question>\n{question}\n</question>\n\n"
-                f"<slot_rules>\n{slot_rules}\n</slot_rules>\n\n"
-                "Build an aggregation ledger before answering. Return JSON only, "
-                "with no markdown or extra prose, in this shape: "
-                '{"operation":"count|sum|list|single",'
-                '"answer":"only for single-answer questions if known",'
-                '"insufficient":false,'
-                '"included":[{"entity":"...","action":"...","amount":null,'
-                '"source_quote":"...","reason":"..."}],'
-                '"excluded":[{"entity":"...","action":"...","amount":null,'
-                '"source_quote":"...","reason":"..."}]}. '
-                "The entity field must name the specific item, event, or "
-                "amount; do not use placeholder labels. "
-                "If the question asks how many, how much total, which items, or "
-                "asks for a list, make one row per candidate evidence item, as "
-                "either included or excluded. Deduplicate only true duplicates, "
-                "and keep genuinely separate items apart even when they share an "
-                "entity or category. Put anything that does not qualify in the "
-                "excluded list with a reason rather than dropping it silently. "
-                "The final count, sum, or list is computed from the included "
-                "rows, so each included row must be a distinct item the question "
-                "asks for. For totals, set the numeric amount on every included "
-                "row. Treat category synonyms and subtypes as candidates when "
-                "they satisfy the question. "
-                "For single-answer questions, use "
-                'operation "single" and set "answer" to the exact requested '
-                "slot. When the question asks for the current or latest state of "
-                "a fact that changed over time (a running total, status, amount, "
-                "or value the user updated), take the value from the most recent "
-                "memory by timestamp and mark earlier conflicting values as "
-                "excluded with reason 'superseded by a later update'. Do not "
-                "apply recency to count, sum, or list questions, where every "
-                "qualifying item counts regardless of when it was mentioned.",
-                system=(
-                    "You build evidence ledgers for memory QA. Be exhaustive, "
-                    "separate included from excluded evidence, and compute any "
-                    "count or total explicitly."
-                ),
-                max_tokens=max(1536, max_tokens * 2),
-                temperature=0.0,
-            )
-            parsed_ledger = self._parse_json_object(ledger)
-            if parsed_ledger is not None:
-                verified = await self._verify_aggregation_ledger(
-                    date_line=date_line,
-                    context=context,
-                    notes=notes,
-                    question=question,
-                    slot_rules=slot_rules,
-                    draft_ledger=parsed_ledger,
-                    max_tokens=max_tokens,
-                )
-                verified_ledger = self._parse_json_object(verified)
-                if verified_ledger is not None:
-                    ledger = json.dumps(verified_ledger, ensure_ascii=False)
-
-            prompt = (
-                f"{date_line}<memory_context>\n{context}\n</memory_context>\n\n"
-                f"<evidence_notes>\n{notes}\n</evidence_notes>\n\n"
-                f"<aggregation_ledger>\n{ledger}\n</aggregation_ledger>\n\n"
-                f"<question>\n{question}\n</question>\n\n"
-                f"<slot_rules>\n{slot_rules}\n</slot_rules>\n\n"
-                "Answer strictly from the included rows of the aggregation "
-                "ledger; ignore excluded rows. Derive the answer from the "
-                "operation: for a count question, count the included rows; for "
-                "a total, add the amounts on the included rows; for a list, "
-                "name each included row; for a single-answer question, give the "
-                "answer it records. Work the arithmetic out step by step over "
-                "the rows so the count or total is exact. If the ledger is "
-                "marked insufficient or has no included rows, reply exactly: "
-                "I do not know. Give only the final concise answer.\nAnswer:"
-            )
-        else:
-            prompt = (
-                f"{date_line}<memory_context>\n{context}\n</memory_context>\n\n"
-                f"<question>\n{question}\n</question>\n\n"
-                f"<slot_rules>\n{slot_rules}\n</slot_rules>\n\n"
-                "Give only the final concise answer.\nAnswer:"
-            )
-
-        return await self._llm.complete(
-            prompt,
-            system=system,
-            max_tokens=max_tokens,
-            temperature=0.0,
         )
 
     async def deep_search(
@@ -2473,9 +1876,12 @@ class Engram:
         ]
 
         chunk_events: list[AgentEvent] = []
-        memory_ids: list[str] = []
         chunk_type_counts: dict[str, int] = {}
         extracted_counts: dict[str, int] = {}
+        # Collect every chunk's extracted facts and write them in a single
+        # add_batch at the end: one transaction and one set of advisory locks
+        # for the whole document, instead of a round-trip per fact.
+        memory_creates: list[dict[str, Any]] = []
 
         for chunk in chunks:
             chunk_type_counts[chunk.kind] = chunk_type_counts.get(chunk.kind, 0) + 1
@@ -2519,29 +1925,33 @@ class Engram:
             facts = facts[:max_facts_per_chunk]
             extracted_counts[chunk.chunk_id] = len(facts)
             for fact in facts:
-                memory = await self.add(
-                    fact,
-                    resolved_agent_id,
-                    main_content=chunk.text,
-                    user_id=resolved_user_id,
-                    session_id=resolved_session_id,
-                    memory_type=self._memory_type_for_chunk_kind(chunk.kind),
-                    metadata={
-                        **base_metadata,
-                        "source": "long_input",
-                        "source_event_id": source_event.event_id,
-                        "chunk_event_id": chunk_event.event_id,
-                        "chunk_id": chunk.chunk_id,
-                        "chunk_index": chunk.index,
-                        "chunk_kind": chunk.kind,
-                        "section": chunk.heading,
-                        "char_start": chunk.char_start,
-                        "char_end": chunk.char_end,
-                        "quote_hash": chunk.quote_hash,
-                        "time_notes": time_notes,
-                    },
+                memory_creates.append(
+                    {
+                        "content": fact,
+                        "agent_id": resolved_agent_id,
+                        "main_content": chunk.text,
+                        "user_id": resolved_user_id,
+                        "session_id": resolved_session_id,
+                        "memory_type": self._memory_type_for_chunk_kind(chunk.kind),
+                        "metadata": {
+                            **base_metadata,
+                            "source": "long_input",
+                            "source_event_id": source_event.event_id,
+                            "chunk_event_id": chunk_event.event_id,
+                            "chunk_id": chunk.chunk_id,
+                            "chunk_index": chunk.index,
+                            "chunk_kind": chunk.kind,
+                            "section": chunk.heading,
+                            "char_start": chunk.char_start,
+                            "char_end": chunk.char_end,
+                            "quote_hash": chunk.quote_hash,
+                            "time_notes": time_notes,
+                        },
+                    }
                 )
-                memory_ids.append(memory.memory_id)
+
+        memories = await self.add_batch(memory_creates) if memory_creates else []
+        memory_ids = [memory.memory_id for memory in memories]
 
         manifest = {
             "title": title,

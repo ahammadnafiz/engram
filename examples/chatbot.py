@@ -41,9 +41,14 @@ if os.environ.get("ENGRAM_OPENAI_API_KEY") and "ENGRAM_LLM_PROVIDER" not in os.e
 AGENT_ID = os.environ.get("ENGRAM_CHATBOT_AGENT_ID", "engram-chatbot")
 USER_ID = os.environ.get("ENGRAM_CHATBOT_USER_ID", "default-user")
 HISTORY_LIMIT = 10
-MEMORY_JOBS_MODE = os.environ.get("ENGRAM_CHATBOT_MEMORY_JOBS", "inline").lower()
+RECALL_MODE = os.environ.get("ENGRAM_CHATBOT_RECALL_MODE", "fast").lower()
+MEMORY_JOBS_MODE = os.environ.get("ENGRAM_CHATBOT_MEMORY_JOBS", "deferred").lower()
+RERANK_MODE = os.environ.get("ENGRAM_CHATBOT_RERANK", "auto").lower()
 BROAD_MEMORY_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_BROAD_MEMORY_LIMIT", "60"))
 BROAD_MEMORY_CHARS = int(os.environ.get("ENGRAM_CHATBOT_BROAD_MEMORY_CHARS", "3600"))
+VALID_RECALL_MODES = {"fast", "deep", "debug"}
+VALID_MEMORY_JOBS_MODES = {"inline", "deferred"}
+VALID_RERANK_MODES = {"auto", "true", "false"}
 COLOR_ENABLED = (
     sys.stdout.isatty()
     and os.environ.get("NO_COLOR") is None
@@ -178,6 +183,19 @@ def require_real_openai_config() -> None:
     if not os.environ.get("ENGRAM_OPENAI_API_KEY"):
         missing.append("ENGRAM_OPENAI_API_KEY")
 
+    if RECALL_MODE not in VALID_RECALL_MODES:
+        raise SystemExit(
+            "Invalid ENGRAM_CHATBOT_RECALL_MODE. Use 'fast', 'deep', or 'debug'."
+        )
+    if MEMORY_JOBS_MODE not in VALID_MEMORY_JOBS_MODES:
+        raise SystemExit(
+            "Invalid ENGRAM_CHATBOT_MEMORY_JOBS. Use 'inline' or 'deferred'."
+        )
+    if RERANK_MODE not in VALID_RERANK_MODES:
+        raise SystemExit(
+            "Invalid ENGRAM_CHATBOT_RERANK. Use 'auto', 'true', or 'false'."
+        )
+
     provider = os.environ.get("ENGRAM_EMBEDDING_PROVIDER", "openai")
     if provider != "openai":
         raise SystemExit(
@@ -240,7 +258,9 @@ class MemoryChatbot:
                 ("embedding_dim", os.environ.get("ENGRAM_EMBEDDING_DIMENSION", "auto")),
                 ("llm_provider", os.environ.get("ENGRAM_LLM_PROVIDER", "openai")),
                 ("llm_model", os.environ.get("ENGRAM_LLM_MODEL", "gpt-4o-mini")),
+                ("recall_mode", RECALL_MODE),
                 ("memory_jobs", MEMORY_JOBS_MODE),
+                ("rerank", self._rerank_enabled()),
                 ("broad_memory_limit", BROAD_MEMORY_LIMIT),
             ]
         )
@@ -294,14 +314,114 @@ class MemoryChatbot:
         assert self.engram is not None
         assert self.task_id is not None
 
-        trace = await self.engram.trace_recall(
+        messages, recall_metadata = await self._build_prompt_messages(message)
+        llm_response = await self.engram.llm.complete_full(
+            messages,
+            max_tokens=700,
+            temperature=0.4,
+        )
+        response = llm_response.content.strip()
+
+        metadata = {
+            "application": "examples/chatbot.py",
+            "llm_model": llm_response.model,
+            "recall_mode": RECALL_MODE,
+        }
+        metadata.update(recall_metadata)
+
+        await self.engram.record_turn(
+            self.task_id,
             message,
+            response,
+            agent_id=AGENT_ID,
+            user_id=USER_ID,
+            session_id=self.session_id,
+            metadata=metadata,
+        )
+        jobs = await self._process_memory_jobs()
+
+        self.history.append({"role": "user", "content": message})
+        self.history.append({"role": "assistant", "content": response})
+        self.history = self.history[-HISTORY_LIMIT:]
+
+        processed = len([job for job in jobs if job.status == "completed"])
+        if processed:
+            print_notice(f"processed {processed} memory job(s)", level="ok")
+        return response
+
+    async def _build_prompt_messages(
+        self,
+        message: str,
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        if RECALL_MODE == "fast":
+            return await self._build_fast_prompt_messages(message)
+        return await self._build_deep_prompt_messages(
+            message,
+            include_trace=RECALL_MODE == "debug",
+        )
+
+    async def _build_fast_prompt_messages(
+        self,
+        message: str,
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        assert self.engram is not None
+
+        critical_memories = await self.engram.recall_critical(
             AGENT_ID,
             user_id=USER_ID,
             limit=12,
-            max_tokens=1400,
-            expected_terms=self._expected_terms(message),
         )
+        critical_block = self._render_memories_block(critical_memories, max_chars=1200)
+        memory_block = await self.engram.get_context_block(
+            message,
+            AGENT_ID,
+            user_id=USER_ID,
+            session_id=self.session_id,
+            limit=8,
+            max_tokens=900,
+            group_by_type=True,
+            rerank=self._rerank_enabled(),
+        )
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": (
+                    "<engram_critical_memory>\n"
+                    f"{critical_block}\n"
+                    "</engram_critical_memory>"
+                ),
+            },
+            {
+                "role": "system",
+                "content": (
+                    f"<engram_memory_context>\n{memory_block}\n</engram_memory_context>"
+                ),
+            },
+            *self.history[-HISTORY_LIMIT:],
+            {"role": "user", "content": message},
+        ]
+        return messages, {"critical_memory_count": len(critical_memories)}
+
+    async def _build_deep_prompt_messages(
+        self,
+        message: str,
+        *,
+        include_trace: bool,
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        assert self.engram is not None
+        assert self.task_id is not None
+
+        trace = None
+        if include_trace:
+            trace = await self.engram.trace_recall(
+                message,
+                AGENT_ID,
+                user_id=USER_ID,
+                limit=12,
+                max_tokens=1400,
+                expected_terms=self._expected_terms(message),
+            )
         memory_block = await self.engram.get_context_block(
             message,
             AGENT_ID,
@@ -310,6 +430,7 @@ class MemoryChatbot:
             limit=10,
             max_tokens=1000,
             group_by_type=True,
+            rerank=self._rerank_enabled(),
         )
         deep_hits = await self.engram.deep_search(
             message,
@@ -317,6 +438,7 @@ class MemoryChatbot:
             user_id=USER_ID,
             limit=16,
             n_queries=4,
+            rerank=self._rerank_enabled(),
         )
         deep_memory_block = self._render_deep_memory_block(deep_hits)
         broad_memories = await self.engram.list_recent(
@@ -343,6 +465,17 @@ class MemoryChatbot:
             include_graph=True,
         )
 
+        metadata: dict[str, Any] = {}
+        trace_context = ""
+        if trace is not None:
+            trace_context = trace.context
+            metadata.update(
+                {
+                    "trace_kept_memory_ids": trace.kept_memory_ids,
+                    "missing_expected_terms": trace.missing_expected_terms,
+                }
+            )
+
         user_content = message
         if query_attention_block:
             user_content = (
@@ -367,71 +500,58 @@ class MemoryChatbot:
                 "role": "system",
                 "content": f"<engram_memory_context>\n{memory_block}\n</engram_memory_context>",
             },
-            {
-                "role": "system",
-                "content": f"<engram_recall_trace>\n{trace.context}\n</engram_recall_trace>",
-            },
-            {
-                "role": "system",
-                "content": f"<engram_deep_memory>\n{deep_memory_block}\n</engram_deep_memory>",
-            },
-            {
-                "role": "system",
-                "content": f"<engram_recent_memory_safety_net>\n{broad_memory_block}\n</engram_recent_memory_safety_net>",
-            },
-            {
-                "role": "system",
-                "content": f"<engram_attention_memory>\n{attention_memory_block}\n</engram_attention_memory>",
-            },
-            {
-                "role": "system",
-                "content": f"<engram_task_context>\n{task_context.text}\n</engram_task_context>",
-            },
-            *self.history[-HISTORY_LIMIT:],
-            {"role": "user", "content": user_content},
         ]
-        llm_response = await self.engram.llm.complete_full(
-            messages,
-            max_tokens=700,
-            temperature=0.4,
+        if trace_context:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "<engram_recall_trace>\n"
+                        f"{trace_context}\n"
+                        "</engram_recall_trace>"
+                    ),
+                }
+            )
+        messages.extend(
+            [
+                {
+                    "role": "system",
+                    "content": f"<engram_deep_memory>\n{deep_memory_block}\n</engram_deep_memory>",
+                },
+                {
+                    "role": "system",
+                    "content": f"<engram_recent_memory_safety_net>\n{broad_memory_block}\n</engram_recent_memory_safety_net>",
+                },
+                {
+                    "role": "system",
+                    "content": f"<engram_attention_memory>\n{attention_memory_block}\n</engram_attention_memory>",
+                },
+                {
+                    "role": "system",
+                    "content": f"<engram_task_context>\n{task_context.text}\n</engram_task_context>",
+                },
+                *self.history[-HISTORY_LIMIT:],
+                {"role": "user", "content": user_content},
+            ]
         )
-        response = llm_response.content.strip()
+        return messages, metadata
 
-        await self.engram.record_turn(
-            self.task_id,
-            message,
-            response,
-            agent_id=AGENT_ID,
-            user_id=USER_ID,
-            session_id=self.session_id,
-            metadata={
-                "application": "examples/chatbot.py",
-                "llm_model": llm_response.model,
-                "trace_kept_memory_ids": trace.kept_memory_ids,
-                "missing_expected_terms": trace.missing_expected_terms,
-            },
-        )
+    async def _process_memory_jobs(self) -> list[Any]:
+        assert self.engram is not None
+
         if MEMORY_JOBS_MODE == "inline":
-            jobs = await self.engram.process_memory_jobs(limit=10)
-        elif MEMORY_JOBS_MODE == "deferred":
-            jobs = []
-            print_notice(
-                "memory job queued, run process_memory_jobs() "
-                "or run_memory_worker() later"
-            )
-        else:
-            raise RuntimeError(
-                "Invalid ENGRAM_CHATBOT_MEMORY_JOBS. Use 'inline' or 'deferred'."
-            )
+            return await self.engram.process_memory_jobs(limit=10)
+        print_notice(
+            "memory job queued, run process_memory_jobs() or run_memory_worker() later"
+        )
+        return []
 
-        self.history.append({"role": "user", "content": message})
-        self.history.append({"role": "assistant", "content": response})
-        self.history = self.history[-HISTORY_LIMIT:]
-
-        processed = len([job for job in jobs if job.status == "completed"])
-        if processed:
-            print_notice(f"processed {processed} memory job(s)", level="ok")
-        return response
+    def _rerank_enabled(self) -> bool:
+        if RERANK_MODE == "true":
+            return True
+        if RERANK_MODE == "false":
+            return False
+        return RECALL_MODE in {"deep", "debug"}
 
     def _render_deep_memory_block(
         self, results: list[Any], max_chars: int = 2400

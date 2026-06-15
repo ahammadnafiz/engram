@@ -228,3 +228,8 @@ Thumbs.db
 
 # Docker volumes
 engram_data/
+Research/
+
+# Benchmark datasets and run outputs (generated, not source)
+data/
+runs/

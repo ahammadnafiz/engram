@@ -100,14 +100,15 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Question["aggregation question"] --> Evidence["search_evidence_set"]
-    Evidence --> Candidates["overfetch candidates"]
-    Candidates --> Rerank["optional rerank"]
-    Rerank --> Diverse["round-robin by session/group"]
-    Diverse --> Neighbors["get_neighboring_context_block"]
-    Neighbors --> Reader["answer_from_evidence"]
+    Question["aggregation question"] --> Retrieval["deep_search (high-recall)"]
+    Retrieval --> Group["get_memories (session/group neighbors)"]
+    Group --> Context["get_context_block (budgeted block)"]
+    Context --> Reader["engram.llm reader prompt"]
     Reader --> Answer["grounded answer"]
 ```
+
+The benchmark's reference reader (`scripts/longmemeval_harness.py`) composes
+this same flow with session diversification and an evidence ledger.
 
 ## Long-Running Task Flow
 

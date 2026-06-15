@@ -509,13 +509,18 @@ class MemoryStore:
         except Exception as e:
             raise StorageError(f"Failed to add memories in batch: {e}") from e
 
-    async def get(self, memory_id: MemoryId) -> Memory:
+    async def get(self, memory_id: MemoryId, *, track_access: bool = True) -> Memory:
         """Get a memory by ID.
 
-        Also updates the last_accessed_at timestamp and access_count.
+        By default this is a read-write: it bumps last_accessed_at and
+        access_count, which feed time-decay ranking. Pass track_access=False
+        for a pure read (no write) — useful for read-replica routing or
+        read-heavy paths where access tracking would cause write contention.
 
         Args:
             memory_id: The memory ID to retrieve.
+            track_access: When True (default) update access metadata; when False
+                perform a plain read.
 
         Returns:
             The memory object.
@@ -523,6 +528,9 @@ class MemoryStore:
         Raises:
             MemoryNotFoundError: If memory doesn't exist.
         """
+        if not track_access:
+            return await self.get_without_access_update(memory_id)
+
         row = await self._storage.fetchone(
             """
             UPDATE agent_memory

@@ -44,7 +44,7 @@ pip install -e ".[dev,examples,openai]"
 The LLM provider is optional. Direct `add()`, `search()`, `trace_recall()`,
 task/event storage, graph operations, and heuristic long-input extraction work
 without it. `add_conversation()`, LLM query expansion, richer memory jobs, and
-`answer_from_evidence()` need an LLM provider.
+any LLM-backed reader over retrieved context need an LLM provider.
 
 ## Database Settings
 
