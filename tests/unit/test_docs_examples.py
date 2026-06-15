@@ -30,3 +30,14 @@ def test_markdown_python_blocks_compile() -> None:
                 )
 
     assert failures == []
+
+
+def test_mkdocs_mermaid_and_cards_are_configured() -> None:
+    config = Path("mkdocs.yml").read_text(encoding="utf-8")
+    index = Path("docs/index.md").read_text(encoding="utf-8")
+
+    assert "name: mermaid" in config
+    assert "class: mermaid" in config
+    assert "cdn.jsdelivr.net/npm/mermaid@" in config
+    assert "javascripts/mermaid.js" in config
+    assert '<div class="grid cards engram-doc-cards" markdown="1">' in index

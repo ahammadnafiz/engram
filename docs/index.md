@@ -1,15 +1,50 @@
+<section class="engram-hero" markdown="1">
+
 # Engram
 
-Engram is an async Python memory layer for LLM applications and long-running
-agents. It stores searchable facts, raw task history, source-anchored long
-inputs, and graph relations in PostgreSQL + pgvector.
+Persistent memory infrastructure for long-running AI agents.
+
+Engram stores searchable facts, raw task history, source-anchored long inputs,
+and graph relations in PostgreSQL + pgvector. It is built for agents that need
+recall they can inspect, rank, trace, and resume across many turns.
+
+[Quickstart](quickstart.md){ .md-button .md-button--primary }
+[API Reference](api-reference.md){ .md-button }
+[Architecture](architecture.md){ .md-button }
+
+</section>
+
+<div class="engram-signal-grid" markdown="1">
+
+<div markdown="1">
+**Hybrid recall**
+
+Vector search, keyword search, decay, importance, reranking, and graph expansion
+work together instead of hiding behind one opaque similarity score.
+</div>
+
+<div markdown="1">
+**Long task memory**
+
+Tasks, event ledgers, checkpoints, memory jobs, and source-linked long-input
+chunks preserve work that spans sessions.
+</div>
+
+<div markdown="1">
+**Traceable behavior**
+
+Recall traces show kept, trimmed, missing, critical, and superseded memories so
+agent failures can be debugged.
+</div>
+
+</div>
 
 !!! warning "Alpha status"
     Engram is `0.3.0a1`. The codebase has unit and integration coverage, but
     public APIs and the schema may still change before a stable release. Back
     up data before migrations.
 
-## What Engram Gives You
+## Capability Map
 
 | Need | Engram surface |
 |------|----------------|
@@ -78,9 +113,9 @@ also aligns the vector column with the configured embedding dimension, with a
 safety guard that blocks destructive dimension changes unless explicitly
 enabled.
 
-## Where To Go Next
+## Learn More
 
-<div class="grid cards" markdown>
+<div class="grid cards engram-doc-cards" markdown="1">
 
 - :material-play-circle: **[Quickstart](quickstart.md)**
 
