@@ -189,7 +189,14 @@ final_scored AS (
         superseded_by_memory_id,
         superseded_at,
         semantic_score,
-        (rrf_semantic + rrf_keyword) * 30.0 AS keyword_score,  -- Normalized RRF
+        -- Rescale RRF into the same 0-1 range as semantic_score so the
+        -- configured weights ($6..$9) combine on a common scale.
+        -- RRF per branch peaks at 1/(60+1) ≈ 0.0164 (k=60, rank 1); both
+        -- branches together ≈ 0.0328. Multiplying by 30 maps that to ≈ 0.98,
+        -- i.e. a rank-1-in-both match scores ~1.0 on the keyword term, matching
+        -- a perfect 1.0 cosine on the semantic term. The factor is the inverse
+        -- of the peak two-branch RRF (≈ 1/0.0328); it is not arbitrary tuning.
+        (rrf_semantic + rrf_keyword) * 30.0 AS keyword_score,
         calculate_decay(last_accessed_at, $10) AS decay_score,
         -- Final score: weighted combination
         (

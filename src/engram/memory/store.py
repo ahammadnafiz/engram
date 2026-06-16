@@ -8,11 +8,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import asyncpg
+import numpy as np
 
 from engram.core.config import EngramSettings, get_settings
 from engram.core.exceptions import (
@@ -160,7 +160,9 @@ LIMIT 1
 # serializes the near-duplicate check + insert against other writers in the
 # same scope so two concurrent adds of vector-near-identical but textually
 # different facts cannot both pass the guard and both insert a twin.
-_SCOPE_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext($1))"
+# hashtextextended gives a 64-bit key (vs hashtext's 32-bit), so distinct
+# scopes are far less likely to collide onto the same advisory lock.
+_SCOPE_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))"
 
 _SELECT_MEMORY_BY_ID_SQL = (
     """
@@ -213,14 +215,13 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
         return default
 
 
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Cosine similarity between two vectors (0.0 when either is zero)."""
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+def _unit_vector(vec: list[float]) -> np.ndarray | None:
+    """L2-normalize a vector for cosine comparison (None when zero-norm)."""
+    arr = np.asarray(vec, dtype=np.float64)
+    norm = float(np.linalg.norm(arr))
+    if norm == 0.0:
+        return None
+    return arr / norm
 
 
 class MemoryStore:
@@ -753,7 +754,12 @@ class MemoryStore:
 
                 plan: list[Memory | str] = []  # Memory -> insert, str -> existing
                 if threshold < 1.0:
-                    inserting: list[Memory] = []
+                    # Per-scope matrices of accepted (unit-normalized) embeddings.
+                    # The in-batch near-duplicate check is then one vectorized dot
+                    # product per candidate instead of a Python O(n^2) loop over
+                    # every candidate pair (matters for large record_long_input
+                    # batches that run inside this lock-holding transaction).
+                    accepted_by_scope: dict[tuple[str, str], np.ndarray] = {}
                     for m in memories:
                         assert m.embedding is not None
                         if _metadata_conflict_key(m.metadata) is None:
@@ -766,19 +772,22 @@ class MemoryStore:
                                 )
                                 plan.append(dup_id)
                                 continue
-                            in_batch_dup = any(
-                                k.embedding is not None
-                                and k.agent_id == m.agent_id
-                                and (k.user_id or "") == (m.user_id or "")
-                                and _metadata_conflict_key(k.metadata) is None
-                                and _cosine_similarity(m.embedding, k.embedding)
-                                >= threshold
-                                for k in inserting
-                            )
-                            if in_batch_dup:
+                            scope = (m.agent_id, m.user_id or "")
+                            unit = _unit_vector(m.embedding)
+                            accepted = accepted_by_scope.get(scope)
+                            if (
+                                unit is not None
+                                and accepted is not None
+                                and float((accepted @ unit).max()) >= threshold
+                            ):
                                 logger.debug("In-batch near-duplicate; skipping")
                                 continue
-                        inserting.append(m)
+                            if unit is not None:
+                                accepted_by_scope[scope] = (
+                                    unit[None, :]
+                                    if accepted is None
+                                    else np.vstack([accepted, unit])
+                                )
                         plan.append(m)
                 else:
                     plan = list(memories)
@@ -998,7 +1007,10 @@ class MemoryStore:
             content=new_content,
             fact=new_content,
             main_content=current.main_content,
-            memory_type=str(new_metadata.get("memory_type") or current.memory_type),
+            memory_type=cast(
+                "MemoryType",
+                str(new_metadata.get("memory_type") or current.memory_type),
+            ),
             embedding=new_embedding,
             importance=new_importance,
             metadata=new_metadata,
@@ -1321,11 +1333,33 @@ class MemoryStore:
         Returns:
             True if deleted, False if not found.
         """
-        result = await self._storage.execute(
-            "DELETE FROM agent_memory WHERE memory_id = $1",
-            memory_id,
-        )
-        deleted = result == "DELETE 1"
+        async with self._storage.transaction() as conn:
+            result = await conn.execute(
+                "DELETE FROM agent_memory WHERE memory_id = $1",
+                memory_id,
+            )
+            deleted = bool(result == "DELETE 1")
+            if deleted:
+                # Repoint any lineage head that referenced the deleted memory to
+                # the newest surviving revision (active preferred), or NULL when
+                # nothing remains. memory_lineages.current_memory_id has no FK,
+                # so without this it would dangle at a missing row.
+                await conn.execute(
+                    """
+                    UPDATE memory_lineages l
+                    SET current_memory_id = (
+                            SELECT m.memory_id
+                            FROM agent_memory m
+                            WHERE m.lineage_id = l.lineage_id
+                            ORDER BY (m.status = 'active') DESC,
+                                     m.revision DESC, m.created_at DESC
+                            LIMIT 1
+                        ),
+                        updated_at = NOW()
+                    WHERE l.current_memory_id = $1
+                    """,
+                    memory_id,
+                )
         if deleted:
             logger.debug(f"Deleted memory {memory_id}")
         return deleted
@@ -1695,9 +1729,11 @@ class MemoryStore:
                     )
                     AND fact_tsv @@ plainto_tsquery($9::regconfig, $1)
             )
+            -- Weights threaded from settings (keyword term absorbs the
+            -- semantic weight, since there is no semantic branch here).
             SELECT * FROM (
                 SELECT *,
-                    (keyword_rank * 0.7 + decay_score * 0.2 + importance * 0.1) AS score
+                    (keyword_rank * $11 + decay_score * $12 + importance * $13) AS score
                 FROM keyword_matches
             ) scored
             WHERE score >= $8
@@ -1719,6 +1755,9 @@ class MemoryStore:
                 query.min_score,  # $8
                 settings.text_search_config,  # $9
                 query.include_superseded,  # $10
+                settings.weight_keyword + settings.weight_semantic,  # $11
+                settings.weight_decay,  # $12
+                settings.weight_importance,  # $13
             )
 
             results: list[SearchResult] = []
@@ -1807,6 +1846,11 @@ class MemoryStore:
                 list(memory_types) if memory_types else None,
                 min_score,
                 include_superseded,
+                # No keyword branch here, so the semantic term absorbs the
+                # keyword weight (matches the 0.60 default).
+                settings.weight_semantic + settings.weight_keyword,
+                settings.weight_decay,
+                settings.weight_importance,
             )
 
             results: list[SearchResult] = []

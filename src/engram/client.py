@@ -423,8 +423,24 @@ class Engram:
         max_chunk_tokens: int = 700,
         metadata: Metadata | None = None,
     ) -> list[LongInputChunk]:
-        """Split long input by visible structure, with bounded chunk sizes."""
+        """Split long input into source-anchored chunks.
+
+        Uses the optional chonkie RecursiveChunker when configured and
+        available (``long_input_chunker="chonkie"``), otherwise the builtin
+        structure/heading-aware splitter. Both produce the same
+        ``(heading, body, char_start, char_end)`` parts, which
+        ``_chunks_from_parts`` turns into classified, anchored LongInputChunks.
+        """
         max_chars = max(400, max_chunk_tokens * 4)
+
+        if self._settings.long_input_chunker == "chonkie":
+            from engram.chunking import chonkie_recursive_spans
+
+            spans = chonkie_recursive_spans(text, max_chunk_tokens=max_chunk_tokens)
+            if spans is not None:
+                return self._chunks_from_parts(spans, max_chars, metadata)
+            # chonkie unavailable/failed -> fall through to the builtin splitter.
+
         parts: list[tuple[str | None, str, int, int]] = []
         heading: str | None = None
         buffer: list[str] = []
@@ -468,6 +484,20 @@ class Engram:
             body = text.strip()
             parts = [(None, body, lead, lead + len(body))]
 
+        return self._chunks_from_parts(parts, max_chars, metadata)
+
+    def _chunks_from_parts(
+        self,
+        parts: list[tuple[str | None, str, int, int]],
+        max_chars: int,
+        metadata: Metadata | None,
+    ) -> list[LongInputChunk]:
+        """Assemble classified, source-anchored LongInputChunks from spans.
+
+        Each part is ``(heading, body, char_start, char_end)``. Bodies larger
+        than ``max_chars`` are windowed at sentence/paragraph boundaries; char
+        offsets stay exact spans into the source so anchors remain citable.
+        """
         chunks: list[LongInputChunk] = []
         for heading, body, char_start, _char_end in parts:
             remaining = body
@@ -860,6 +890,7 @@ class Engram:
                     user_message,
                     assistant_response,
                     max_length=_SUMMARY_MAX_WORDS,
+                    style=self._settings.summary_style,
                 )
                 if summary_loaded_at is False:
                     # No session snapshot loaded (explicit summary given):
@@ -881,6 +912,7 @@ class Engram:
                             user_message,
                             assistant_response,
                             max_length=_SUMMARY_MAX_WORDS,
+                            style=self._settings.summary_style,
                         )
                         await self._sessions.update_summary(session_id, rebased)
             except SessionNotFoundError:
@@ -924,7 +956,14 @@ class Engram:
         importance: float | None = None,
         metadata: Metadata | None = None,
     ) -> Memory:
-        """Update an existing memory.
+        """Edit a memory in place (legacy; bypasses lineage history).
+
+        This mutates the existing row and does not create a new revision or
+        supersede anything. For user corrections and contradiction handling,
+        prefer ``revise()``, which records a new active revision and keeps the
+        prior fact in the lineage for audit/history. Use ``update()`` only for
+        non-semantic in-place edits (e.g. bumping importance or merging
+        metadata) where you do not want a new revision.
 
         Args:
             memory_id: The memory to update.
@@ -2562,6 +2601,7 @@ class Engram:
                 user_message,
                 assistant_response,
                 max_length=_SUMMARY_MAX_WORDS,
+                style=self._settings.summary_style,
             )
 
         lines: list[str] = []
@@ -2753,8 +2793,16 @@ class Engram:
     # Health Operations
     # =========================================================================
 
-    async def health_check(self) -> dict[str, Any]:
+    async def health_check(
+        self, *, skip_embedding_test: bool = False
+    ) -> dict[str, Any]:
         """Perform a comprehensive health check.
+
+        Args:
+            skip_embedding_test: When True, skip the live embedding probe. The
+                probe embeds a short string, which costs a request on metered
+                providers (cached only after the first call). Pass True for
+                cheap liveness checks that don't need to exercise the provider.
 
         Returns:
             Dictionary with health status and component details.
@@ -2767,4 +2815,4 @@ class Engram:
         self._ensure_connected()
         assert self._health is not None
 
-        return await self._health.check()
+        return await self._health.check(skip_embedding_test=skip_embedding_test)

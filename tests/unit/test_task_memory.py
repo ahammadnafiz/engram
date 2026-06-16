@@ -208,7 +208,7 @@ def _event_row(
 class TestSearchEvents:
     def _manager(self, rows: list[dict[str, object]]) -> TaskMemoryManager:
         storage = AsyncMock()
-        storage._settings.text_search_config = "english"
+        storage.settings.text_search_config = "english"
         storage.fetchall = AsyncMock(return_value=rows)
         return TaskMemoryManager(storage)
 
