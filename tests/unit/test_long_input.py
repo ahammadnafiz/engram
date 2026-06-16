@@ -62,6 +62,42 @@ class TestChunkAnchors:
         assert text[chunks[0].char_start : chunks[0].char_end] == chunks[0].text
 
 
+class TestChonkieBackend:
+    """Optional chonkie recursive chunker, with builtin fallback."""
+
+    def _engram_chonkie(self) -> Engram:
+        from engram.core.config import EngramSettings
+
+        return Engram(settings=EngramSettings(long_input_chunker="chonkie"))
+
+    def test_chonkie_chunks_have_exact_anchors(self) -> None:
+        pytest.importorskip("chonkie")
+        eg = self._engram_chonkie()
+
+        chunks = eg._split_long_input(DOC, max_chunk_tokens=60)
+
+        assert chunks, "expected chonkie to produce chunks"
+        for chunk in chunks:
+            assert DOC[chunk.char_start : chunk.char_end] == chunk.text
+            assert chunk.kind  # classified by the pipeline, not chonkie
+
+    def test_falls_back_to_builtin_when_chonkie_unavailable(self, monkeypatch) -> None:
+        import engram.chunking
+
+        # Simulate chonkie missing/failed: the span helper returns None.
+        monkeypatch.setattr(
+            engram.chunking, "chonkie_recursive_spans", lambda *_a, **_k: None
+        )
+        eg = self._engram_chonkie()
+
+        chunks = eg._split_long_input(DOC)
+
+        # The builtin splitter ran: it detects headings, which chonkie does not.
+        assert any(c.heading == "Project Atlas Requirements" for c in chunks)
+        for chunk in chunks:
+            assert DOC[chunk.char_start : chunk.char_end] == chunk.text
+
+
 class TestQueryTerms:
     """Short but critical tokens like p95/SLA must match source chunks."""
 

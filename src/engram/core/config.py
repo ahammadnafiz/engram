@@ -209,6 +209,26 @@ class EngramSettings(BaseSettings):
             "Changing it on an existing database rebuilds the tsvector columns."
         ),
     )
+    long_input_chunker: str = Field(
+        default="builtin",
+        pattern="^(builtin|chonkie)$",
+        description=(
+            "Chunking backend for record_long_input(). 'builtin' is the "
+            "dependency-free structure/heading-aware splitter. 'chonkie' uses "
+            "the optional chonkie RecursiveChunker (install engram[chunking]); "
+            "it falls back to 'builtin' automatically if chonkie is missing."
+        ),
+    )
+    summary_style: str = Field(
+        default="concise",
+        pattern="^(concise|structured)$",
+        description=(
+            "Rolling conversation-summary style. 'concise' is the default "
+            "free-form summary. 'structured' maintains the Goal / Constraints / "
+            "Progress / Decisions / Next Steps / Critical Context template "
+            "(iteratively updated) for better long-conversation retention."
+        ),
+    )
 
     # -------------------------------------------------------------------------
     # Logging
