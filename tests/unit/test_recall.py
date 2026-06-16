@@ -90,6 +90,7 @@ class TestParseClassification:
 
 class TestResolveTimeframe:
     def test_yesterday_is_full_day(self) -> None:
+        pytest.importorskip("dateparser")
         since, until = resolve_timeframe("yesterday", base=BASE)
         assert since == datetime(2026, 6, 14, tzinfo=timezone.utc)
         assert until is not None and until.date() == since.date()
@@ -157,6 +158,7 @@ class TestRecallRouting:
 
     @pytest.mark.asyncio
     async def test_event_intent_searches_ledger_with_timeframe(self) -> None:
+        pytest.importorskip("dateparser")
         eg = _engram(
             '{"intent": "event", "topic": "chatbot", "when": "yesterday"}',
             "You asked about making memory jobs automatic.",
