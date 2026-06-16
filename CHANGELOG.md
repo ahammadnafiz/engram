@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Batched memory-operation decisions: `add_conversation` now consolidates all
+  extracted facts in a single LLM call, chunked into bounded concurrent
+  sub-batches for large turns, instead of one round-trip per fact.
+- Optional Chonkie recursive chunker for `record_long_input`
+  (`ENGRAM_LONG_INPUT_CHUNKER=chonkie`, extra `engram[chunking]`), with
+  automatic fallback to the builtin structure-aware splitter.
+- Opt-in structured rolling-summary template
+  (`ENGRAM_SUMMARY_STYLE=structured`): Goal / Constraints / Progress /
+  Decisions / Next Steps / Critical Context, iteratively updated.
+- Schema-version fast-path so `connect()` skips structural migration work when
+  the database is already at the current version.
+- `PostgresStorage.settings` accessor and `health_check(skip_embedding_test=...)`
+  to skip the metered embedding probe.
+
+### Changed
+- Configured search weights now apply to all search modes. Hybrid and semantic
+  defaults are unchanged; keyword mode now derives its weights from settings
+  instead of hardcoded constants.
+- `add_batch` in-batch near-duplicate detection vectorized with numpy
+  (previously O(n^2) Python cosine).
+- Memory-operation `DELETE` documented as a history-preserving supersede,
+  matching `add_conversation`'s behavior.
+- Per-scope write advisory lock keyed with 64-bit `hashtextextended` to reduce
+  false sharing across scopes.
+
+### Fixed
+- `forget()` repoints the lineage head to the newest surviving revision instead
+  of leaving `memory_lineages` pointing at a deleted row.
+- `mypy --strict` clean across the package (typed the `revise()` memory_type).
+
 ## [0.3.0a2] - 2026-06-15
 
 ### Added
