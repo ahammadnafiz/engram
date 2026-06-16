@@ -6,6 +6,8 @@ summarization, and other AI tasks.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -24,13 +26,53 @@ logger = logging.getLogger(__name__)
 # (OpenAI: "length", Anthropic: "max_tokens", some providers: "max_output_tokens")
 _TRUNCATION_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
 
+# Max facts decided in one LLM call. Turns with more facts are chunked into
+# bounded concurrent sub-batches so the decision output can't overflow the
+# model's token cap, and so no single prompt grows unwieldy.
+_MAX_FACTS_PER_DECISION = 12
+
+
+def _parse_operation_decisions(text: str) -> dict[int, dict[str, Any]]:
+    """Parse the batched-decision JSON array into a {fact_number: decision} map.
+
+    Tolerant of code fences and surrounding prose; returns {} on any failure so
+    the caller falls back to a safe per-fact ADD.
+    """
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"):
+            t = t[4:]
+    start, end = t.find("["), t.rfind("]")
+    if start == -1 or end == -1:
+        return {}
+    try:
+        data = json.loads(t[start : end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    out: dict[int, dict[str, Any]] = {}
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and "fact" in item:
+                try:
+                    out[int(item["fact"])] = item
+                except (ValueError, TypeError):
+                    continue
+    return out
+
 
 class MemoryOperationType(str, Enum):
-    """Types of memory operations."""
+    """Types of memory operations.
+
+    Note on DELETE: the caller (Engram.add_conversation) applies both UPDATE
+    and DELETE as a supersede — a new active revision that retains the old fact
+    in the same lineage for audit/history. DELETE therefore means "replace the
+    contradicted fact", not "hard-remove the row".
+    """
 
     ADD = "ADD"  # Create new memory
     UPDATE = "UPDATE"  # Augment existing memory with new info
-    DELETE = "DELETE"  # Remove contradicted memory
+    DELETE = "DELETE"  # Replace a contradicted memory (supersede, history kept)
     NOOP = "NOOP"  # No operation needed (duplicate)
 
 
@@ -864,6 +906,200 @@ REASON: [brief explanation]
                 reason=f"Fallback due to error: {e}",
             )
 
+    def _operation_from_decision(
+        self,
+        fact: str,
+        candidates: list[tuple[str, str]],
+        decision: dict[str, Any] | None,
+    ) -> MemoryOperation:
+        """Build a MemoryOperation from one parsed batched-decision object.
+
+        Applies the same target resolution and ADD-fallback safety as
+        evaluate_memory_operation: a missing decision, or an UPDATE/DELETE with
+        an unresolvable target, degrades to ADD so a fact is never silently
+        dropped.
+        """
+        if not decision:
+            return MemoryOperation(
+                operation=MemoryOperationType.ADD,
+                content=fact,
+                original_fact=fact,
+                reason="No decision returned; stored as new",
+            )
+
+        op_raw = str(decision.get("operation", "ADD")).upper()
+        if "DELETE" in op_raw:
+            op_type = MemoryOperationType.DELETE
+        elif "UPDATE" in op_raw:
+            op_type = MemoryOperationType.UPDATE
+        elif "NOOP" in op_raw:
+            op_type = MemoryOperationType.NOOP
+        else:
+            op_type = MemoryOperationType.ADD
+
+        reason = str(decision.get("reason") or "")
+
+        target_id: str | None = None
+        target = decision.get("target")
+        if target is not None:
+            try:
+                idx = int(target) - 1
+                if 0 <= idx < len(candidates):
+                    target_id = candidates[idx][0]
+            except (ValueError, TypeError):
+                target_id = None
+
+        # UPDATE/DELETE without a resolvable target would drop the fact; the
+        # safe default (per the prompt) is to store it as new.
+        if (
+            op_type in (MemoryOperationType.UPDATE, MemoryOperationType.DELETE)
+            and target_id is None
+        ):
+            logger.debug(
+                f"{op_type.value} operation had unresolvable target; "
+                f"falling back to ADD for fact: {fact[:80]}"
+            )
+            return MemoryOperation(
+                operation=MemoryOperationType.ADD,
+                content=fact,
+                original_fact=fact,
+                reason=f"{op_type.value} target unresolvable; stored as new"
+                + (f" ({reason})" if reason else ""),
+            )
+
+        if op_type == MemoryOperationType.UPDATE:
+            merged = decision.get("merged")
+            content = (
+                str(merged)
+                if merged and str(merged).strip().lower() != "none"
+                else fact
+            )
+        else:
+            content = fact
+
+        return MemoryOperation(
+            operation=op_type,
+            content=content,
+            target_id=target_id,
+            original_fact=fact,
+            reason=reason,
+        )
+
+    async def decide_memory_operations(
+        self,
+        items: list[tuple[str, list[tuple[str, str]]]],
+        *,
+        max_facts_per_call: int = _MAX_FACTS_PER_DECISION,
+    ) -> list[MemoryOperation]:
+        """Batched form of evaluate_memory_operation: decide ADD/UPDATE/DELETE/
+        NOOP for many facts with as few LLM calls as possible.
+
+        Each item is ``(fact, [(memory_id, content), ...])`` — the fact and its
+        own related existing memories. The per-fact loop in process_for_memory
+        otherwise costs one LLM round-trip per fact; this collapses them into a
+        single call. Once there are more than ``max_facts_per_call`` facts the
+        work is chunked into bounded concurrent sub-batches, so a large turn
+        can never overflow the model's output token cap or produce an unwieldy
+        single prompt.
+
+        Args:
+            items: Facts paired with their candidate memories (each fact should
+                have at least one candidate; facts with none are pure ADDs and
+                need no LLM decision).
+            max_facts_per_call: Upper bound on facts decided per LLM call.
+
+        Returns:
+            Operations aligned 1:1 with ``items``. Any fact whose decision is
+            missing or unparseable falls back to ADD.
+        """
+        if not items:
+            return []
+        if len(items) <= max_facts_per_call:
+            return await self._decide_batch(items)
+
+        # Many facts: split into bounded batches, decide them concurrently, and
+        # stitch the results back together in the original order.
+        batches = [
+            items[i : i + max_facts_per_call]
+            for i in range(0, len(items), max_facts_per_call)
+        ]
+        results = await asyncio.gather(*(self._decide_batch(b) for b in batches))
+        return [op for batch_ops in results for op in batch_ops]
+
+    async def _decide_batch(
+        self,
+        items: list[tuple[str, list[tuple[str, str]]]],
+    ) -> list[MemoryOperation]:
+        """Decide operations for one bounded batch of facts in a single call."""
+        if not items:
+            return []
+
+        blocks: list[str] = []
+        for n, (fact, candidates) in enumerate(items, start=1):
+            cand_lines = "\n".join(
+                f"    {j}. {content}"
+                for j, (_id, content) in enumerate(candidates, start=1)
+            )
+            blocks.append(
+                f'<fact n="{n}">{fact}</fact>\n'
+                f'<existing_memories_for_fact n="{n}">\n{cand_lines}\n'
+                f"</existing_memories_for_fact>"
+            )
+        facts_block = "\n\n".join(blocks)
+
+        prompt = f"""<task>
+For EACH numbered fact, compare it against ONLY that fact's own existing
+memories and decide exactly one operation: ADD, UPDATE, DELETE, or NOOP.
+</task>
+
+<decision_rules priority_order="true">
+<rule operation="DELETE" priority="1">New fact CONTRADICTS/REPLACES an existing memory about the SAME person and attribute (job/location/status change, or a correction).</rule>
+<rule operation="ADD" priority="2">Fact contains NEW INFORMATION not in any existing memory (different topic, attribute, or person).</rule>
+<rule operation="NOOP" priority="3">Fact is SEMANTICALLY IDENTICAL to an existing memory (same topic AND same information; only wording differs).</rule>
+<rule operation="UPDATE" priority="4">Fact ADDS DETAIL to an existing memory (merge them into one).</rule>
+</decision_rules>
+
+<common_mistakes>
+<mistake>NOOP for a job/location/status change — that is DELETE.</mistake>
+<mistake>NOOP for a correction — that is DELETE.</mistake>
+<mistake>NOOP for loosely related facts (job vs project) — that is ADD.</mistake>
+</common_mistakes>
+
+<default>If unsure, choose ADD — better to store extra than lose information.</default>
+
+<facts>
+{facts_block}
+</facts>
+
+<output_format strict="true">
+Return ONLY a JSON array, one object per fact, in fact-number order:
+[{{"fact": 1, "operation": "ADD|UPDATE|DELETE|NOOP", "target": <existing memory number for UPDATE/DELETE, else null>, "merged": "<merged text for UPDATE, else null>", "reason": "<brief>"}}]
+"target" refers to the numbered existing memory listed under THAT fact only.
+No prose, no code fences.
+</output_format>"""
+
+        decisions: dict[int, dict[str, Any]] = {}
+        try:
+            response = await self._provider.complete(
+                [{"role": "user", "content": prompt}],
+                max_tokens=max(300, len(items) * 140),
+                temperature=0,
+            )
+            finish = (response.finish_reason or "").lower()
+            if finish in _TRUNCATION_FINISH_REASONS:
+                logger.warning(
+                    "Batched memory operation output truncated (finish_reason="
+                    f"{response.finish_reason}); missing facts default to ADD"
+                )
+            decisions = _parse_operation_decisions(response.content or "")
+        except Exception as e:
+            logger.warning(f"Batched memory operation decision failed: {e}")
+
+        return [
+            self._operation_from_decision(fact, candidates, decisions.get(n))
+            for n, (fact, candidates) in enumerate(items, start=1)
+        ]
+
     async def process_for_memory(
         self,
         user_message: str,
@@ -925,11 +1161,13 @@ REASON: [brief explanation]
             for op in result.operations:
                 if op.operation == MemoryOperationType.ADD:
                     await engram.add(content=op.content, ...)
-                elif op.operation == MemoryOperationType.UPDATE:
-                    await engram.update(op.target_id, content=op.content)
-                elif op.operation == MemoryOperationType.DELETE:
-                    await engram.forget(op.target_id)
-                    await engram.add(content=op.content, ...)  # Add replacement
+                elif op.operation in (
+                    MemoryOperationType.UPDATE,
+                    MemoryOperationType.DELETE,
+                ):
+                    # Both apply as a supersede: a new active revision that
+                    # keeps the old fact in the lineage for audit/history.
+                    await engram.revise(op.target_id, content=op.content)
         """
         result = ExtractionResult()
 
@@ -945,57 +1183,77 @@ REASON: [brief explanation]
         if not facts:
             return result
 
-        # Phase 2: Process each fact
-        for fact in facts:
-            # Candidates for this fact: per-fact retrieval when available,
-            # otherwise the message-level set.
-            candidates = (
-                await retrieve_for_fact(fact)
-                if retrieve_for_fact is not None
-                else existing_memories
+        # Phase 2: retrieve candidates for every fact, then decide all
+        # operations in a SINGLE batched LLM call. Retrieval runs concurrently
+        # and the previous one-LLM-call-per-fact loop is replaced by one
+        # decide_memory_operations() call, so cost is ~constant in fact count.
+        if retrieve_for_fact is not None:
+            candidate_lists = list(
+                await asyncio.gather(*(retrieve_for_fact(fact) for fact in facts))
             )
+        else:
+            candidate_lists = [existing_memories for _ in facts]
 
-            # Candidates are (id, content, score) or (id, content, score,
-            # semantic_score). The combined score ranks relevance; the
-            # duplicate check needs raw cosine similarity, because the hybrid
-            # combined score includes time decay and sags below the duplicate
-            # threshold within hours even for identical facts.
-            def _similarity(cand: tuple) -> float:  # type: ignore[type-arg]
-                return float(cand[3]) if len(cand) > 3 else float(cand[2])
+        # Candidates are (id, content, score) or (id, content, score,
+        # semantic_score). The combined score ranks relevance; the duplicate
+        # check needs raw cosine similarity, because the hybrid combined score
+        # includes time decay and sags below the threshold within hours even
+        # for identical facts.
+        def _similarity(cand: tuple) -> float:  # type: ignore[type-arg]
+            return float(cand[3]) if len(cand) > 3 else float(cand[2])
 
-            # Find relevant existing memories for this specific fact
-            relevant_memories: list[tuple[str, str]] = []
+        # operations[i] holds fact i's resolved op (1:1 with facts, in order).
+        operations: list[MemoryOperation | None] = [None] * len(facts)
+        # Facts that need an LLM decision: (fact_index, fact, relevant_memories).
+        to_decide: list[tuple[int, str, list[tuple[str, str]]]] = []
 
-            for cand in candidates:
-                if cand[2] >= similarity_threshold:
-                    relevant_memories.append((cand[0], cand[1]))
-
-            # Quick duplicate check: skip facts whose raw cosine similarity to an
-            # existing memory is at/above the duplicate threshold. The embedding
-            # similarity is the authoritative signal; the prior lexical
-            # Jaccard/proper-noun heuristic silently mis-fired (it skipped
-            # distinct facts that shared entities and missed reworded
-            # duplicates), so it is gone.
-            is_duplicate = False
-            for cand in candidates:
-                if _similarity(cand) >= duplicate_threshold:
-                    is_duplicate = True
-                    result.operations.append(
-                        MemoryOperation(
-                            operation=MemoryOperationType.NOOP,
-                            content=fact,
-                            original_fact=fact,
-                            reason=f"Duplicate of existing memory: {cand[1][:50]}...",
-                        )
-                    )
-                    break
-
-            if is_duplicate:
+        for i, (fact, candidates) in enumerate(
+            zip(facts, candidate_lists, strict=True)
+        ):
+            # Quick duplicate guard (no LLM): raw cosine >= duplicate_threshold.
+            dup = next(
+                (c for c in candidates if _similarity(c) >= duplicate_threshold),
+                None,
+            )
+            if dup is not None:
+                operations[i] = MemoryOperation(
+                    operation=MemoryOperationType.NOOP,
+                    content=fact,
+                    original_fact=fact,
+                    reason=f"Duplicate of existing memory: {dup[1][:50]}...",
+                )
                 continue
 
-            # Evaluate operation
-            operation = await self.evaluate_memory_operation(fact, relevant_memories)
-            result.operations.append(operation)
+            relevant = [
+                (c[0], c[1]) for c in candidates if c[2] >= similarity_threshold
+            ]
+            if not relevant:
+                # Nothing to compare against -> a new fact, no LLM needed.
+                operations[i] = MemoryOperation(
+                    operation=MemoryOperationType.ADD,
+                    content=fact,
+                    original_fact=fact,
+                    reason="No similar memories exist",
+                )
+                continue
+
+            to_decide.append((i, fact, relevant))
+
+        if to_decide:
+            decided = await self.decide_memory_operations(
+                [(fact, relevant) for _i, fact, relevant in to_decide]
+            )
+            for (i, _fact, _relevant), op in zip(to_decide, decided, strict=True):
+                operations[i] = op
+
+        # Every slot is filled above; the ADD fallback is purely defensive.
+        result.operations = [
+            op
+            or MemoryOperation(
+                operation=MemoryOperationType.ADD, content=fact, original_fact=fact
+            )
+            for op, fact in zip(operations, facts, strict=True)
+        ]
 
         # Optionally tag each operation with a cognitive memory type. Operations
         # are 1:1 with extracted facts, in order.
@@ -1056,6 +1314,7 @@ Provide the summary below:
         assistant_response: str,
         *,
         max_length: int = 200,
+        style: str = "concise",
     ) -> str:
         """Roll a conversation summary forward with a new exchange.
 
@@ -1069,14 +1328,66 @@ Provide the summary below:
             user_message: The latest user message.
             assistant_response: The latest assistant response.
             max_length: Approximate max length of the summary in words.
+            style: ``"concise"`` (default, free-form) or ``"structured"`` — the
+                Goal / Constraints / Progress / Decisions / Next Steps /
+                Critical Context template, iteratively updated for better
+                long-conversation retention.
 
         Returns:
             The updated summary text.
         """
         prev = previous_summary.strip() if previous_summary else ""
+        update_or_write = (
+            "Update the existing summary below to incorporate the new exchange"
+            if prev
+            else "Write a summary of the exchange below"
+        )
 
-        prompt = f"""<task>
-Maintain a running summary of a conversation. {"Update the existing summary below to incorporate the new exchange" if prev else "Write a summary of the exchange below"}.
+        if style == "structured":
+            prompt = f"""<task>
+Maintain a running, STRUCTURED summary of a conversation so it can be resumed
+later without losing durable information. {update_or_write}, keeping it under
+{max_length} words total. Preserve durable facts, goals, constraints,
+preferences, and decisions; drop small talk. Move items between sections as
+they evolve and remove obsolete entries.
+</task>
+
+<template>
+## Goal
+[What the user is trying to accomplish]
+
+## Constraints & Preferences
+[Durable preferences, constraints, standing instructions]
+
+## Progress
+[What has been established or done so far]
+
+## Key Decisions
+[Important decisions or corrections, and why]
+
+## Next Steps
+[What should happen next, if stated]
+
+## Critical Context
+[Specific values, names, dates, identifiers worth keeping verbatim]
+</template>
+
+<existing_summary>
+{prev if prev else "<none/>"}
+</existing_summary>
+
+<new_exchange>
+<user>{user_message}</user>
+<assistant>{assistant_response}</assistant>
+</new_exchange>
+
+<output>
+Return only the updated structured summary using the template headings (omit a
+section if it has no content). No preamble.
+</output>"""
+        else:
+            prompt = f"""<task>
+Maintain a running summary of a conversation. {update_or_write}.
 Keep it under {max_length} words. Preserve durable facts, goals, and decisions; drop small talk.
 </task>
 

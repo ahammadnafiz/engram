@@ -8,18 +8,19 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
+def _resp(content: str, finish_reason: str = "stop"):
+    from engram.providers.llm.protocol import LLMResponse
+
+    return LLMResponse(content=content, model="test-model", finish_reason=finish_reason)
+
+
 def make_service(reply: str, finish_reason: str = "stop"):
     from engram.llm.service import LLMService
-    from engram.providers.llm.protocol import LLMResponse
 
     provider = MagicMock()
     provider.model = "test-model"
     provider.complete_text = AsyncMock(return_value=reply)
-    provider.complete = AsyncMock(
-        return_value=LLMResponse(
-            content=reply, model="test-model", finish_reason=finish_reason
-        )
-    )
+    provider.complete = AsyncMock(return_value=_resp(reply, finish_reason))
     return LLMService(provider=provider)
 
 
@@ -48,6 +49,21 @@ class TestUpdateConversationSummary:
         prompt = svc._provider.complete_text.call_args.kwargs["prompt"]
         assert "Old summary" in prompt
         assert "Update the existing summary" in prompt
+
+    @pytest.mark.asyncio
+    async def test_concise_style_is_default_and_unstructured(self) -> None:
+        svc = make_service("summary")
+        await svc.update_conversation_summary(None, "hi", "hello")
+        prompt = svc._provider.complete_text.call_args.kwargs["prompt"]
+        assert "## Goal" not in prompt  # default stays free-form
+
+    @pytest.mark.asyncio
+    async def test_structured_style_uses_template(self) -> None:
+        svc = make_service("## Goal\nplan trip")
+        await svc.update_conversation_summary(None, "hi", "hello", style="structured")
+        prompt = svc._provider.complete_text.call_args.kwargs["prompt"]
+        for heading in ("## Goal", "## Constraints & Preferences", "## Progress"):
+            assert heading in prompt
 
 
 class TestProcessForMemoryPerFact:
@@ -248,6 +264,137 @@ class TestEvaluateMemoryOperation:
         assert op.operation == MemoryOperationType.UPDATE
         assert op.target_id == "mem_b"
         assert op.content == "merged fact text"
+
+
+class TestBatchedDecision:
+    """process_for_memory must decide all facts in ONE batched LLM call."""
+
+    @staticmethod
+    def _provider(side_effect: list[str]):
+        from engram.providers.llm.protocol import LLMResponse
+
+        provider = MagicMock()
+        provider.model = "test-model"
+        provider.complete = AsyncMock(
+            side_effect=[
+                LLMResponse(content=c, model="test-model", finish_reason="stop")
+                for c in side_effect
+            ]
+        )
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_two_related_facts_use_single_decision_call(self) -> None:
+        from engram.llm.service import LLMService, MemoryOperationType
+
+        decision = (
+            '[{"fact": 1, "operation": "DELETE", "target": 1, "merged": null,'
+            ' "reason": "moved"},'
+            ' {"fact": 2, "operation": "ADD", "target": null, "merged": null,'
+            ' "reason": "new"}]'
+        )
+        provider = self._provider(["Fact one\nFact two", decision])
+        svc = LLMService(provider=provider)
+
+        async def retrieve(fact: str):
+            return [("m1", "old related memory", 0.60)]  # related, not a dup
+
+        result = await svc.process_for_memory(
+            "msg", "resp", [], retrieve_for_fact=retrieve
+        )
+
+        # extraction (1) + one batched decision (1) == 2 calls, not 1-per-fact.
+        assert provider.complete.await_count == 2
+        assert result.operations[0].operation == MemoryOperationType.DELETE
+        assert result.operations[0].target_id == "m1"
+        assert result.operations[1].operation == MemoryOperationType.ADD
+
+    @pytest.mark.asyncio
+    async def test_update_target_resolved_from_batched_json(self) -> None:
+        from engram.llm.service import LLMService, MemoryOperationType
+
+        decision = (
+            '[{"fact": 1, "operation": "UPDATE", "target": 2,'
+            ' "merged": "merged text", "reason": "detail"}]'
+        )
+        provider = self._provider(["Only fact", decision])
+        svc = LLMService(provider=provider)
+
+        async def retrieve(fact: str):
+            return [("m_a", "irrelevant", 0.55), ("m_b", "sister Nadia", 0.70)]
+
+        result = await svc.process_for_memory(
+            "msg", "resp", [], retrieve_for_fact=retrieve
+        )
+        op = result.operations[0]
+        assert op.operation == MemoryOperationType.UPDATE
+        assert op.target_id == "m_b"
+        assert op.content == "merged text"
+
+    @pytest.mark.asyncio
+    async def test_unparseable_decision_falls_back_to_add(self) -> None:
+        from engram.llm.service import LLMService, MemoryOperationType
+
+        provider = self._provider(["Fact one", "not json at all"])
+        svc = LLMService(provider=provider)
+
+        async def retrieve(fact: str):
+            return [("m1", "related", 0.60)]
+
+        result = await svc.process_for_memory(
+            "msg", "resp", [], retrieve_for_fact=retrieve
+        )
+        assert result.operations[0].operation == MemoryOperationType.ADD
+        assert result.operations[0].content == "Fact one"
+
+    @pytest.mark.asyncio
+    async def test_many_facts_chunk_into_bounded_concurrent_calls(self) -> None:
+        from engram.llm.service import LLMService, MemoryOperationType
+
+        # 5 facts, batch size 2 -> 3 decision calls (2 + 2 + 1), each returning
+        # ADDs for its own facts. Results must stitch back in original order.
+        def batch_json(n: int) -> str:
+            objs = ", ".join(
+                f'{{"fact": {i}, "operation": "ADD", "target": null,'
+                f' "merged": null, "reason": "new"}}'
+                for i in range(1, n + 1)
+            )
+            return f"[{objs}]"
+
+        provider = MagicMock()
+        provider.model = "test-model"
+        provider.complete = AsyncMock(
+            side_effect=[
+                _resp(batch_json(2)),
+                _resp(batch_json(2)),
+                _resp(batch_json(1)),
+            ]
+        )
+        svc = LLMService(provider=provider)
+
+        items = [(f"fact {i}", [(f"m{i}", "related memory")]) for i in range(5)]
+
+        ops = await svc.decide_memory_operations(items, max_facts_per_call=2)
+
+        assert provider.complete.await_count == 3
+        assert len(ops) == 5
+        assert all(op.operation == MemoryOperationType.ADD for op in ops)
+
+    @pytest.mark.asyncio
+    async def test_all_new_facts_make_no_decision_call(self) -> None:
+        from engram.llm.service import LLMService, MemoryOperationType
+
+        provider = self._provider(["Fact one\nFact two"])  # only extraction
+        svc = LLMService(provider=provider)
+
+        async def retrieve(fact: str):
+            return []  # no candidates -> deterministic ADD, no LLM decision
+
+        result = await svc.process_for_memory(
+            "msg", "resp", [], retrieve_for_fact=retrieve
+        )
+        assert provider.complete.await_count == 1  # extraction only
+        assert all(op.operation == MemoryOperationType.ADD for op in result.operations)
 
 
 class TestQueryExpansionPrompt:
