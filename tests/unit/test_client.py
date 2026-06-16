@@ -249,18 +249,60 @@ class TestAddConversationSummary:
         self._wire(eg, "prev")
         await eg.add_conversation("hi", "hello", "agent", session_id="s1")
 
+        assert eg._llm.process_for_memory.call_args.args[:2] == ("hi", "")
         assert (
             eg._llm.process_for_memory.call_args.kwargs["conversation_summary"]
             == "prev"
         )
         eg._llm.update_conversation_summary.assert_awaited_once_with(
-            "prev", "hi", "hello"
+            "prev", "hi", "hello", max_length=250
         )
         # Written via CAS against the snapshot the summary was derived from
         eg._sessions.try_update_summary.assert_awaited_once_with(
             "s1", "rolled", expected_updated_at=None
         )
         eg._sessions.update_summary.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_assistant_response_is_not_memory_source_by_default(self) -> None:
+        eg = make_engram()
+        self._wire(eg, "prev")
+
+        await eg.add_conversation(
+            "What was my old meeting time?",
+            "It changed from 3 PM to 10 PM.",
+            "agent",
+            session_id="s1",
+        )
+
+        assert eg._llm.process_for_memory.call_args.args[:2] == (
+            "What was my old meeting time?",
+            "",
+        )
+        eg._llm.update_conversation_summary.assert_awaited_once_with(
+            "prev",
+            "What was my old meeting time?",
+            "It changed from 3 PM to 10 PM.",
+            max_length=250,
+        )
+
+    @pytest.mark.asyncio
+    async def test_assistant_response_extraction_can_be_opted_in(self) -> None:
+        eg = make_engram()
+        self._wire(eg, "prev")
+
+        await eg.add_conversation(
+            "Generate and remember a safe-note label.",
+            "The safe-note label is Violet.",
+            "agent",
+            session_id="s1",
+            extract_assistant_response=True,
+        )
+
+        assert eg._llm.process_for_memory.call_args.args[:2] == (
+            "Generate and remember a safe-note label.",
+            "The safe-note label is Violet.",
+        )
 
     @pytest.mark.asyncio
     async def test_update_summary_false_skips_roll(self) -> None:

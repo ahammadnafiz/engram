@@ -71,10 +71,17 @@ if TYPE_CHECKING:
         SessionId,
         UserId,
     )
+    from engram.recall.models import RecallAnswer
     from engram.session.models import Session
     from engram.task.models import EventRole, EventType
 
 logger = logging.getLogger(__name__)
+
+# Approximate word budget for rolling conversation summaries. The session
+# summary and the task checkpoint summary share this single source so the
+# checkpoint (which reuses the session summary) stays the size it was before
+# the two summaries were unified.
+_SUMMARY_MAX_WORDS = 250
 
 
 class Engram:
@@ -221,7 +228,7 @@ class Engram:
             self._graph = GraphTraversal(self._storage)
             self._sessions = SessionManager(self._storage)
             self._health = HealthChecker(self._storage, self._embedding)
-            self._task_memory = TaskMemoryManager(self._storage)
+            self._task_memory = TaskMemoryManager(self._storage, self._embedding)
 
             # Optional LLM service. A misconfigured provider (e.g. missing API key)
             # must not block core memory operations, so failures degrade to disabled.
@@ -705,6 +712,7 @@ class Engram:
         metadata: Metadata | None = None,
         search_limit: int = 10,
         update_summary: bool = True,
+        extract_assistant_response: bool = False,
     ) -> list[Memory]:
         """Intelligently store memories from a conversation exchange.
 
@@ -728,6 +736,11 @@ class Engram:
             update_summary: When True and a session_id is given, roll the
                 session's stored summary forward with this exchange (one extra
                 LLM call). Set False to skip summary maintenance.
+            extract_assistant_response: When True, allow the assistant response
+                to participate in fact extraction. The default is False because
+                assistant answers often restate existing memory; treating those
+                restatements as new facts causes read-only recall turns to
+                rewrite user-authored memories.
 
         Returns:
             Memories that were created or updated (NOOP/skipped facts excluded).
@@ -771,9 +784,12 @@ class Engram:
                 for h in hits
             ]
 
+        assistant_response_for_memory = (
+            assistant_response if extract_assistant_response else ""
+        )
         result = await self._llm.process_for_memory(
             user_message,
-            assistant_response,
+            assistant_response_for_memory,
             [],
             conversation_history=conversation_history,
             conversation_summary=effective_summary,
@@ -840,7 +856,10 @@ class Engram:
         if update_summary and session_id is not None:
             try:
                 new_summary = await self._llm.update_conversation_summary(
-                    effective_summary, user_message, assistant_response
+                    effective_summary,
+                    user_message,
+                    assistant_response,
+                    max_length=_SUMMARY_MAX_WORDS,
                 )
                 if summary_loaded_at is False:
                     # No session snapshot loaded (explicit summary given):
@@ -858,7 +877,10 @@ class Engram:
                     if written is None:
                         latest = await self._sessions.get(session_id)
                         rebased = await self._llm.update_conversation_summary(
-                            latest.summary, user_message, assistant_response
+                            latest.summary,
+                            user_message,
+                            assistant_response,
+                            max_length=_SUMMARY_MAX_WORDS,
                         )
                         await self._sessions.update_summary(session_id, rebased)
             except SessionNotFoundError:
@@ -1095,6 +1117,7 @@ class Engram:
         memory_types: list[MemoryType] | None = None,
         mode: SearchMode = "hybrid",
         rerank: bool = False,
+        include_superseded: bool = False,
     ) -> list[SearchResult]:
         """Search memories.
 
@@ -1116,6 +1139,10 @@ class Engram:
             rerank: When True, overfetch candidates and re-order them with a
                 local cross-encoder before returning the top ``limit``.
                 Requires the optional sentence-transformers dependency.
+            include_superseded: When True, historical (superseded) revisions are
+                returned alongside active facts, each labeled by ``memory.status``.
+                Default False keeps recall to current facts only. Used for
+                "what did I say before" / audit queries.
 
         Returns:
             List of search results with scores.
@@ -1150,6 +1177,7 @@ class Engram:
                 metadata_filter=metadata_filter,
                 memory_types=memory_types,
                 mode=mode,
+                include_superseded=include_superseded,
             )
         )
         if rerank:
@@ -1767,6 +1795,163 @@ class Engram:
             include_deleted=include_deleted,
         )
 
+    async def search_events(
+        self,
+        query: str,
+        *,
+        agent_id: AgentId | None = None,
+        task_run_id: str | None = None,
+        session_id: SessionId | None = None,
+        user_id: UserId | None = None,
+        event_types: list[EventType] | None = None,
+        roles: list[EventRole] | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 50,
+        include_deleted: bool = False,
+        mode: SearchMode = "hybrid",
+    ) -> list[AgentEvent]:
+        """Search the raw event ledger by content.
+
+        This is "event recall": unlike search() (active facts) and
+        get_history() (a chronological memory timeline), this searches the
+        immutable event ledger. By default it uses hybrid ranking: vector
+        similarity over event embeddings plus PostgreSQL full-text keyword
+        ranking. Events that predate embeddings still participate through the
+        keyword branch.
+
+        Args:
+            query: Free-text search terms (must not be empty).
+            agent_id: Optional agent filter.
+            task_run_id: Optional task filter.
+            session_id: Optional session filter.
+            user_id: Optional user filter.
+            event_types: Optional list of event types to restrict to.
+            roles: Optional list of roles to restrict to.
+            since: Only events created at or after this time.
+            until: Only events created at or before this time.
+            limit: Maximum number of results.
+            include_deleted: Include soft-deleted events when True.
+            mode: ``hybrid`` (default), ``semantic``, or ``keyword``.
+
+        Returns:
+            Matching events ranked by relevance, then recency.
+
+        Example:
+            hits = await engram.search_events(
+                "chatbot memory jobs",
+                agent_id="my_agent",
+                since=yesterday,
+                roles=["user"],
+            )
+        """
+        self._ensure_connected()
+        assert self._task_memory is not None
+        assert self._embedding is not None
+
+        query_embedding = None
+        if mode in {"hybrid", "semantic"}:
+            query_embedding = await self._embedding.embed(query)
+
+        return await self._task_memory.search_events(
+            query,
+            agent_id=agent_id,
+            task_run_id=task_run_id,
+            session_id=session_id,
+            user_id=user_id,
+            event_types=event_types,
+            roles=roles,
+            since=since,
+            until=until,
+            limit=limit,
+            include_deleted=include_deleted,
+            mode=mode,
+            query_embedding=query_embedding,
+        )
+
+    async def backfill_event_embeddings(
+        self,
+        *,
+        limit: int = 1000,
+        agent_id: AgentId | None = None,
+    ) -> int:
+        """Embed a bounded batch of existing events for semantic event recall.
+
+        Migration 007 intentionally does not backfill large ledgers at startup.
+        Run this method repeatedly from a worker/admin job until it returns 0.
+        Keyword recall works before backfill; semantic event recall improves as
+        rows gain ``event_embedding``.
+        """
+        self._ensure_connected()
+        assert self._task_memory is not None
+
+        return await self._task_memory.backfill_event_embeddings(
+            limit=limit,
+            agent_id=agent_id,
+        )
+
+    async def recall(
+        self,
+        question: str,
+        agent_id: AgentId,
+        *,
+        user_id: UserId | None = None,
+        question_date: datetime | None = None,
+        limit: int = 10,
+        compose_answer: bool = True,
+    ) -> RecallAnswer:
+        """Answer a natural-language question about memory, source-backed.
+
+        The memory operator classifies the question's intent (current fact,
+        historical/old-value, event recall, or topic lineage), routes to the
+        matching recall surface(s), and composes an answer grounded in the
+        retrieved evidence. The returned RecallAnswer carries the prose answer
+        plus the structured facts behind it (current value, previous values,
+        when it changed, sources, and any conflict note).
+
+        Requires a configured LLM. The underlying surfaces (search,
+        search_events, explain_memory, get_lineage) work without one.
+
+        Args:
+            question: The user's natural-language question.
+            agent_id: Agent to scope recall to.
+            user_id: Optional user filter.
+            question_date: Reference "now" for temporal phrases ("yesterday").
+                Defaults to the current time.
+            limit: Maximum evidence items to retrieve.
+            compose_answer: Whether to run the recall operator's final answer
+                composer. Set to False when the caller will generate its own
+                answer from the structured recall evidence.
+
+        Returns:
+            A RecallAnswer with answer_text and structured evidence.
+
+        Raises:
+            ConfigurationError: If no LLM is configured.
+            ValueError: If question is empty.
+
+        Example:
+            answer = await engram.recall(
+                "what was my meeting before I changed it?",
+                agent_id="my_agent",
+                user_id="nafiz",
+            )
+            print(answer.answer_text)
+        """
+        self._ensure_connected()
+
+        from engram.recall.operator import recall as _recall
+
+        return await _recall(
+            self,
+            question,
+            agent_id,
+            user_id=user_id,
+            question_date=question_date,
+            limit=limit,
+            compose_answer=compose_answer,
+        )
+
     async def redact_event(self, event_id: str) -> AgentEvent:
         """Redact an event payload and content while retaining audit metadata."""
         self._ensure_connected()
@@ -2320,10 +2505,9 @@ class Engram:
                 update_summary=session_id is not None,
             )
 
-        latest = await self._task_memory.latest_checkpoint(task_run_id)
-        previous = latest.summary if latest is not None else None
-        summary = await self._summarize_task_turn(
-            previous,
+        summary = await self._checkpoint_summary(
+            task_run_id,
+            session_id,
             user_message,
             assistant_response,
         )
@@ -2332,6 +2516,38 @@ class Engram:
             summary,
             source_event_ids=event_ids,
             metadata={"source": "memory_job", "job_id": job.job_id},
+        )
+
+    async def _checkpoint_summary(
+        self,
+        task_run_id: str,
+        session_id: SessionId | None,
+        user_message: str,
+        assistant_response: str,
+    ) -> str:
+        """Pick the summary for this turn's checkpoint.
+
+        When an LLM-backed session is in play, add_conversation() has already
+        rolled the session's running summary forward for this exact exchange, so
+        reuse it — the checkpoint then costs no extra LLM call. Fall back to
+        summarizing the turn directly only when there is no session summary to
+        borrow (no session, no LLM, or a failed/empty session summary).
+        """
+        assert self._task_memory is not None
+
+        if self._llm is not None and session_id is not None:
+            assert self._sessions is not None
+            with suppress(SessionNotFoundError):
+                session_summary = (await self._sessions.get(session_id)).summary
+                if session_summary:
+                    return session_summary
+
+        latest = await self._task_memory.latest_checkpoint(task_run_id)
+        previous = latest.summary if latest is not None else None
+        return await self._summarize_task_turn(
+            previous,
+            user_message,
+            assistant_response,
         )
 
     async def _summarize_task_turn(
@@ -2345,7 +2561,7 @@ class Engram:
                 previous_summary,
                 user_message,
                 assistant_response,
-                max_length=250,
+                max_length=_SUMMARY_MAX_WORDS,
             )
 
         lines: list[str] = []

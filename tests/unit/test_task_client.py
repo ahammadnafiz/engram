@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from engram.client import Engram
+from engram.core.exceptions import EngramError
 from engram.memory.models import Memory, RecallTrace, SearchResult
 from engram.task.models import AgentEvent, MemoryJob, TaskCheckpoint, TaskRun
 
@@ -16,6 +17,8 @@ def make_engram() -> Engram:
     eg._connected = True
     eg._task_memory = AsyncMock()
     eg._memory_store = AsyncMock()
+    eg._embedding = AsyncMock()
+    eg._embedding.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
     eg._sessions = AsyncMock()
     eg._graph = MagicMock()
     eg._llm = None
@@ -161,6 +164,105 @@ class TestTaskClientTurnFlow:
         assert checkpoint.task_run_id == "task_1"
         assert checkpoint.source_event_ids == ["evt_1", "evt_2"]
         assert "Remember project constraints" in checkpoint.summary
+
+    @pytest.mark.asyncio
+    async def test_process_memory_jobs_reuses_session_summary_for_checkpoint(
+        self,
+    ) -> None:
+        eg = make_engram()
+        eg._llm = MagicMock()
+        eg.add_conversation = AsyncMock(return_value=[])
+        eg._summarize_task_turn = AsyncMock()
+        eg._sessions.get = AsyncMock(
+            return_value=MagicMock(summary="rolled session summary")
+        )
+        eg._task_memory.claim_jobs = AsyncMock(
+            return_value=[
+                MemoryJob(
+                    job_id="job_1",
+                    job_type="turn_ingest",
+                    status="processing",
+                    attempts=1,
+                    payload={
+                        "task_run_id": "task_1",
+                        "user_message": "I moved my meeting to 10pm",
+                        "assistant_response": "Noted.",
+                        "session_id": "session",
+                        "event_ids": ["evt_1", "evt_2"],
+                    },
+                )
+            ]
+        )
+        eg._task_memory.get_task = AsyncMock(return_value=task())
+        eg._task_memory.create_checkpoint = AsyncMock(
+            side_effect=lambda checkpoint: checkpoint
+        )
+        eg._task_memory.complete_job = AsyncMock(
+            return_value=MemoryJob(
+                job_id="job_1",
+                job_type="turn_ingest",
+                status="completed",
+                attempts=1,
+            )
+        )
+
+        jobs = await eg.process_memory_jobs(limit=1)
+
+        assert jobs[0].status == "completed"
+        # The session summary add_conversation already rolled forward is reused:
+        # no second summarization LLM call, no checkpoint-chain lookup.
+        eg._summarize_task_turn.assert_not_awaited()
+        eg._task_memory.latest_checkpoint.assert_not_awaited()
+        checkpoint = eg._task_memory.create_checkpoint.call_args.args[0]
+        assert checkpoint.summary == "rolled session summary"
+        assert checkpoint.source_event_ids == ["evt_1", "evt_2"]
+
+    @pytest.mark.asyncio
+    async def test_process_memory_jobs_falls_back_when_no_session_summary(
+        self,
+    ) -> None:
+        eg = make_engram()
+        eg._llm = MagicMock()
+        eg.add_conversation = AsyncMock(return_value=[])
+        eg._summarize_task_turn = AsyncMock(return_value="fresh task summary")
+        eg._sessions.get = AsyncMock(return_value=MagicMock(summary=""))
+        eg._task_memory.claim_jobs = AsyncMock(
+            return_value=[
+                MemoryJob(
+                    job_id="job_1",
+                    job_type="turn_ingest",
+                    status="processing",
+                    attempts=1,
+                    payload={
+                        "task_run_id": "task_1",
+                        "user_message": "hi",
+                        "assistant_response": "hello",
+                        "session_id": "session",
+                        "event_ids": ["evt_1"],
+                    },
+                )
+            ]
+        )
+        eg._task_memory.get_task = AsyncMock(return_value=task())
+        eg._task_memory.latest_checkpoint = AsyncMock(return_value=None)
+        eg._task_memory.create_checkpoint = AsyncMock(
+            side_effect=lambda checkpoint: checkpoint
+        )
+        eg._task_memory.complete_job = AsyncMock(
+            return_value=MemoryJob(
+                job_id="job_1",
+                job_type="turn_ingest",
+                status="completed",
+                attempts=1,
+            )
+        )
+
+        jobs = await eg.process_memory_jobs(limit=1)
+
+        assert jobs[0].status == "completed"
+        eg._summarize_task_turn.assert_awaited_once()
+        checkpoint = eg._task_memory.create_checkpoint.call_args.args[0]
+        assert checkpoint.summary == "fresh task summary"
 
     @pytest.mark.asyncio
     async def test_run_memory_worker_loops_until_max_iterations(self) -> None:
@@ -382,3 +484,86 @@ The agent must answer with citations. Next Wednesday is the review deadline.
         assert "chunk_id=chunk_0001" in result.text
         assert "## Long Input Manifest" in result.text
         assert result.trace["missing_expected_terms"] == []
+
+
+class TestTaskClientEventSearch:
+    @pytest.mark.asyncio
+    async def test_search_events_delegates_to_manager(self) -> None:
+        eg = make_engram()
+        hit = AgentEvent(
+            task_run_id="task_1",
+            agent_id="agent",
+            user_id="user",
+            role="user",
+            event_type="user_message",
+            content="What did I ask about the chatbot?",
+        )
+        eg._task_memory.search_events = AsyncMock(return_value=[hit])
+
+        results = await eg.search_events(
+            "chatbot",
+            agent_id="agent",
+            roles=["user"],
+            limit=5,
+        )
+
+        assert results == [hit]
+        eg._task_memory.search_events.assert_awaited_once_with(
+            "chatbot",
+            agent_id="agent",
+            task_run_id=None,
+            session_id=None,
+            user_id=None,
+            event_types=None,
+            roles=["user"],
+            since=None,
+            until=None,
+            limit=5,
+            include_deleted=False,
+            mode="hybrid",
+            query_embedding=[0.1, 0.2, 0.3],
+        )
+        eg._embedding.embed.assert_awaited_once_with("chatbot")
+
+    @pytest.mark.asyncio
+    async def test_search_events_keyword_mode_skips_embedding(self) -> None:
+        eg = make_engram()
+        eg._task_memory.search_events = AsyncMock(return_value=[])
+
+        await eg.search_events("chatbot", mode="keyword")
+
+        eg._embedding.embed.assert_not_awaited()
+        eg._task_memory.search_events.assert_awaited_once_with(
+            "chatbot",
+            agent_id=None,
+            task_run_id=None,
+            session_id=None,
+            user_id=None,
+            event_types=None,
+            roles=None,
+            since=None,
+            until=None,
+            limit=50,
+            include_deleted=False,
+            mode="keyword",
+            query_embedding=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_backfill_event_embeddings_delegates_to_manager(self) -> None:
+        eg = make_engram()
+        eg._task_memory.backfill_event_embeddings = AsyncMock(return_value=12)
+
+        count = await eg.backfill_event_embeddings(limit=25, agent_id="agent")
+
+        assert count == 12
+        eg._task_memory.backfill_event_embeddings.assert_awaited_once_with(
+            limit=25,
+            agent_id="agent",
+        )
+
+    @pytest.mark.asyncio
+    async def test_search_events_requires_connection(self) -> None:
+        eg = Engram()
+        with pytest.raises(EngramError, match="Not connected"):
+            await eg.search_events("chatbot")
