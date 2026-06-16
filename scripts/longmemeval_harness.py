@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
     from engram.memory.models import Memory, SearchResult
+    from engram.task.models import AgentEvent
 
 
 DATASET_URLS = {
@@ -155,6 +156,25 @@ def parse_args() -> argparse.Namespace:
         help="Store each haystack session as one memory, or each turn separately.",
     )
     parser.add_argument(
+        "--ingest-surface",
+        choices=("memory", "event", "both"),
+        default="memory",
+        help=(
+            "Where to ingest LongMemEval histories. 'memory' preserves the "
+            "original benchmark path, 'event' writes the raw ledger with "
+            "record_event(), and 'both' stores both surfaces."
+        ),
+    )
+    parser.add_argument(
+        "--retrieval-surface",
+        choices=("memory", "event"),
+        default="memory",
+        help=(
+            "Which Engram surface to evaluate: memory search or hybrid event "
+            "search over the raw ledger."
+        ),
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=10,
@@ -192,6 +212,21 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=64,
         help="How many memories to add per add_batch() call.",
+    )
+    parser.add_argument(
+        "--backfill-event-embeddings",
+        action="store_true",
+        help=(
+            "After event ingestion/reuse, run bounded event-embedding backfill "
+            "until no old event rows remain. New event rows are embedded on "
+            "write; this is mainly for reused stores from older runs."
+        ),
+    )
+    parser.add_argument(
+        "--event-backfill-batch-size",
+        type=int,
+        default=1000,
+        help="Batch size for --backfill-event-embeddings.",
     )
     parser.add_argument(
         "--agent-prefix",
@@ -313,6 +348,26 @@ def parse_args() -> argparse.Namespace:
             "For --context-strategy session, build the answer context from "
             "the full content of the top N retrieved sessions fetched back "
             "from Engram. 0 uses --limit sessions."
+        ),
+    )
+    parser.add_argument(
+        "--aggregation-full-session",
+        action="store_true",
+        help=(
+            "For --context-strategy window, when a question is a counting/"
+            "aggregation question (how many/how much/total/...), include every "
+            "turn of each top-ranked matched session instead of a window, so "
+            "counts are complete. Rank-gated to avoid pulling in distractors."
+        ),
+    )
+    parser.add_argument(
+        "--aggregation-context-tokens",
+        type=int,
+        default=16000,
+        metavar="N",
+        help=(
+            "Answer-context token budget used only for aggregation questions "
+            "when --aggregation-full-session is set (full sessions need room)."
         ),
     )
     parser.add_argument(
@@ -476,6 +531,88 @@ def iter_memories(
                 }
             )
     return memories
+
+
+def _event_type_for_role(role: str) -> tuple[str, str]:
+    normalized = role.strip().lower()
+    if normalized == "user":
+        return "user", "user_message"
+    if normalized == "assistant":
+        return "assistant", "assistant_message"
+    if normalized == "tool":
+        return "tool", "tool_result"
+    if normalized in {"system", "agent"}:
+        return normalized, "system_note" if normalized == "system" else "agent_action"
+    return "system", "system_note"
+
+
+def iter_events(
+    sample: dict[str, Any],
+    *,
+    agent_id: str,
+    memory_unit: str,
+    max_memory_chars: int,
+) -> list[dict[str, Any]]:
+    """Render LongMemEval histories as raw event-ledger rows.
+
+    The metadata mirrors ``iter_memories()`` so recall metrics and context
+    expansion can score either surface the same way.
+    """
+    events: list[dict[str, Any]] = []
+    session_ids = sample.get("haystack_session_ids", [])
+    dates = sample.get("haystack_dates", [])
+    sessions = sample.get("haystack_sessions", [])
+
+    for original_session_id, date, session in zip(
+        session_ids, dates, sessions, strict=True
+    ):
+        session_id = f"{sample['question_id']}:{original_session_id}"
+        if memory_unit == "session":
+            content = bounded_text(render_session(session, date), max_memory_chars)
+            events.append(
+                {
+                    "agent_id": agent_id,
+                    "session_id": session_id,
+                    "role": "system",
+                    "event_type": "observation",
+                    "content": content,
+                    "metadata": {
+                        "source": "longmemeval",
+                        "question_id": sample["question_id"],
+                        "question_type": sample.get("question_type"),
+                        "question_date": sample.get("question_date"),
+                        "original_session_id": original_session_id,
+                        "haystack_date": date,
+                        "memory_unit": "session",
+                    },
+                }
+            )
+            continue
+
+        for turn_index, turn in enumerate(session):
+            role, event_type = _event_type_for_role(str(turn.get("role", "unknown")))
+            content = bounded_text(render_turn(turn, date), max_memory_chars)
+            events.append(
+                {
+                    "agent_id": agent_id,
+                    "session_id": session_id,
+                    "role": role,
+                    "event_type": event_type,
+                    "content": content,
+                    "metadata": {
+                        "source": "longmemeval",
+                        "question_id": sample["question_id"],
+                        "question_type": sample.get("question_type"),
+                        "question_date": sample.get("question_date"),
+                        "original_session_id": original_session_id,
+                        "haystack_date": date,
+                        "turn_index": turn_index,
+                        "turn_role": turn.get("role"),
+                        "memory_unit": "turn",
+                    },
+                }
+            )
+    return events
 
 
 def chunks(
@@ -756,6 +893,30 @@ def _memory_window_group(memory: Memory, metadata_key: str) -> str | None:
     return str(value) if value is not None else None
 
 
+_AGGREGATION_PATTERNS = (
+    "how many",
+    "how much",
+    "how often",
+    "number of",
+    "altogether",
+    "combined",
+    "average",
+    " each ",
+)
+
+
+def is_aggregation_question(question: str) -> bool:
+    """Heuristically flag counting/aggregation questions.
+
+    These need every relevant turn from each matched session to count without
+    over- or under-counting, so a windowed context view is not enough.
+    """
+    q = f" {question.lower().strip()} "
+    if "total" in q:
+        return True
+    return any(pattern in q for pattern in _AGGREGATION_PATTERNS)
+
+
 async def get_neighboring_context_block(
     engram: Engram,
     results: list[SearchResult],
@@ -776,8 +937,14 @@ async def get_neighboring_context_block(
     priority_window_results: int = 3,
     prior_user_turns: int = 0,
     context_order: str = "chronological",
+    whole_session_top_k: int = 0,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Expand retrieved turn memories with neighboring session memories.
+
+    When whole_session_top_k > 0, sessions whose best hit ranks above that
+    cutoff contribute every turn (not just a window). The full session is
+    already fetched per hit, so this adds no retrieval. Used for aggregation
+    questions, where a windowed view drops mentions and breaks the count.
 
     Uses only stored Engram memories plus their session/turn metadata, read via
     the public get_memories() API. Useful when a search hit is near the answer
@@ -791,6 +958,8 @@ async def get_neighboring_context_block(
         raise ValueError("priority_window_results must be >= 0")
     if prior_user_turns < 0:
         raise ValueError("prior_user_turns must be >= 0")
+    if whole_session_top_k < 0:
+        raise ValueError("whole_session_top_k must be >= 0")
     if context_order not in {"chronological", "relevance"}:
         raise ValueError("context_order must be 'chronological' or 'relevance'")
 
@@ -847,7 +1016,13 @@ async def get_neighboring_context_block(
             for item in group
             if (idx := _metadata_int(item.metadata, turn_metadata_key)) is not None
         }
-        indexes = set(range(max(0, turn_index - before), turn_index + after + 1))
+        if whole_session_top_k and group_best_rank[group_key] < whole_session_top_k:
+            # Aggregation queries need every mention in a strongly-matched
+            # session, not a window around each hit. The full session is already
+            # in `group`, so this widens coverage without extra retrieval.
+            indexes = set(by_turn)
+        else:
+            indexes = set(range(max(0, turn_index - before), turn_index + after + 1))
         if include_session_start:
             indexes.add(0)
         for idx in indexes:
@@ -921,6 +1096,247 @@ async def get_neighboring_context_block(
         for memory in kept
     ]
     return "\n".join(memory.content for memory in kept), sources
+
+
+def _event_group(event: AgentEvent) -> str | None:
+    value = event.metadata.get("original_session_id")
+    if value is not None:
+        return str(value)
+    return str(event.session_id) if event.session_id else None
+
+
+def _event_turn_index(event: AgentEvent) -> int | None:
+    return _metadata_int(event.metadata, "turn_index")
+
+
+def _event_to_retrieved(event: AgentEvent) -> dict[str, Any]:
+    return {
+        "event_id": event.event_id,
+        "session_id": event.session_id,
+        "score": None,
+        "semantic_score": None,
+        "keyword_score": None,
+        "decay_score": None,
+        "content": event.content,
+        "metadata": event.metadata,
+    }
+
+
+async def search_event_evidence_set(
+    engram: Engram,
+    query: str,
+    agent_id: str,
+    *,
+    limit: int = 10,
+    mode: str = "hybrid",
+) -> list[AgentEvent]:
+    """Retrieve LongMemEval evidence from the raw event ledger."""
+    return await engram.search_events(
+        query,
+        agent_id=agent_id,
+        limit=limit,
+        mode=mode,
+    )
+
+
+async def get_neighboring_event_context_block(
+    engram: Engram,
+    events: Sequence[AgentEvent],
+    agent_id: str,
+    *,
+    before: int = 2,
+    after: int = 2,
+    include_session_start: bool = False,
+    max_tokens: int | None = None,
+    group_limit: int = 200,
+    priority_window_results: int = 3,
+    prior_user_turns: int = 0,
+    context_order: str = "chronological",
+) -> tuple[str, list[dict[str, Any]]]:
+    """Expand retrieved event hits with neighboring events from the same session."""
+    if before < 0 or after < 0:
+        raise ValueError("before and after must be >= 0")
+    if group_limit < 1:
+        raise ValueError("group_limit must be >= 1")
+    if priority_window_results < 0:
+        raise ValueError("priority_window_results must be >= 0")
+    if prior_user_turns < 0:
+        raise ValueError("prior_user_turns must be >= 0")
+    if context_order not in {"chronological", "relevance"}:
+        raise ValueError("context_order must be 'chronological' or 'relevance'")
+
+    def count(text: str) -> int:
+        return max(1, len(text) // 4)
+
+    group_cache: dict[str, list[AgentEvent]] = {}
+    selected: dict[str, tuple[tuple[int, int, int], AgentEvent]] = {}
+    group_best_rank: dict[str, int] = {}
+
+    def remember(event: AgentEvent, priority: tuple[int, int, int]) -> None:
+        current = selected.get(event.event_id)
+        if current is None or priority < current[0]:
+            selected[event.event_id] = (priority, event)
+
+    async def fetch_group(event: AgentEvent, group_key: str) -> list[AgentEvent]:
+        cached = group_cache.get(group_key)
+        if cached is not None:
+            return cached
+        if event.session_id:
+            group = await engram.list_events(
+                agent_id=agent_id,
+                session_id=event.session_id,
+                limit=group_limit,
+            )
+        else:
+            group = [
+                candidate
+                for candidate in await engram.search_events(
+                    group_key,
+                    agent_id=agent_id,
+                    limit=group_limit,
+                    mode="keyword",
+                )
+                if _event_group(candidate) == group_key
+            ]
+        group_cache[group_key] = group
+        return group
+
+    for rank, event in enumerate(events):
+        if rank < priority_window_results:
+            remember(event, (rank, 0, 0))
+        else:
+            remember(event, (priority_window_results, 0, rank))
+
+        turn_index = _event_turn_index(event)
+        group_key = _event_group(event)
+        if turn_index is None or group_key is None:
+            continue
+        group_best_rank[group_key] = min(rank, group_best_rank.get(group_key, rank))
+
+        group = await fetch_group(event, group_key)
+        by_turn = {
+            idx: item for item in group if (idx := _event_turn_index(item)) is not None
+        }
+        indexes = set(range(max(0, turn_index - before), turn_index + after + 1))
+        if include_session_start:
+            indexes.add(0)
+        for idx in indexes:
+            neighbor = by_turn.get(idx)
+            if neighbor is None:
+                continue
+            distance = abs(idx - turn_index)
+            if rank < priority_window_results:
+                remember(neighbor, (rank, 0 if distance == 0 else 1, distance))
+            else:
+                remember(neighbor, (priority_window_results + 1, rank, distance))
+        if prior_user_turns:
+            prior_users = [
+                item
+                for item in group
+                if (idx := _event_turn_index(item)) is not None
+                and idx < turn_index
+                and str(item.metadata.get("turn_role", "")).lower() == "user"
+            ]
+            prior_users.sort(
+                key=lambda item: _event_turn_index(item) or 0, reverse=True
+            )
+            for prior in prior_users[:prior_user_turns]:
+                idx = _event_turn_index(prior)
+                assert idx is not None
+                distance = turn_index - idx
+                if rank < priority_window_results:
+                    remember(prior, (rank, 2, distance))
+                else:
+                    remember(prior, (priority_window_results + 1, rank, distance))
+
+    kept: list[AgentEvent] = []
+    used = 0
+    for _priority, event in sorted(selected.values(), key=lambda item: item[0]):
+        cost = count(event.content)
+        if max_tokens is not None and kept and used + cost > max_tokens:
+            continue
+        kept.append(event)
+        used += cost
+
+    def chronological_key(event: AgentEvent) -> tuple[str, str, int, str]:
+        return (
+            str(event.metadata.get("haystack_date") or event.created_at),
+            _event_group(event) or "",
+            _event_turn_index(event) or 0,
+            event.event_id,
+        )
+
+    if context_order == "relevance":
+        kept.sort(
+            key=lambda event: (
+                group_best_rank.get(_event_group(event) or "", len(events)),
+                *chronological_key(event),
+            )
+        )
+    else:
+        kept.sort(key=chronological_key)
+
+    sources = [
+        {
+            "event_id": event.event_id,
+            "session_id": event.session_id,
+            "group": _event_group(event),
+            "turn_index": _event_turn_index(event),
+            "date": event.metadata.get("haystack_date"),
+        }
+        for event in kept
+    ]
+    return "\n".join(event.content for event in kept), sources
+
+
+async def build_expanded_event_context(
+    engram: Engram,
+    *,
+    agent_id: str,
+    retrieved: Sequence[dict[str, Any]],
+    n_sessions: int,
+    max_tokens: int,
+) -> str:
+    session_best_rank: dict[str, int] = {}
+    session_ids: dict[str, str] = {}
+    for rank, item in enumerate(retrieved):
+        meta = item.get("metadata", {})
+        group = meta.get("original_session_id")
+        session_id = item.get("session_id")
+        if group is not None and group not in session_best_rank:
+            session_best_rank[str(group)] = rank
+            if session_id:
+                session_ids[str(group)] = str(session_id)
+    top_groups = sorted(session_best_rank, key=lambda s: session_best_rank[s])
+    expanded = set(top_groups[:n_sessions])
+
+    blocks: list[str] = []
+    for group in top_groups[:n_sessions]:
+        session_id = session_ids.get(group)
+        if not session_id:
+            continue
+        events = await engram.list_events(
+            agent_id=agent_id,
+            session_id=session_id,
+            limit=500,
+        )
+        events.sort(key=lambda event: _event_turn_index(event) or 0)
+        if events:
+            blocks.append("\n".join(event.content for event in events))
+
+    leftover = [
+        item["content"]
+        for item in retrieved
+        if str(item.get("metadata", {}).get("original_session_id")) not in expanded
+    ]
+    if leftover:
+        blocks.append("Other relevant events:\n" + "\n".join(leftover))
+
+    context = "\n\n".join(blocks)
+    max_chars = max_tokens * 4
+    if len(context) > max_chars:
+        context = context[:max_chars]
+    return context
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
@@ -1219,9 +1635,126 @@ def store_fingerprint(args: argparse.Namespace) -> str:
             Path(resolve_data_path(args)).name,
             str(args.memory_unit),
             str(args.max_memory_chars),
+            str(args.ingest_surface),
         ]
     )
     return hashlib.md5(raw.encode()).hexdigest()[:10]
+
+
+async def purge_benchmark_agent(engram: Engram, agent_id: str) -> None:
+    """Remove benchmark memories and raw events for a temporary agent."""
+    await engram.purge(agent_id=agent_id)
+    storage = getattr(engram, "_storage", None)
+    if storage is not None:
+        await storage.execute("DELETE FROM agent_events WHERE agent_id = $1", agent_id)
+        await storage.execute(
+            "DELETE FROM agent_sessions WHERE agent_id = $1", agent_id
+        )
+        await storage.execute("DELETE FROM agents WHERE agent_id = $1", agent_id)
+
+
+async def count_events(engram: Engram, agent_id: str, expected: int) -> int:
+    events = await engram.list_events(agent_id=agent_id, limit=expected + 1)
+    return len(events)
+
+
+async def ingest_events(
+    engram: Engram,
+    events: Sequence[dict[str, Any]],
+    *,
+    batch_size: int,
+) -> None:
+    storage = getattr(engram, "_storage", None)
+    if storage is not None:
+        sessions: dict[str, dict[str, Any]] = {}
+        for event in events:
+            session_id = event.get("session_id")
+            if not session_id:
+                continue
+            meta = dict(event.get("metadata") or {})
+            sessions.setdefault(
+                str(session_id),
+                {
+                    "agent_id": event["agent_id"],
+                    "user_id": event.get("user_id"),
+                    "metadata": {
+                        "source": "longmemeval",
+                        "question_id": meta.get("question_id"),
+                        "question_type": meta.get("question_type"),
+                        "original_session_id": meta.get("original_session_id"),
+                        "haystack_date": meta.get("haystack_date"),
+                    },
+                },
+            )
+        for session_id, data in sessions.items():
+            await storage.execute(
+                """
+                INSERT INTO agents (agent_id, name)
+                VALUES ($1, $1)
+                ON CONFLICT (agent_id) DO NOTHING
+                """,
+                data["agent_id"],
+            )
+            if data["user_id"]:
+                await storage.execute(
+                    """
+                    INSERT INTO users (user_id)
+                    VALUES ($1)
+                    ON CONFLICT (user_id) DO NOTHING
+                    """,
+                    data["user_id"],
+                )
+            await storage.execute(
+                """
+                INSERT INTO agent_sessions (session_id, agent_id, user_id, metadata)
+                VALUES ($1, $2, $3, $4::jsonb)
+                ON CONFLICT (session_id) DO NOTHING
+                """,
+                session_id,
+                data["agent_id"],
+                data["user_id"],
+                json.dumps(data["metadata"]),
+            )
+    task_memory = getattr(engram, "_task_memory", None)
+    if task_memory is None:
+        for event in events:
+            await engram.record_event(**event)
+        return
+
+    from engram.task.models import EventCreate
+
+    for batch in chunks(list(events), batch_size):
+        creates = [
+            EventCreate(
+                agent_id=event["agent_id"],
+                role=event["role"],
+                event_type=event["event_type"],
+                content=event["content"],
+                task_run_id=event.get("task_run_id"),
+                session_id=event.get("session_id"),
+                user_id=event.get("user_id"),
+                payload=event.get("payload") or {},
+                metadata=event.get("metadata") or {},
+            )
+            for event in batch
+        ]
+        await task_memory.record_events(creates)
+
+
+async def maybe_backfill_events(
+    engram: Engram, args: argparse.Namespace, agent_id: str
+) -> int:
+    if not args.backfill_event_embeddings:
+        return 0
+    total = 0
+    while True:
+        count = await engram.backfill_event_embeddings(
+            limit=args.event_backfill_batch_size,
+            agent_id=agent_id,
+        )
+        total += count
+        if count == 0:
+            return total
 
 
 async def run_sample(
@@ -1243,21 +1776,60 @@ async def run_sample(
         memory_unit=args.memory_unit,
         max_memory_chars=args.max_memory_chars,
     )
+    events = iter_events(
+        sample,
+        agent_id=agent_id,
+        memory_unit=args.memory_unit,
+        max_memory_chars=args.max_memory_chars,
+    )
+    use_memory_ingest = args.ingest_surface in {"memory", "both"}
+    use_event_ingest = args.ingest_surface in {"event", "both"}
 
     try:
         ingested = True
-        if args.reuse_store and memories:
-            existing = await engram.get_memories(agent_id, limit=len(memories) + 1)
-            if len(existing) >= len(memories):
+        if args.reuse_store:
+            memory_complete = True
+            event_complete = True
+            if use_memory_ingest and memories:
+                existing = await engram.get_memories(agent_id, limit=len(memories) + 1)
+                memory_complete = len(existing) >= len(memories)
+            if use_event_ingest and events:
+                event_complete = await count_events(
+                    engram, agent_id, len(events)
+                ) >= len(events)
+            if memory_complete and event_complete:
                 ingested = False  # store already complete; skip ingestion cost
-            elif existing:
+            else:
                 # Partial store from an interrupted run: rebuild from scratch.
-                await engram.purge(agent_id=agent_id)
+                await purge_benchmark_agent(engram, agent_id)
         if ingested:
-            for batch in chunks(memories, args.ingest_batch_size):
-                await engram.add_batch(batch)
+            if use_memory_ingest:
+                for batch in chunks(memories, args.ingest_batch_size):
+                    await engram.add_batch(batch)
+            if use_event_ingest:
+                await ingest_events(
+                    engram,
+                    events,
+                    batch_size=args.ingest_batch_size,
+                )
 
-        if args.deep_search:
+        event_embeddings_backfilled = 0
+        if use_event_ingest:
+            event_embeddings_backfilled = await maybe_backfill_events(
+                engram, args, agent_id
+            )
+
+        event_results = []
+        if args.retrieval_surface == "event":
+            event_results = await search_event_evidence_set(
+                engram,
+                query=sample["question"],
+                agent_id=agent_id,
+                limit=args.limit,
+                mode=args.mode,
+            )
+            results = []
+        elif args.deep_search:
             results = await search_evidence_set(
                 engram,
                 query=sample["question"],
@@ -1280,51 +1852,90 @@ async def run_sample(
                 mode=args.mode,
                 rerank=args.rerank,
             )
-        retrieved = [
-            {
-                "memory_id": result.memory.memory_id,
-                "score": result.score,
-                "semantic_score": result.semantic_score,
-                "keyword_score": result.keyword_score,
-                "decay_score": result.decay_score,
-                "content": result.memory.content,
-                "metadata": result.memory.metadata,
-            }
-            for result in results
-        ]
+        if args.retrieval_surface == "event":
+            retrieved = [_event_to_retrieved(event) for event in event_results]
+        else:
+            retrieved = [
+                {
+                    "memory_id": result.memory.memory_id,
+                    "score": result.score,
+                    "semantic_score": result.semantic_score,
+                    "keyword_score": result.keyword_score,
+                    "decay_score": result.decay_score,
+                    "content": result.memory.content,
+                    "metadata": result.memory.metadata,
+                }
+                for result in results
+            ]
 
         context_sources: list[dict[str, Any]] = []
         effective_context_strategy = args.context_strategy
         if effective_context_strategy == "session":
-            context = await build_expanded_context(
-                engram,
-                agent_id=agent_id,
-                retrieved=retrieved,
-                n_sessions=args.expand_sessions or args.limit,
-                max_tokens=args.max_context_tokens,
-            )
+            if args.retrieval_surface == "event":
+                context = await build_expanded_event_context(
+                    engram,
+                    agent_id=agent_id,
+                    retrieved=retrieved,
+                    n_sessions=args.expand_sessions or args.limit,
+                    max_tokens=args.max_context_tokens,
+                )
+            else:
+                context = await build_expanded_context(
+                    engram,
+                    agent_id=agent_id,
+                    retrieved=retrieved,
+                    n_sessions=args.expand_sessions or args.limit,
+                    max_tokens=args.max_context_tokens,
+                )
         elif effective_context_strategy == "window":
-            context, context_sources = await get_neighboring_context_block(
-                engram,
-                results,
-                agent_id,
-                before=args.evidence_window_size,
-                after=args.evidence_window_size,
-                include_session_start=True,
-                max_tokens=args.max_context_tokens,
-                prior_user_turns=args.prior_user_turns,
-                context_order="relevance",
-            )
+            if args.retrieval_surface == "event":
+                context, context_sources = await get_neighboring_event_context_block(
+                    engram,
+                    event_results,
+                    agent_id,
+                    before=args.evidence_window_size,
+                    after=args.evidence_window_size,
+                    include_session_start=True,
+                    max_tokens=args.max_context_tokens,
+                    prior_user_turns=args.prior_user_turns,
+                    context_order="relevance",
+                )
+            else:
+                aggregating = args.aggregation_full_session and is_aggregation_question(
+                    sample["question"]
+                )
+                whole_k = (args.expand_sessions or 3) if aggregating else 0
+                window_tokens = (
+                    args.aggregation_context_tokens
+                    if aggregating
+                    else args.max_context_tokens
+                )
+                context, context_sources = await get_neighboring_context_block(
+                    engram,
+                    results,
+                    agent_id,
+                    before=args.evidence_window_size,
+                    after=args.evidence_window_size,
+                    include_session_start=True,
+                    max_tokens=window_tokens,
+                    prior_user_turns=args.prior_user_turns,
+                    context_order="relevance",
+                    whole_session_top_k=whole_k,
+                )
         else:
-            context = await engram.get_context_block(
-                sample["question"],
-                agent_id,
-                limit=args.limit,
-                min_score=args.min_score,
-                max_tokens=args.max_context_tokens,
-                group_by_type=True,
-                rerank=args.rerank,
-            )
+            if args.retrieval_surface == "event":
+                max_chars = args.max_context_tokens * 4
+                context = "\n".join(item["content"] for item in retrieved)[:max_chars]
+            else:
+                context = await engram.get_context_block(
+                    sample["question"],
+                    agent_id,
+                    limit=args.limit,
+                    min_score=args.min_score,
+                    max_tokens=args.max_context_tokens,
+                    group_by_type=True,
+                    rerank=args.rerank,
+                )
         hypothesis = ""
         effective_reading = args.reading
         if args.generate_answers:
@@ -1345,8 +1956,12 @@ async def run_sample(
             "answer": sample.get("answer"),
             "hypothesis": hypothesis,
             "agent_id": agent_id,
-            "memory_count": len(memories),
+            "memory_count": len(memories) if use_memory_ingest else 0,
+            "event_count": len(events) if use_event_ingest else 0,
             "ingested": ingested,
+            "ingest_surface": args.ingest_surface,
+            "retrieval_surface": args.retrieval_surface,
+            "event_embeddings_backfilled": event_embeddings_backfilled,
             "retrieved": retrieved,
             "context": context,
             "context_strategy": effective_context_strategy,
@@ -1358,7 +1973,7 @@ async def run_sample(
         }
     finally:
         if not args.keep_memories and not args.reuse_store:
-            await engram.purge(agent_id=agent_id)
+            await purge_benchmark_agent(engram, agent_id)
 
 
 def summarize(traces: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -1523,6 +2138,8 @@ async def run(args: argparse.Namespace) -> None:
         summary = summarize(traces)
         summary["data_path"] = str(data_path)
         summary["memory_unit"] = args.memory_unit
+        summary["ingest_surface"] = args.ingest_surface
+        summary["retrieval_surface"] = args.retrieval_surface
         summary["search_mode"] = args.mode
         summary["limit"] = args.limit
         summary["generated_answers"] = bool(args.generate_answers)
@@ -1547,6 +2164,8 @@ async def run(args: argparse.Namespace) -> None:
         summary["max_memory_chars"] = args.max_memory_chars
         summary["min_score"] = args.min_score
         summary["memory_policy"] = BENCHMARK_POLICY.name
+        summary["backfill_event_embeddings"] = bool(args.backfill_event_embeddings)
+        summary["event_backfill_batch_size"] = args.event_backfill_batch_size
         summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
         print(json.dumps(summary, indent=2, ensure_ascii=False))
         print(f"Wrote {traces_path}")
@@ -1568,6 +2187,16 @@ def main() -> None:
         raise SystemExit("--evidence-window-size must be >= 0")
     if args.prior_user_turns < 0:
         raise SystemExit("--prior-user-turns must be >= 0")
+    if args.event_backfill_batch_size < 1:
+        raise SystemExit("--event-backfill-batch-size must be >= 1")
+    if args.retrieval_surface == "event" and args.ingest_surface == "memory":
+        raise SystemExit(
+            "--retrieval-surface event requires --ingest-surface event or both"
+        )
+    if args.retrieval_surface == "memory" and args.ingest_surface == "event":
+        raise SystemExit(
+            "--retrieval-surface memory requires --ingest-surface memory or both"
+        )
     if args.generate_answers and not os.getenv("ENGRAM_LLM_PROVIDER"):
         print(
             "Warning: --generate-answers was set but ENGRAM_LLM_PROVIDER is not set; "
