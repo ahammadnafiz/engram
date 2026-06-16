@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 # SQL directory path
 SQL_DIR = Path(__file__).parent.parent / "sql"
 
+# Bump whenever schema.sql or the migrations applied by init_schema change.
+# A matching stamp in engram_schema_meta lets connect() skip the structural
+# init/migration work (DDL, catalog probes, idempotent ALTERs) entirely.
+SCHEMA_VERSION = 7
+
 
 def _redact_dsn(dsn: str) -> str:
     """Mask the password component of a DSN for safe logging."""
@@ -73,6 +78,11 @@ class PostgresStorage:
         self._settings = settings or get_settings()
         self._pool: Pool | None = None
         self._connected = False
+
+    @property
+    def settings(self) -> EngramSettings:
+        """The settings this storage was constructed with."""
+        return self._settings
 
     @property
     def pool(self) -> Pool:
@@ -327,6 +337,17 @@ class PostgresStorage:
             embedding_dimension: The embedding dimension to use. If None,
                 uses the default from schema.sql (1536).
         """
+        # Fast path: if a previous run stamped this exact schema version,
+        # embedding dimension, and text search config, all the structural work
+        # below is a no-op. Skip it to keep connect() cheap (matters for
+        # short-lived / serverless processes that connect frequently).
+        meta = await self._get_schema_meta()
+        if meta is not None and self._schema_meta_current(meta, embedding_dimension):
+            logger.debug(
+                "Engram schema already at version %s; skipping init", SCHEMA_VERSION
+            )
+            return
+
         logger.info("Initializing database schema")
         schema_sql = self.load_sql("schema.sql")
         await self.execute(schema_sql)
@@ -408,6 +429,68 @@ class PostgresStorage:
             await self._ensure_vector_dimension(embedding_dimension)
 
         await self._ensure_event_search_indexes(self._settings.text_search_config)
+
+        # Record what we just applied so the next connect can take the fast path.
+        await self._stamp_schema_meta(embedding_dimension)
+
+    async def _get_schema_meta(self) -> dict[str, Any] | None:
+        """Read the schema stamp, or None if it was never written (fresh DB)."""
+        try:
+            row = await self.fetchone(
+                """
+                SELECT version, embedding_dimension, text_search_config
+                FROM engram_schema_meta
+                WHERE id = TRUE
+                """
+            )
+        except asyncpg.UndefinedTableError:
+            return None
+        return dict(row) if row is not None else None
+
+    def _schema_meta_current(
+        self, meta: dict[str, Any], embedding_dimension: int | None
+    ) -> bool:
+        """True when the stamp matches the schema/config we would apply now."""
+        if meta.get("version") != SCHEMA_VERSION:
+            return False
+        if meta.get("text_search_config") != self._settings.text_search_config:
+            return False
+        # embedding_dimension is None when the caller doesn't know it yet; in
+        # that case init_schema would not touch the vector column, so don't gate.
+        return not (
+            embedding_dimension is not None
+            and meta.get("embedding_dimension") != embedding_dimension
+        )
+
+    async def _stamp_schema_meta(self, embedding_dimension: int | None) -> None:
+        """Upsert the single-row schema stamp after a successful init."""
+        await self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS engram_schema_meta (
+                id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+                version INTEGER NOT NULL,
+                embedding_dimension INTEGER,
+                text_search_config TEXT NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        )
+        await self.execute(
+            """
+            INSERT INTO engram_schema_meta (
+                id, version, embedding_dimension, text_search_config, updated_at
+            )
+            VALUES (TRUE, $1, $2, $3, NOW())
+            ON CONFLICT (id) DO UPDATE
+            SET version = EXCLUDED.version,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                text_search_config = EXCLUDED.text_search_config,
+                updated_at = NOW()
+            """,
+            SCHEMA_VERSION,
+            embedding_dimension,
+            self._settings.text_search_config,
+        )
 
     async def _ensure_text_search_config(self, config: str) -> None:
         """Rebuild the generated tsvector columns when the language changed.

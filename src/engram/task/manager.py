@@ -516,7 +516,7 @@ class TaskMemoryManager:
         if not query.strip():
             raise ValueError("search_events query must not be empty")
 
-        config = self._storage._settings.text_search_config
+        config = self._storage.settings.text_search_config
         if mode not in {"hybrid", "semantic", "keyword"}:
             raise ValueError(
                 "search_events mode must be 'hybrid', 'semantic', or 'keyword'"

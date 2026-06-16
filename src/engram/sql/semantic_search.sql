@@ -16,9 +16,15 @@
 -- $8: min_score (FLOAT) - Minimum final score (applied BEFORE the final LIMIT)
 -- $9: include_superseded (BOOLEAN) - When true, historical (superseded) revisions
 --      are included; default false restricts to active facts only.
+-- $10: weight_semantic_combined (FLOAT) - semantic weight + absorbed keyword
+--      weight (default 0.40 + 0.20 = 0.60). Threaded from settings so the
+--      configured search weights apply to semantic mode, not just hybrid.
+-- $11: weight_decay (FLOAT) - decay weight (default 0.25)
+-- $12: weight_importance (FLOAT) - importance weight (default 0.15)
 
--- Note: Weights adjusted from hybrid search (0.40 semantic + 0.20 keyword + 0.25 decay + 0.15 importance)
--- Since no keyword matching, semantic weight absorbs keyword weight: 0.40 + 0.20 = 0.60
+-- Note: there is no keyword branch in semantic mode, so the semantic term
+-- absorbs the keyword weight ($10 = weight_semantic + weight_keyword). At
+-- default settings this reproduces the previous 0.60 / 0.25 / 0.15 split.
 
 -- The inner query overfetches in index (distance) order; the outer query
 -- computes the final score, filters by min_score, and re-sorts by score so
@@ -53,11 +59,11 @@ FROM (
         GREATEST(0, 1 - (embedding <=> $1::vector)) AS semantic_score,
         -- Time decay
         calculate_decay(last_accessed_at, $5) AS decay_score,
-        -- Final score: semantic-focused
+        -- Final score: semantic-focused, weights threaded from settings
         (
-            0.60 * GREATEST(0, 1 - (embedding <=> $1::vector)) +    -- semantic + absorbed keyword (0.60)
-            0.25 * calculate_decay(last_accessed_at, $5) +          -- decay (0.25)
-            0.15 * importance                                       -- importance (0.15)
+            $10 * GREATEST(0, 1 - (embedding <=> $1::vector)) +     -- semantic + absorbed keyword
+            $11 * calculate_decay(last_accessed_at, $5) +          -- decay
+            $12 * importance                                       -- importance
         ) AS score
     FROM agent_memory
     WHERE agent_id = $2
