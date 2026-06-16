@@ -247,7 +247,11 @@ CREATE TABLE IF NOT EXISTS agent_events (
     metadata JSONB DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     deleted_at TIMESTAMPTZ,
-    redacted_at TIMESTAMPTZ
+    redacted_at TIMESTAMPTZ,
+
+    -- Nullable on purpose: existing ledgers can be backfilled in small batches
+    -- instead of forcing a table-wide rewrite during migration.
+    event_embedding VECTOR(1536)
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_task_created

@@ -308,3 +308,106 @@ class TestJobRetryCap:
         assert len(mine) == 1
         assert mine[0].attempts == 3
         assert mine[0].status == "processing"
+
+
+class TestSearchEvents:
+    """Full-text event recall over the real agent_events index."""
+
+    async def _seed(self, manager, agent_id):
+        from engram.task.models import EventCreate
+
+        contents = [
+            ("user", "user_message", "What did I ask about the chatbot memory jobs?"),
+            (
+                "assistant",
+                "assistant_message",
+                "We discussed making memory jobs automatic.",
+            ),
+            ("user", "user_message", "Remind me of my budget for the trip to Berlin."),
+        ]
+        events = []
+        for role, etype, content in contents:
+            events.append(
+                await manager.record_event(
+                    EventCreate(
+                        agent_id=agent_id,
+                        role=role,
+                        event_type=etype,
+                        content=content,
+                    )
+                )
+            )
+        return events
+
+    @pytest.mark.asyncio
+    async def test_keyword_match_ranks_relevant_events(self, task_env) -> None:
+        manager, _storage, agent_id, _job_ids = task_env
+        await self._seed(manager, agent_id)
+
+        hits = await manager.search_events("chatbot memory", agent_id=agent_id)
+
+        assert hits, "expected at least one keyword match"
+        assert all("chatbot" in h.content or "memory" in h.content for h in hits)
+        # The 'Berlin budget' event shares no terms and must not match.
+        assert all("Berlin" not in h.content for h in hits)
+
+    @pytest.mark.asyncio
+    async def test_role_filter(self, task_env) -> None:
+        manager, _storage, agent_id, _job_ids = task_env
+        await self._seed(manager, agent_id)
+
+        hits = await manager.search_events(
+            "memory", agent_id=agent_id, roles=["assistant"]
+        )
+
+        assert hits
+        assert all(h.role == "assistant" for h in hits)
+
+    @pytest.mark.asyncio
+    async def test_temporal_filter_excludes_out_of_range(self, task_env) -> None:
+        import datetime as _dt
+
+        manager, _storage, agent_id, _job_ids = task_env
+        await self._seed(manager, agent_id)
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        past = now - _dt.timedelta(days=1)
+        future = now + _dt.timedelta(days=1)
+
+        assert await manager.search_events("chatbot", agent_id=agent_id, since=past)
+        assert not await manager.search_events(
+            "chatbot", agent_id=agent_id, since=future
+        )
+        assert not await manager.search_events("chatbot", agent_id=agent_id, until=past)
+
+    @pytest.mark.asyncio
+    async def test_stopword_only_query_returns_empty(self, task_env) -> None:
+        manager, _storage, agent_id, _job_ids = task_env
+        await self._seed(manager, agent_id)
+
+        # 'the and of' yields an empty tsquery -> no matches, and no error.
+        assert await manager.search_events("the and of", agent_id=agent_id) == []
+
+    @pytest.mark.asyncio
+    async def test_deleted_events_excluded_unless_requested(self, task_env) -> None:
+        manager, storage, agent_id, _job_ids = task_env
+        events = await self._seed(manager, agent_id)
+        await storage.execute(
+            "UPDATE agent_events SET deleted_at = NOW() WHERE event_id = $1",
+            events[0].event_id,
+        )
+
+        default_hits = await manager.search_events("chatbot", agent_id=agent_id)
+        assert events[0].event_id not in {h.event_id for h in default_hits}
+
+        with_deleted = await manager.search_events(
+            "chatbot", agent_id=agent_id, include_deleted=True
+        )
+        assert events[0].event_id in {h.event_id for h in with_deleted}
+
+    @pytest.mark.asyncio
+    async def test_empty_query_raises_before_db(self, task_env) -> None:
+        manager, _storage, agent_id, _job_ids = task_env
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            await manager.search_events("   ", agent_id=agent_id)

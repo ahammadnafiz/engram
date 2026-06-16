@@ -376,6 +376,11 @@ class PostgresStorage:
         # migrations were applied uniformly.
         await self.execute(self.load_sql("migrations/006_add_memory_lineage.sql"))
 
+        # Hybrid search over the event ledger. The migration is intentionally
+        # fast-only: no stored tsvector column, no embedding backfill, and no
+        # blocking index build inside the migration transaction.
+        await self.execute(self.load_sql("migrations/007_add_event_search.sql"))
+
         # Upgrade pre-existing unique fact indexes to the md5 form (raw-fact
         # entries fail for facts larger than the ~2704-byte btree row limit) and
         # to the active-row partial form used by memory lineage history.
@@ -395,20 +400,23 @@ class PostgresStorage:
             )
         logger.info("Database schema initialized")
 
-        # Align the generated tsvector columns with the configured language
+        # Align the generated memory tsvector columns with the configured language
         await self._ensure_text_search_config(self._settings.text_search_config)
 
         # Adjust vector dimension if specified
         if embedding_dimension is not None:
             await self._ensure_vector_dimension(embedding_dimension)
 
+        await self._ensure_event_search_indexes(self._settings.text_search_config)
+
     async def _ensure_text_search_config(self, config: str) -> None:
         """Rebuild the generated tsvector columns when the language changed.
 
-        The schema ships with 'english'; non-English deployments set
-        ENGRAM_TEXT_SEARCH_CONFIG and the columns are recreated with that
-        configuration (a table rewrite — cheap on fresh DBs, logged on
-        populated ones).
+        The memory schema ships with 'english'; non-English deployments set
+        ENGRAM_TEXT_SEARCH_CONFIG and the memory columns are recreated with
+        that configuration (a table rewrite — cheap on fresh DBs, logged on
+        populated ones). Event search uses expression indexes instead of a
+        stored tsvector column, so large event ledgers avoid a table rewrite.
         """
         import re as _re
 
@@ -473,7 +481,46 @@ class PostgresStorage:
         )
         logger.info(f"tsvector columns now use text search config '{config}'")
 
-    async def _get_current_vector_dimension(self) -> int | None:
+    async def _ensure_event_search_indexes(self, config: str) -> None:
+        """Build event recall indexes online.
+
+        These statements are deliberately kept outside migration 007. On large
+        ledgers, adding a nullable column is fast, while building GIN/HNSW
+        indexes can take time. ``CONCURRENTLY`` keeps reads and writes flowing
+        during that build in production.
+        """
+        import re as _re
+
+        if not _re.fullmatch(r"[a-z_]+", config):
+            raise ConfigurationError(
+                f"Invalid text_search_config {config!r}: must match [a-z_]+"
+            )
+
+        indexdef = await self.fetchval(
+            "SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_events_content_tsv'"
+        )
+        expected = f"to_tsvector('{config}'::regconfig, content)"
+        if indexdef is None or expected not in str(indexdef):
+            await self.execute(
+                "DROP INDEX CONCURRENTLY IF EXISTS idx_events_content_tsv;"
+            )
+            await self.execute(
+                f"""
+                CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_content_tsv
+                ON agent_events USING GIN (to_tsvector('{config}', content));
+                """
+            )
+        await self.execute(
+            """
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_embedding
+            ON agent_events USING hnsw (event_embedding vector_cosine_ops)
+            WHERE event_embedding IS NOT NULL;
+            """
+        )
+
+    async def _get_current_vector_dimension(
+        self, table: str = "agent_memory", column: str = "embedding"
+    ) -> int | None:
         """Get the current vector column dimension from the database.
 
         Returns:
@@ -482,11 +529,11 @@ class PostgresStorage:
         query = """
         SELECT atttypmod
         FROM pg_attribute
-        WHERE attrelid = 'agent_memory'::regclass
-        AND attname = 'embedding';
+        WHERE attrelid = $1::regclass
+        AND attname = $2;
         """
         try:
-            result = await self.fetchval(query)
+            result = await self.fetchval(query, table, column)
             if result is not None and result > 0:
                 return int(result)
             return None
@@ -507,15 +554,25 @@ class PostgresStorage:
             target_dimension: The desired embedding dimension.
         """
         current_dimension = await self._get_current_vector_dimension()
+        event_dimension = await self._get_current_vector_dimension(
+            "agent_events", "event_embedding"
+        )
 
-        if current_dimension == target_dimension:
+        if (
+            current_dimension == target_dimension
+            and event_dimension == target_dimension
+        ):
             logger.debug(f"Vector dimension already set to {target_dimension}")
             return
 
         # Check if there's existing data that would be lost
-        row_count = await self.fetchval(
+        memory_row_count = await self.fetchval(
             "SELECT COUNT(*) FROM agent_memory WHERE embedding IS NOT NULL"
         )
+        event_row_count = await self.fetchval(
+            "SELECT COUNT(*) FROM agent_events WHERE event_embedding IS NOT NULL"
+        )
+        row_count = int(memory_row_count or 0) + int(event_row_count or 0)
 
         if (
             row_count
@@ -523,20 +580,23 @@ class PostgresStorage:
             and not self._settings.allow_embedding_dimension_change
         ):
             raise ConfigurationError(
-                f"Embedding dimension changed from {current_dimension} to "
-                f"{target_dimension}, which would clear {row_count} stored "
-                "embeddings and make those memories invisible to vector "
+                f"Embedding dimension changed from memory={current_dimension}, "
+                f"events={event_dimension} to {target_dimension}, which would "
+                f"clear {row_count} stored embeddings and make those rows invisible to vector "
                 "search. If this is intentional, set "
                 "ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=true and re-embed "
                 "existing memories afterwards; otherwise restore the previous "
                 "embedding provider/model configuration.",
                 current_dimension=current_dimension,
+                event_dimension=event_dimension,
                 target_dimension=target_dimension,
                 affected_embeddings=row_count,
             )
 
         logger.info(
-            f"Adjusting vector dimension from {current_dimension} to {target_dimension}"
+            "Adjusting vector dimension from "
+            f"memory={current_dimension}, events={event_dimension} "
+            f"to {target_dimension}"
         )
 
         if row_count and row_count > 0:
@@ -546,18 +606,24 @@ class PostgresStorage:
             )
 
         # Drop the HNSW index first (required before altering column type)
-        logger.info("Dropping existing vector index")
+        logger.info("Dropping existing vector indexes")
         await self.execute("DROP INDEX IF EXISTS idx_memory_embedding;")
+        await self.execute("DROP INDEX IF EXISTS idx_events_embedding;")
 
         # Clear existing embeddings (they're incompatible with new dimension)
         if row_count and row_count > 0:
             logger.info("Clearing incompatible embeddings")
             await self.execute("UPDATE agent_memory SET embedding = NULL;")
+            await self.execute("UPDATE agent_events SET event_embedding = NULL;")
 
         # Alter the column to the new dimension
-        logger.info(f"Altering embedding column to VECTOR({target_dimension})")
+        logger.info(f"Altering embedding columns to VECTOR({target_dimension})")
         await self.execute(
             f"ALTER TABLE agent_memory ALTER COLUMN embedding TYPE VECTOR({target_dimension});"
+        )
+        await self.execute(
+            "ALTER TABLE agent_events "
+            f"ALTER COLUMN event_embedding TYPE VECTOR({target_dimension});"
         )
 
         # Recreate the HNSW index

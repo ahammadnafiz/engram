@@ -306,9 +306,18 @@ class LLMService:
         context_block = "\n\n".join(context_parts) + "\n\n" if context_parts else ""
 
         extraction_prompt = f"""<task>
-Extract ALL atomic facts about the user from the conversation exchange below.
+Extract ALL atomic facts about the user that are asserted by the USER MESSAGE below.
 An atomic fact is a single, self-contained piece of information that can stand alone.
 </task>
+
+<source_of_truth priority="highest">
+The user message is the only source of new or corrected memory.
+Use assistant text only as context for disambiguation, never as a source of
+new facts. If a fact appears only in the assistant response, do not extract it.
+If the user asks a recall, comparison, timeline, summary, or history question,
+that question is not itself a new memory unless the user also states a new fact
+or correction.
+</source_of_truth>
 
 <context>
 {context_block if context_block else "<none/>"}
@@ -316,7 +325,7 @@ An atomic fact is a single, self-contained piece of information that can stand a
 
 <current_exchange>
 <user>{user_message}</user>
-<assistant>{assistant_response}</assistant>
+<assistant_context>{assistant_response}</assistant_context>
 </current_exchange>
 
 <categories description="Extract ALL that apply">
@@ -393,6 +402,14 @@ labels them as fictional test data.
 <example type="good" input="fictional: the recovery hint ends with 47-Kilo">User's fictional recovery hint ends with 47-Kilo</example>
 <example type="good" input="the safe-note label is Violet">User's safe-note label is Violet</example>
 </rule>
+
+<rule id="12" name="assistant_is_not_memory_source" priority="highest">
+Do not extract assistant-restated memories. Assistant answers are often recalled
+from existing memory and must not rewrite user-authored memories.
+<example type="bad" input_user="What was my meeting change?" input_assistant="It changed from 3 PM to 10 PM">User's meeting changed from 3 PM to 10 PM ❌ WRONG - assistant-only restatement</example>
+<example type="good" input_user="What was my meeting change?" input_assistant="It changed from 3 PM to 10 PM">NONE</example>
+<example type="good" input_user="Actually move my meeting from 3 PM to 10 PM" input_assistant="Noted">User changed their meeting from 3 PM to 10 PM</example>
+</rule>
 </rules>
 
 <output_format>
@@ -404,6 +421,8 @@ Return "NONE" ONLY if truly no extractable facts.
 <exclude>Vague facts with "(not mentioned)" or "(unknown)"</exclude>
 <exclude>Generic statements without specifics</exclude>
 <exclude>Assistant's opinions</exclude>
+<exclude>Facts stated only by the assistant</exclude>
+<exclude>Recall/history/summary questions with no new user-stated fact</exclude>
 <exclude>Hypotheticals</exclude>
 </exclusions>"""
 
@@ -808,7 +827,7 @@ REASON: [brief explanation]
                 op_type in (MemoryOperationType.UPDATE, MemoryOperationType.DELETE)
                 and target_id is None
             ):
-                logger.warning(
+                logger.debug(
                     f"{op_type.value} operation had unresolvable target; "
                     f"falling back to ADD for fact: {new_fact[:80]}"
                 )

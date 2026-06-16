@@ -214,10 +214,13 @@ POSTGRES_DB=engram
 ENGRAM_DATABASE_URL=postgresql://engram:${password}@localhost:${port}/engram
 
 # Optional: OpenAI API Key (uncomment and add your key)
+# ENGRAM_OPENAI_API_KEY=sk-your-key-here
 # OPENAI_API_KEY=sk-your-key-here
 
 # Optional: Embedding Provider (openai or sentence-transformers)
 EMBEDDING_PROVIDER=openai
+ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
+ENGRAM_EMBEDDING_DIMENSION=1536
 
 # Optional: pgAdmin Settings
 PGADMIN_PORT=5050
@@ -529,8 +532,7 @@ cmd_reset() {
         log_info "Stopping and removing containers..."
         $DOCKER_COMPOSE down -v
 
-        log_info "Removing .env file..."
-        rm -f "$ENV_FILE"
+        log_info "Keeping .env so API keys and database credentials are preserved"
 
         log_success "Reset complete"
         log_info "Run './scripts/docker-setup.sh' to start fresh"

@@ -59,6 +59,9 @@ http = [
 litellm = [
     "litellm>=1.0.0",
 ]
+temporal = [
+    "dateparser>=1.2.0",
+]
 sentence-transformers = [
     "sentence-transformers>=2.2.0",
 ]
@@ -78,6 +81,7 @@ all = [
     "httpx>=0.26.0,<0.29.0",
     "litellm>=1.0.0",
     "sentence-transformers>=2.2.0",
+    "dateparser>=1.2.0",
     "python-dotenv>=1.0.0",
 ]
 dev = [

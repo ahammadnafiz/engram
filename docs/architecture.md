@@ -101,7 +101,7 @@ extraction, query expansion, and evidence answering.
 | `memory_relations` | directed graph edges between memories |
 | `agent_sessions` | conversation sessions and rolling summaries |
 | `agent_task_runs` | long-running task runs |
-| `agent_events` | raw user/assistant/tool/agent/system event ledger |
+| `agent_events` | raw user/assistant/tool/agent/system event ledger with optional embeddings for hybrid event recall |
 | `agent_checkpoints` | compact task summaries |
 | `memory_jobs` | durable queue for derivation work |
 

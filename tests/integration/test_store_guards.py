@@ -691,3 +691,81 @@ class TestListMemories:
 
         assert [m.metadata["turn_index"] for m in memories] == [0, 1]
         assert all(m.metadata["original_session_id"] == "s1" for m in memories)
+
+
+class TestIncludeSupersededSearch:
+    """search(include_superseded=) is the historical-recall data primitive."""
+
+    @pytest.mark.asyncio
+    async def test_superseded_hidden_by_default_visible_when_requested(
+        self, store_env
+    ) -> None:
+        from engram.memory.models import MemoryCreate, SearchQuery
+
+        store, storage, embedding, agent_id = store_env
+
+        old_text = "User's meeting is at 3 PM"
+        new_text = "User's meeting is at 10 PM"
+        for t in (old_text, new_text, "meeting time"):
+            embedding.set_vector(t, axis=0)
+
+        old = await store.add(MemoryCreate(content=old_text, agent_id=agent_id))
+        await storage.execute(
+            """
+            UPDATE agent_memory
+            SET status = 'superseded', superseded_at = NOW()
+            WHERE memory_id = $1
+            """,
+            old.memory_id,
+        )
+        await store.add(MemoryCreate(content=new_text, agent_id=agent_id))
+
+        active_only = await store.search(
+            SearchQuery(query="meeting time", agent_id=agent_id, limit=10)
+        )
+        assert {r.memory.content for r in active_only} == {new_text}
+
+        with_history = await store.search(
+            SearchQuery(
+                query="meeting time",
+                agent_id=agent_id,
+                limit=10,
+                include_superseded=True,
+            )
+        )
+        by_content = {r.memory.content: r.memory.status for r in with_history}
+        assert by_content == {new_text: "active", old_text: "superseded"}
+
+    @pytest.mark.asyncio
+    async def test_include_superseded_in_keyword_and_semantic_modes(
+        self, store_env
+    ) -> None:
+        from engram.memory.models import MemoryCreate, SearchQuery
+
+        store, storage, embedding, agent_id = store_env
+
+        old_text = "User's car is a Toyota"
+        for t in (old_text, "car"):
+            embedding.set_vector(t, axis=1)
+        old = await store.add(MemoryCreate(content=old_text, agent_id=agent_id))
+        await storage.execute(
+            "UPDATE agent_memory SET status='superseded', superseded_at=NOW() "
+            "WHERE memory_id=$1",
+            old.memory_id,
+        )
+
+        for mode in ("keyword", "semantic"):
+            hidden = await store.search(
+                SearchQuery(query="car", agent_id=agent_id, limit=10, mode=mode)
+            )
+            assert old_text not in {r.memory.content for r in hidden}, mode
+            shown = await store.search(
+                SearchQuery(
+                    query="car",
+                    agent_id=agent_id,
+                    limit=10,
+                    mode=mode,
+                    include_superseded=True,
+                )
+            )
+            assert old_text in {r.memory.content for r in shown}, mode

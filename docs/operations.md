@@ -314,20 +314,28 @@ python examples/long_input_usage.py
 python examples/chatbot.py
 ```
 
-For the real OpenAI-backed chatbot, the production default is low-latency
-recall plus deferred memory-job processing:
+For the real OpenAI-backed chatbot, the default is operator recall plus inline
+memory-job processing:
 
 ```bash
-export ENGRAM_CHATBOT_RECALL_MODE=fast
-export ENGRAM_CHATBOT_MEMORY_JOBS=deferred
+export ENGRAM_CHATBOT_RECALL_MODE=operator
+export ENGRAM_CHATBOT_MEMORY_JOBS=inline
 export ENGRAM_CHATBOT_RERANK=auto
 python examples/chatbot.py
 ```
 
-`fast` performs one embedding-backed memory context lookup and deterministic
-critical-memory recall before the OpenAI chat call. New facts are extracted
-after the reply by `process_memory_jobs()` or `run_memory_worker()` in a separate
-process.
+`operator` first calls the LLM recall router with
+`compose_answer=False`. `recall()` classifies the turn and retrieves structured
+memory evidence; the chatbot then uses its regular OpenAI chat prompt to produce
+the final answer from recall evidence, active memory context, and the memory
+history timeline. This keeps broad history questions such as "what changed?"
+from depending on the narrow recall composer. Set
+`ENGRAM_CHATBOT_MEMORY_JOBS=deferred` to process jobs with `/jobs`,
+`process_memory_jobs()`, or `run_memory_worker()`.
+
+For lower latency and cost, set `ENGRAM_CHATBOT_RECALL_MODE=fast`. `fast`
+performs one embedding-backed memory context lookup and critical-memory recall
+before the OpenAI chat call.
 
 For broad recall evaluation, use `ENGRAM_CHATBOT_RECALL_MODE=deep`. For
 retrieval debugging, use `ENGRAM_CHATBOT_RECALL_MODE=debug`, which includes
@@ -350,7 +358,9 @@ Chatbot commands:
 | `/lineage <memory_id>` | show the current head and revision history |
 | `/history [active\|limit\|memory_id]` | show memory add/update timeline |
 | `/memories` | list recent chatbot memories |
+| `/jobs` | process queued memory extraction jobs |
 | `/search <query>` | run hybrid search and reinforce hits |
+| `/recall <question>` | ask current, historical, event, or lineage memory directly |
 | `/trace <query>` | inspect recall trace |
 | `/context <query>` | render memory and task context used for prompting |
 | `/task` | show current resumable task/session |

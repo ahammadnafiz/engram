@@ -1560,6 +1560,7 @@ class MemoryStore:
                 metadata_filter=query.metadata_filter,
                 memory_types=query.memory_types,
                 min_score=query.min_score,
+                include_superseded=query.include_superseded,
             )
         elif mode == "keyword":
             return await self._keyword_search(query)
@@ -1598,6 +1599,7 @@ class MemoryStore:
                 query.min_score,  # $13
                 settings.text_search_config,  # $14
                 settings.search_candidate_multiplier,  # $15
+                query.include_superseded,  # $16
             )
 
             results: list[SearchResult] = []
@@ -1684,8 +1686,13 @@ class MemoryStore:
                     AND ($3::TEXT IS NULL OR m.user_id = $3)
                     AND ($6::jsonb IS NULL OR m.metadata @> $6::jsonb)
                     AND ($7::text[] IS NULL OR m.memory_type = ANY($7))
-                    AND m.status <> 'superseded'
-                    AND COALESCE(m.metadata->>'status', 'active') <> 'superseded'
+                    AND (
+                        $10::boolean
+                        OR (
+                            m.status <> 'superseded'
+                            AND COALESCE(m.metadata->>'status', 'active') <> 'superseded'
+                        )
+                    )
                     AND fact_tsv @@ plainto_tsquery($9::regconfig, $1)
             )
             SELECT * FROM (
@@ -1711,6 +1718,7 @@ class MemoryStore:
                 list(query.memory_types) if query.memory_types else None,  # $7
                 query.min_score,  # $8
                 settings.text_search_config,  # $9
+                query.include_superseded,  # $10
             )
 
             results: list[SearchResult] = []
@@ -1766,6 +1774,7 @@ class MemoryStore:
         metadata_filter: dict[str, Any] | None = None,
         memory_types: list[MemoryType] | None = None,
         min_score: float = 0.0,
+        include_superseded: bool = False,
     ) -> list[SearchResult]:
         """Pure semantic search using vector similarity.
 
@@ -1797,6 +1806,7 @@ class MemoryStore:
                 json_dumps(metadata_filter) if metadata_filter else None,
                 list(memory_types) if memory_types else None,
                 min_score,
+                include_superseded,
             )
 
             results: list[SearchResult] = []

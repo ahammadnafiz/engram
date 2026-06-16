@@ -299,5 +299,9 @@ class SearchQuery(BaseModel):
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
     metadata_filter: dict[str, Any] | None = None
     memory_types: list[MemoryType] | None = None
+    # When True, superseded (historical) revisions are included in results,
+    # each labeled by its ``status``. Default False keeps normal recall to
+    # active facts only.
+    include_superseded: bool = False
 
     model_config = {"frozen": True, "extra": "forbid"}

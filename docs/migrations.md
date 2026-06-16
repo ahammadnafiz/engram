@@ -41,6 +41,8 @@ Run migrations in numeric order:
 | `003_add_memory_type.sql` | adds `memory_type` and a type index |
 | `004_add_task_memory.sql` | adds task runs, event ledger, checkpoints, and memory jobs |
 | `005_widen_memory_type_constraint.sql` | allows all current policy memory types |
+| `006_add_memory_lineage.sql` | adds first-class memory revisions and lineage metadata |
+| `007_add_event_search.sql` | adds nullable event embeddings for hybrid event recall without startup backfill |
 
 ## Back Up
 

@@ -117,12 +117,20 @@ await engram.add_conversation(
     metadata=None,
     search_limit=10,
     update_summary=True,
+    extract_assistant_response=False,
 ) -> list[Memory]
 ```
 
 This method requires a configured LLM provider. It extracts facts, compares them
 with existing memories, stores add/update/delete/noop decisions, and writes the
 raw exchange to `main_content`.
+
+By default, only the user message is treated as a source of new memory. The
+assistant response is still stored in `main_content` and can update the session
+summary, but it is not used for fact extraction. This keeps read-only recall
+answers from rewriting user-authored memories. Set
+`extract_assistant_response=True` only when your application intentionally wants
+assistant-authored facts to become memories.
 
 ```python
 memories = await engram.add_conversation(
@@ -208,6 +216,7 @@ await engram.search(
     memory_types=None,
     mode="hybrid",
     rerank=False,
+    include_superseded=False,
 ) -> list[SearchResult]
 ```
 
@@ -215,6 +224,11 @@ Modes are `"hybrid"`, `"semantic"`, and `"keyword"`. Hybrid search combines
 pgvector similarity, PostgreSQL full-text search, decay, and importance. Normal
 search hides memories whose first-class `status` column or compatibility
 `metadata.status` value is `"superseded"`.
+
+Set `include_superseded=True` to also return historical (superseded) revisions
+ranked by relevance, each labeled by `result.memory.status`. This is the
+historical-recall surface for "what did I say before" / audit queries; it
+applies to all three modes.
 
 ```python
 results = await engram.search(
@@ -429,7 +443,78 @@ await engram.record_event(
 ) -> AgentEvent
 
 await engram.list_events(*, task_run_id=None, session_id=None, agent_id=None, limit=100, include_deleted=False) -> list[AgentEvent]
+await engram.search_events(
+    query,
+    *,
+    agent_id=None,
+    task_run_id=None,
+    session_id=None,
+    user_id=None,
+    event_types=None,
+    roles=None,
+    since=None,
+    until=None,
+    limit=50,
+    include_deleted=False,
+    mode="hybrid",
+) -> list[AgentEvent]
+await engram.backfill_event_embeddings(limit=1000, agent_id=None) -> int
 await engram.redact_event(event_id) -> AgentEvent
+```
+
+`search_events()` is hybrid "event recall": it ranks ledger events by vector
+similarity over `event_embedding` plus PostgreSQL full-text keyword relevance,
+then recency, with optional temporal/type/role filters. Old rows without
+embeddings still match through the keyword branch. Empty queries raise
+`ValueError`.
+
+Migration `007` does not backfill large ledgers during startup. Run
+`backfill_event_embeddings()` repeatedly from a worker or admin task until it
+returns `0` if you want old events to participate in semantic event recall.
+
+### `recall()` — the memory operator
+
+```text
+await engram.recall(
+    question,
+    agent_id,
+    *,
+    user_id=None,
+    question_date=None,
+    limit=10,
+    compose_answer=True,
+) -> RecallAnswer
+```
+
+`recall()` is the high-level "ask my memory anything" surface. It classifies the
+question's intent (`current` | `historical` | `event` | `lineage`), routes to the
+matching recall surface(s), and composes a source-backed answer. Non-recall chat
+turns are classified as `chat` and return an empty `answer_text`; callers such
+as `examples/chatbot.py` can then use their normal chat path instead of telling
+the user there is no matching memory. The returned `RecallAnswer` carries
+`answer_text` plus the structured facts behind it: `current`, `previous`,
+`when_changed`, `sources`, `conflict_note`, `evidence`, `events`, and a debug
+`trace`.
+
+Set `compose_answer=False` to skip the final recall-composer LLM call and return
+only structured evidence. This is useful for chatbots that want to combine recall
+evidence with broader prompt context, such as active memory blocks and memory
+history timelines, before generating the user-facing answer.
+
+Requires a configured LLM (raises `ConfigurationError` otherwise). Natural-language
+temporal phrases ("yesterday", "last week") in the question are resolved with the
+optional `dateparser` dependency (`engram[temporal]`); without it, recall still
+works but skips the temporal filter.
+
+```python
+answer = await engram.recall(
+    "what was my meeting before I changed it?",
+    "my_agent",
+    user_id="nafiz",
+)
+print(answer.answer_text)        # "It was 3 PM before you changed it to 10 PM."
+print(answer.intent)             # "historical"
+print([m.fact for m in answer.previous])
 ```
 
 Roles are `user`, `assistant`, `agent`, `tool`, and `system`. Event types are

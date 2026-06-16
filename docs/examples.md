@@ -102,18 +102,31 @@ without `ENGRAM_OPENAI_API_KEY`, builds Engram context before every model call,
 records every turn, and queues memory jobs so later replies can recall durable
 facts from the conversation.
 
-By default the chatbot uses the production-oriented fast path:
+By default the chatbot uses operator recall with inline memory processing:
+
+```bash
+export ENGRAM_CHATBOT_RECALL_MODE=operator
+export ENGRAM_CHATBOT_MEMORY_JOBS=inline
+export ENGRAM_CHATBOT_RERANK=auto
+```
+
+`operator` routes the turn through `engram.recall(..., compose_answer=False)` to
+get intent and source-backed evidence, then uses the regular OpenAI chat path to
+write the final answer from recall evidence, active memory context, and the
+memory history timeline. After the reply, inline memory processing stores new
+facts so they are available to the next turn.
+
+For lower latency, switch to `fast` mode:
 
 ```bash
 export ENGRAM_CHATBOT_RECALL_MODE=fast
 export ENGRAM_CHATBOT_MEMORY_JOBS=deferred
-export ENGRAM_CHATBOT_RERANK=auto
 ```
 
 `fast` does one embedding-backed context lookup plus deterministic critical
-memory recall before the OpenAI chat call. Memory extraction is queued after the
-reply; run `run_memory_worker()` or call `process_memory_jobs()` from a separate
-process to ingest new facts.
+memory recall before the OpenAI chat call. With deferred jobs, run
+`run_memory_worker()` or call `process_memory_jobs()` from a separate process to
+ingest new facts.
 
 `ENGRAM_CHATBOT_RERANK=auto` keeps reranking off in `fast` mode and enables it
 in `deep` and `debug` mode. Set `ENGRAM_CHATBOT_RERANK=true` to force reranking
@@ -145,6 +158,7 @@ export ENGRAM_CHATBOT_BROAD_MEMORY_CHARS=3600
 | Capability | API |
 |------------|-----|
 | real chat response | `engram.llm.complete_full()` |
+| operator recall evidence | `recall(..., compose_answer=False)` |
 | fast prompt memory | `recall_critical()`, `get_context_block()` |
 | deep/debug prompt memory | `deep_search()`, `list_recent()`, hard-constraint and query-specific attention blocks, `build_context()` |
 | recall debugging | `trace_recall()` |

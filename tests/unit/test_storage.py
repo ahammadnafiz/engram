@@ -34,7 +34,15 @@ class TestDsnRedaction:
 class TestVectorDimensionGuard:
     """Changing embedding dimension must never silently destroy embeddings."""
 
-    def _storage(self, *, current_dim: int, row_count: int, allow: bool):
+    def _storage(
+        self,
+        *,
+        current_dim: int,
+        row_count: int,
+        allow: bool,
+        event_dim: int | None = None,
+        event_count: int = 0,
+    ):
         from unittest.mock import AsyncMock
 
         from engram.core.config import EngramSettings
@@ -42,8 +50,15 @@ class TestVectorDimensionGuard:
 
         settings = EngramSettings(allow_embedding_dimension_change=allow)
         storage = PostgresStorage(settings)
-        # fetchval is called for: current dimension probe, then row count
-        storage.fetchval = AsyncMock(side_effect=[current_dim, row_count])  # type: ignore[method-assign]
+        # fetchval is called for: memory dimension, event dimension, then row counts.
+        storage.fetchval = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                current_dim,
+                current_dim if event_dim is None else event_dim,
+                row_count,
+                event_count,
+            ]
+        )
         storage.execute = AsyncMock()  # type: ignore[method-assign]
         return storage
 
@@ -67,6 +82,7 @@ class TestVectorDimensionGuard:
 
         executed = " ".join(str(c) for c in storage.execute.call_args_list)
         assert "ALTER TABLE agent_memory" in executed
+        assert "ALTER TABLE agent_events" in executed
 
     @pytest.mark.asyncio
     async def test_mismatch_with_data_and_explicit_opt_in_adjusts(self) -> None:
@@ -76,6 +92,7 @@ class TestVectorDimensionGuard:
 
         executed = " ".join(str(c) for c in storage.execute.call_args_list)
         assert "embedding = NULL" in executed
+        assert "event_embedding = NULL" in executed
 
     @pytest.mark.asyncio
     async def test_matching_dimension_is_noop(self) -> None:

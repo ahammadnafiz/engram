@@ -24,6 +24,8 @@
 --      the configuration of the generated fact_tsv column)
 -- $15: candidate_multiplier (INTEGER) - Overfetch factor per branch before
 --      rank fusion (default: 5). Higher improves recall completeness.
+-- $16: include_superseded (BOOLEAN) - When true, historical (superseded)
+--      revisions are included; default false restricts to active facts only.
 
 WITH 
 -- Semantic search on fact embeddings (overfetch for RRF, minimum 20)
@@ -56,8 +58,13 @@ semantic_search AS (
         AND ($4::text IS NULL OR user_id = $4)
         AND ($11::jsonb IS NULL OR metadata @> $11::jsonb)
         AND ($12::text[] IS NULL OR memory_type = ANY($12))
-        AND status <> 'superseded'
-        AND COALESCE(metadata->>'status', 'active') <> 'superseded'
+        AND (
+            $16::boolean
+            OR (
+                status <> 'superseded'
+                AND COALESCE(metadata->>'status', 'active') <> 'superseded'
+            )
+        )
         AND embedding IS NOT NULL
     ORDER BY embedding <=> $1::vector
     LIMIT GREATEST($5::int * $15::int, 20)
@@ -77,8 +84,13 @@ keyword_search AS (
         AND ($4::text IS NULL OR user_id = $4)
         AND ($11::jsonb IS NULL OR metadata @> $11::jsonb)
         AND ($12::text[] IS NULL OR memory_type = ANY($12))
-        AND status <> 'superseded'
-        AND COALESCE(metadata->>'status', 'active') <> 'superseded'
+        AND (
+            $16::boolean
+            OR (
+                status <> 'superseded'
+                AND COALESCE(metadata->>'status', 'active') <> 'superseded'
+            )
+        )
         AND fact_tsv @@ query
     ORDER BY keyword_score_raw DESC
     LIMIT GREATEST($5::int * $15::int, 20)

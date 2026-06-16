@@ -156,8 +156,9 @@ Here's what you should see:
 ## Store facts from a conversation
 
 `add_conversation()` needs an LLM provider. It reads a user/assistant exchange,
-pulls out the durable facts, checks them against what you already have, and only
-writes the ones that add something.
+pulls durable facts from the user message, checks them against what you already
+have, and only writes the ones that add something. Assistant responses are not
+memory sources by default, so recall answers do not rewrite existing memories.
 
 ```python
 memories = await engram.add_conversation(

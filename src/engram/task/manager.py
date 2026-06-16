@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING, Any
 
 from engram.core.exceptions import EngramError, StorageError
@@ -18,17 +19,21 @@ from engram.task.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
 
-    from engram.core._types import AgentId, Metadata, SessionId, UserId
+    from engram.core._types import AgentId, Metadata, SearchMode, SessionId, UserId
+    from engram.embedding.service import EmbeddingService
     from engram.storage.postgres import PostgresStorage
+    from engram.task.models import EventRole, EventType
 
+logger = logging.getLogger(__name__)
 
 _INSERT_EVENT_SQL = """
 INSERT INTO agent_events (
     event_id, task_run_id, session_id, agent_id, user_id,
     role, event_type, content, payload, metadata, created_at,
-    deleted_at, redacted_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    deleted_at, redacted_at, event_embedding
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 """
 
 _INSERT_JOB_SQL = """
@@ -54,8 +59,13 @@ class MemoryJobNotFoundError(EngramError):
 class TaskMemoryManager:
     """Storage operations for task runs, event ledger, checkpoints, and jobs."""
 
-    def __init__(self, storage: PostgresStorage) -> None:
+    def __init__(
+        self,
+        storage: PostgresStorage,
+        embedding: EmbeddingService | None = None,
+    ) -> None:
         self._storage = storage
+        self._embedding = embedding
 
     async def _ensure_agent_exists(self, agent_id: AgentId) -> None:
         await self._storage.execute(
@@ -272,12 +282,53 @@ class TaskMemoryManager:
             metadata=create.metadata,
         )
         try:
-            await self._storage.execute(*self._event_insert_args(event))
+            embedding = await self._embed_event_content(event.content)
+            await self._storage.execute(*self._event_insert_args(event, embedding))
             return event
         except Exception as e:
             raise StorageError(f"Failed to record event: {e}") from e
 
-    def _event_insert_args(self, event: AgentEvent) -> tuple[Any, ...]:
+    async def _embed_event_content(self, content: str) -> list[float] | None:
+        if self._embedding is None or not content.strip():
+            return None
+        try:
+            return await self._embedding.embed(content)
+        except Exception as e:
+            logger.warning(
+                "Failed to embed event content; storing keyword-only event: %s", e
+            )
+            return None
+
+    async def _embed_event_batch(
+        self, events: list[AgentEvent]
+    ) -> list[list[float] | None]:
+        if self._embedding is None:
+            return [None] * len(events)
+        nonempty = [
+            (idx, event.content)
+            for idx, event in enumerate(events)
+            if event.content.strip()
+        ]
+        embeddings: list[list[float] | None] = [None] * len(events)
+        if not nonempty:
+            return embeddings
+        try:
+            vectors = await self._embedding.embed_batch(
+                [content for _, content in nonempty]
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to batch-embed event content; storing keyword-only events: %s",
+                e,
+            )
+            return embeddings
+        for (idx, _content), vector in zip(nonempty, vectors, strict=True):
+            embeddings[idx] = vector
+        return embeddings
+
+    def _event_insert_args(
+        self, event: AgentEvent, embedding: list[float] | None
+    ) -> tuple[Any, ...]:
         return (
             _INSERT_EVENT_SQL,
             event.event_id,
@@ -293,6 +344,7 @@ class TaskMemoryManager:
             event.created_at,
             event.deleted_at,
             event.redacted_at,
+            json.dumps(embedding) if embedding is not None else None,
         )
 
     async def record_events(
@@ -346,9 +398,10 @@ class TaskMemoryManager:
             job = MemoryJob(job_type=job_type, payload=payload)  # type: ignore[arg-type]
 
         try:
+            embeddings = await self._embed_event_batch(events)
             async with self._storage.transaction() as conn:
-                for event in events:
-                    await conn.execute(*self._event_insert_args(event))
+                for event, embedding in zip(events, embeddings, strict=True):
+                    await conn.execute(*self._event_insert_args(event, embedding))
                 if job is not None:
                     await conn.execute(
                         _INSERT_JOB_SQL,
@@ -411,6 +464,249 @@ class TaskMemoryManager:
             *params,
         )
         return [self._row_to_event(row) for row in rows]
+
+    async def search_events(
+        self,
+        query: str,
+        *,
+        agent_id: AgentId | None = None,
+        task_run_id: str | None = None,
+        session_id: SessionId | None = None,
+        user_id: UserId | None = None,
+        event_types: list[EventType] | None = None,
+        roles: list[EventRole] | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 50,
+        include_deleted: bool = False,
+        mode: SearchMode = "hybrid",
+        query_embedding: list[float] | None = None,
+    ) -> list[AgentEvent]:
+        """Search the event ledger by content, most relevant first.
+
+        Unlike ``list_events`` (chronological), this ranks events by keyword
+        and, when a query embedding is supplied, semantic relevance against
+        ``event_embedding``. It supports temporal/type/role filters and is the
+        recall surface for "what did I ask/say about X" questions over the raw
+        ledger.
+
+        Args:
+            query: Free-text search terms (matched with ``plainto_tsquery``).
+            agent_id: Optional agent filter.
+            task_run_id: Optional task filter.
+            session_id: Optional session filter.
+            user_id: Optional user filter.
+            event_types: Optional list of event types to restrict to.
+            roles: Optional list of roles to restrict to.
+            since: Only events created at or after this time.
+            until: Only events created at or before this time.
+            limit: Maximum number of results.
+            include_deleted: Include soft-deleted events when True.
+            mode: ``keyword``, ``semantic``, or ``hybrid``. Hybrid falls back to
+                keyword when no query embedding is available.
+            query_embedding: Optional embedding of the query, supplied by the
+                public Engram client.
+
+        Returns:
+            Matching events ranked by hybrid relevance, then recency.
+
+        Raises:
+            ValueError: If ``query`` is empty or whitespace only.
+        """
+        if not query.strip():
+            raise ValueError("search_events query must not be empty")
+
+        config = self._storage._settings.text_search_config
+        if mode not in {"hybrid", "semantic", "keyword"}:
+            raise ValueError(
+                "search_events mode must be 'hybrid', 'semantic', or 'keyword'"
+            )
+
+        keyword_expr = f"to_tsvector('{config}', content)"
+        keyword_query = f"plainto_tsquery('{config}', $1)"
+        params: list[Any] = [query]
+        idx = 2
+        embedding_param = None
+        if query_embedding is not None and mode in {"hybrid", "semantic"}:
+            embedding_param = idx
+            params.append(json.dumps(query_embedding))
+            idx += 1
+
+        conditions: list[str] = []
+        if agent_id:
+            conditions.append(f"agent_id = ${idx}")
+            params.append(agent_id)
+            idx += 1
+        if task_run_id:
+            conditions.append(f"task_run_id = ${idx}")
+            params.append(task_run_id)
+            idx += 1
+        if session_id:
+            conditions.append(f"session_id = ${idx}")
+            params.append(session_id)
+            idx += 1
+        if user_id:
+            conditions.append(f"user_id = ${idx}")
+            params.append(user_id)
+            idx += 1
+        if event_types:
+            conditions.append(f"event_type = ANY(${idx}::text[])")
+            params.append(event_types)
+            idx += 1
+        if roles:
+            conditions.append(f"role = ANY(${idx}::text[])")
+            params.append(roles)
+            idx += 1
+        if since is not None:
+            conditions.append(f"created_at >= ${idx}")
+            params.append(since)
+            idx += 1
+        if until is not None:
+            conditions.append(f"created_at <= ${idx}")
+            params.append(until)
+            idx += 1
+        if not include_deleted:
+            conditions.append("deleted_at IS NULL")
+        where = " AND ".join(conditions)
+        params.append(limit)
+        limit_param = idx
+        base_where = where or "TRUE"
+        keyword_match = f"{keyword_expr} @@ {keyword_query}"
+
+        if embedding_param is None or mode == "keyword":
+            rows = await self._storage.fetchall(
+                f"""
+                SELECT event_id, task_run_id, session_id, agent_id, user_id,
+                       role, event_type, content, payload, metadata, created_at,
+                       deleted_at, redacted_at
+                FROM agent_events
+                WHERE {base_where} AND {keyword_match}
+                ORDER BY ts_rank({keyword_expr}, {keyword_query}, 32) DESC,
+                         created_at DESC, event_id DESC
+                LIMIT ${limit_param}
+                """,
+                *params,
+            )
+            return [self._row_to_event(row) for row in rows]
+
+        if mode == "semantic":
+            rows = await self._storage.fetchall(
+                f"""
+                SELECT event_id, task_run_id, session_id, agent_id, user_id,
+                       role, event_type, content, payload, metadata, created_at,
+                       deleted_at, redacted_at
+                FROM agent_events
+                WHERE {base_where}
+                    AND event_embedding IS NOT NULL
+                ORDER BY event_embedding <=> ${embedding_param}::vector,
+                         created_at DESC, event_id DESC
+                LIMIT ${limit_param}
+                """,
+                *params,
+            )
+            return [self._row_to_event(row) for row in rows]
+
+        overfetch = f"GREATEST(${limit_param}::int * 5, 50)"
+        rows = await self._storage.fetchall(
+            f"""
+            WITH semantic_search AS (
+                SELECT event_id,
+                       GREATEST(0, 1 - (event_embedding <=> ${embedding_param}::vector))
+                           AS semantic_score,
+                       ROW_NUMBER() OVER (
+                           ORDER BY event_embedding <=> ${embedding_param}::vector
+                       ) AS semantic_rank
+                FROM agent_events
+                WHERE {base_where}
+                    AND event_embedding IS NOT NULL
+                ORDER BY event_embedding <=> ${embedding_param}::vector
+                LIMIT {overfetch}
+            ),
+            keyword_search AS (
+                SELECT event_id,
+                       ts_rank({keyword_expr}, {keyword_query}, 32) AS keyword_score,
+                       ROW_NUMBER() OVER (
+                           ORDER BY ts_rank({keyword_expr}, {keyword_query}, 32) DESC
+                       ) AS keyword_rank
+                FROM agent_events
+                WHERE {base_where} AND {keyword_match}
+                ORDER BY ts_rank({keyword_expr}, {keyword_query}, 32) DESC
+                LIMIT {overfetch}
+            ),
+            combined AS (
+                SELECT
+                    COALESCE(s.event_id, k.event_id) AS event_id,
+                    COALESCE(s.semantic_score, 0) AS semantic_score,
+                    COALESCE(k.keyword_score, 0) AS keyword_score,
+                    CASE WHEN s.semantic_rank IS NOT NULL
+                         THEN 1.0 / (60 + s.semantic_rank)
+                         ELSE 0 END AS semantic_rrf,
+                    CASE WHEN k.keyword_rank IS NOT NULL
+                         THEN 1.0 / (60 + k.keyword_rank)
+                         ELSE 0 END AS keyword_rrf
+                FROM semantic_search s
+                FULL OUTER JOIN keyword_search k USING (event_id)
+            )
+            SELECT e.event_id, e.task_run_id, e.session_id, e.agent_id, e.user_id,
+                   e.role, e.event_type, e.content, e.payload, e.metadata, e.created_at,
+                   e.deleted_at, e.redacted_at
+            FROM combined c
+            JOIN agent_events e ON e.event_id = c.event_id
+            ORDER BY
+                (0.70 * c.semantic_score)
+                + (0.25 * c.keyword_score)
+                + (0.05 * (c.semantic_rrf + c.keyword_rrf)) DESC,
+                e.created_at DESC,
+                e.event_id DESC
+            LIMIT ${limit_param}
+            """,
+            *params,
+        )
+        return [self._row_to_event(row) for row in rows]
+
+    async def backfill_event_embeddings(
+        self,
+        *,
+        limit: int = 1000,
+        agent_id: AgentId | None = None,
+    ) -> int:
+        """Embed a bounded batch of old events that predate event embeddings."""
+        if self._embedding is None:
+            return 0
+        conditions = ["event_embedding IS NULL", "content <> ''", "deleted_at IS NULL"]
+        params: list[Any] = []
+        idx = 1
+        if agent_id:
+            conditions.append(f"agent_id = ${idx}")
+            params.append(agent_id)
+            idx += 1
+        params.append(limit)
+        rows = await self._storage.fetchall(
+            f"""
+            SELECT event_id, content
+            FROM agent_events
+            WHERE {" AND ".join(conditions)}
+            ORDER BY created_at ASC, event_id ASC
+            LIMIT ${idx}
+            """,
+            *params,
+        )
+        if not rows:
+            return 0
+        vectors = await self._embedding.embed_batch([row["content"] for row in rows])
+        args = [
+            (json.dumps(vector), row["event_id"])
+            for row, vector in zip(rows, vectors, strict=True)
+        ]
+        await self._storage.executemany(
+            """
+            UPDATE agent_events
+            SET event_embedding = $1
+            WHERE event_id = $2
+            """,
+            args,
+        )
+        return len(rows)
 
     async def redact_event(self, event_id: str) -> AgentEvent:
         row = await self._storage.fetchone(

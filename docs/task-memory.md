@@ -87,11 +87,55 @@ redacted = await engram.redact_event(event.event_id)
 print(redacted.redacted_at)
 ```
 
+## Search The Event Ledger
+
+`list_events()` returns events in chronological order. When you need to recall
+*what was said or asked* about a topic — "what did I ask about the chatbot last
+week?" — use `search_events()`. It ranks events with hybrid retrieval: semantic
+similarity over event embeddings plus PostgreSQL full-text keyword relevance.
+It also supports temporal, type, and role filters. Events created before event
+embeddings are backfilled still match through the keyword branch.
+
+```python
+hits = await engram.search_events(
+    "chatbot memory jobs",
+    agent_id="codex",
+    roles=["user"],
+    since=last_week,          # optional datetime lower bound
+    until=now,                # optional datetime upper bound
+    event_types=["user_message"],
+    limit=20,
+)
+for event in hits:
+    print(event.created_at, event.content)
+```
+
+Results are ordered by relevance, then recency. Soft-deleted events are excluded
+unless `include_deleted=True`. An empty query raises `ValueError`. This is the
+"event recall" surface — distinct from `search()` (active facts) and
+`get_history()` (the chronological memory timeline).
+
+Migration `007` is online-safe: it adds a nullable `event_embedding` column and
+builds indexes separately, but it does not embed old events at startup. For a
+large existing ledger, backfill in bounded batches:
+
+```python
+while True:
+    count = await engram.backfill_event_embeddings(limit=1000, agent_id="codex")
+    if count == 0:
+        break
+```
+
 ## Process Memory Jobs
 
 `record_turn()` queues a `turn_ingest` job by default. Processing that job can
 derive facts with `add_conversation()` when an LLM is configured, and it always
 updates task checkpoints.
+
+Turn ingestion treats the user message as the source of new memory. Assistant
+responses remain in the event ledger and checkpoint summary, but they do not
+create or revise memories unless your application explicitly opts into
+assistant-response extraction.
 
 ```python
 jobs = await engram.process_memory_jobs(limit=10)

@@ -51,6 +51,20 @@ def test_has_answer_gold_label_not_stored_in_memory_metadata() -> None:
     assert all("has_answer" not in m["metadata"] for m in mems)
 
 
+def test_event_ingestion_preserves_scoring_metadata_without_gold_label() -> None:
+    events = harness.iter_events(
+        _gold_sample(), agent_id="a", memory_unit="turn", max_memory_chars=2000
+    )
+
+    assert events
+    first = events[0]
+    assert first["role"] == "user"
+    assert first["event_type"] == "user_message"
+    assert first["metadata"]["original_session_id"] == "s1"
+    assert first["metadata"]["turn_index"] == 0
+    assert "has_answer" not in first["metadata"]
+
+
 def test_any_answer_memory_retrieved_recomputed_from_sample() -> None:
     """The evidence-recall metric is derived from the raw sample at scoring
     time, not from any stored flag — matching gold turns by (session, turn)."""
@@ -172,6 +186,7 @@ def _ns(**kw):
         "question_types": None,
         "memory_unit": "turn",
         "max_memory_chars": 2000,
+        "ingest_surface": "memory",
     }
     defaults.update(kw)
     return argparse.Namespace(**defaults)
@@ -191,6 +206,7 @@ def test_store_fingerprint_changes_with_ingestion_settings() -> None:
     assert (
         harness.store_fingerprint(_ns(data_path="data/longmemeval/other.json")) != base
     )
+    assert harness.store_fingerprint(_ns(ingest_surface="event")) != base
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +262,25 @@ def mem(content: str, mid: str, memory_type: str = "semantic", metadata=None):
         content=content,
         memory_type=memory_type,
         metadata=metadata or {},
+    )
+
+
+def evt(content: str, eid: str, turn_index: int, role: str = "user"):
+    from engram.task.models import AgentEvent
+
+    return AgentEvent(
+        event_id=eid,
+        agent_id="agent",
+        session_id="q1:s1",
+        role=role,
+        event_type="user_message" if role == "user" else "assistant_message",
+        content=content,
+        metadata={
+            "original_session_id": "s1",
+            "turn_index": turn_index,
+            "turn_role": role,
+            "haystack_date": "2023/01/01",
+        },
     )
 
 
@@ -319,6 +354,34 @@ class TestNeighboringContextBlock:
             session_id=None,
             metadata_filter={"original_session_id": "s1"},
             memory_types=["episodic"],
+            limit=200,
+        )
+
+    @pytest.mark.asyncio
+    async def test_expands_retrieved_event_with_event_neighbors(self) -> None:
+        eg = make_engram()
+        events = [
+            evt("[2023/01/01] USER: I use Cartwheel at Target.", "e0", 0),
+            evt("[2023/01/01] USER: I redeemed a coupon.", "e1", 1),
+            evt("[2023/01/01] ASSISTANT: Nice.", "e2", 2, role="assistant"),
+        ]
+        eg.list_events = AsyncMock(return_value=events)
+
+        context, sources = await harness.get_neighboring_event_context_block(
+            eg,
+            [events[1]],
+            "agent",
+            before=1,
+            after=1,
+            max_tokens=500,
+        )
+
+        assert "Cartwheel at Target" in context
+        assert "redeemed a coupon" in context
+        assert [source["turn_index"] for source in sources] == [0, 1, 2]
+        eg.list_events.assert_awaited_once_with(
+            agent_id="agent",
+            session_id="q1:s1",
             limit=200,
         )
 

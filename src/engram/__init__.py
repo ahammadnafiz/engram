@@ -109,6 +109,12 @@ from engram.providers import (
     get_llm_provider,
     llm_registry,
 )
+from engram.recall import (
+    RecallAnswer,
+    RecallIntent,
+    RecallSource,
+    resolve_timeframe,
+)
 from engram.session import Session
 from engram.task import (
     AgentEvent,
@@ -167,6 +173,9 @@ __all__ = [
     "MemoryType",
     "Metadata",
     "QueryError",
+    "RecallAnswer",
+    "RecallIntent",
+    "RecallSource",
     "RecallTrace",
     "RelationType",
     "SearchMode",
@@ -193,4 +202,5 @@ __all__ = [
     "get_memory_policy",
     "get_settings",
     "llm_registry",
+    "resolve_timeframe",
 ]

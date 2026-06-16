@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -131,6 +132,27 @@ class TestTruncationHandling:
         assert "Do not extract real passwords" in prompt
         assert "47-Kilo" in prompt
 
+    @pytest.mark.asyncio
+    async def test_extraction_prompt_treats_assistant_as_context_only(self) -> None:
+        svc = make_service("NONE")
+        await svc.extract_facts(
+            "What was my meeting change?",
+            "It changed from 3 PM to 10 PM.",
+        )
+
+        prompt = svc._provider.complete.call_args.args[0][0]["content"]
+        assert (
+            "The user message is the only source of new or corrected memory" in prompt
+        )
+        assert "Facts stated only by the assistant" in prompt
+        assert "assistant-restated memories" in prompt
+        assert (
+            "<assistant_context>It changed from 3 PM to 10 PM.</assistant_context>"
+            in prompt
+        )
+        assert "<assistant>It changed from 3 PM to 10 PM.</assistant>" not in prompt
+        assert "Recall/history/summary questions with no new user-stated fact" in prompt
+
 
 class TestDuplicateScoreSpace:
     """The 0.92 duplicate threshold must compare cosine similarity, not the
@@ -195,19 +217,21 @@ class TestEvaluateMemoryOperation:
         assert op.content == "User moved to Berlin"
 
     @pytest.mark.asyncio
-    async def test_delete_with_no_target_falls_back_to_add(self) -> None:
+    async def test_delete_with_no_target_falls_back_to_add(self, caplog) -> None:
         from engram.llm.service import MemoryOperationType
 
         svc = make_service(
             "OPERATION: DELETE\nTARGET: none\nMERGED: none\nREASON: contradiction"
         )
-        op = await svc.evaluate_memory_operation(
-            "User switched to BRAC Bank",
-            [("mem_a", "User banks at City Bank")],
-        )
+        with caplog.at_level(logging.WARNING, logger="engram.llm.service"):
+            op = await svc.evaluate_memory_operation(
+                "User switched to BRAC Bank",
+                [("mem_a", "User banks at City Bank")],
+            )
 
         assert op.operation == MemoryOperationType.ADD
         assert op.content == "User switched to BRAC Bank"
+        assert "unresolvable target" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_update_with_valid_target_stays_update(self) -> None:
