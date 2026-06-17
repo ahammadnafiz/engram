@@ -1,14 +1,15 @@
-# Migrations
+# Database Migrations
 
-This guide covers database schema changes in the current alpha line.
+This guide covers how to initialize, upgrade, and manage the PostgreSQL database schema for Engram.
 
-!!! warning
-    Back up the database before running migrations. Engram is alpha software,
-    and schema evolution is still active.
+> [!WARNING]
+> Engram is currently in alpha and the schema is subject to change. **Always back up your database before running migrations against an existing populated database.**
 
-## Fresh Database
+---
 
-For normal library use, `Engram.connect()` initializes the schema:
+## 1. Fresh Database Setup
+
+If you are starting a new project, Engram can initialize the database schema automatically. When you call `Engram.connect()`, the client executes the `schema.sql` file if the tables do not exist.
 
 ```python
 from engram import Engram
@@ -18,58 +19,50 @@ async with Engram() as engram:
     print(health["status"])
 ```
 
-For manual setup:
+### Manual Initialization
+If you prefer to initialize the schema manually via CLI:
 
 ```bash
 docker compose up -d postgres
-docker compose exec -T postgres psql -U engram -d engram \
-  < src/engram/sql/schema.sql
+docker compose exec -T postgres psql -U engram -d engram < src/engram/sql/schema.sql
 ```
 
-`schema.sql` creates required extensions, all tables, indexes, generated
-tsvector columns, and default vector shape before `connect()` aligns the vector
-dimension with the configured embedding provider.
+> [!NOTE]
+> `schema.sql` creates all required extensions (`vector`, `pg_trgm`), tables, indexes, and generated `tsvector` columns.
 
-## Existing Database
+---
 
-Run migrations in numeric order:
+## 2. Upgrading an Existing Database
 
-| Migration | Purpose |
-|-----------|---------|
-| `001_add_fact_columns.sql` | adds `fact`, `main_content`, generated tsvector columns, and related indexes |
-| `002_add_session_summary.sql` | adds rolling summaries to `agent_sessions` |
-| `003_add_memory_type.sql` | adds `memory_type` and a type index |
-| `004_add_task_memory.sql` | adds task runs, event ledger, checkpoints, and memory jobs |
-| `005_widen_memory_type_constraint.sql` | allows all current policy memory types |
-| `006_add_memory_lineage.sql` | adds first-class memory revisions and lineage metadata |
-| `007_add_event_search.sql` | adds nullable event embeddings for hybrid event recall without startup backfill |
+If you are upgrading an older installation of Engram, you must apply migrations sequentially.
 
-## Back Up
+### The Migration Ledger
 
+| Migration Script | Purpose |
+|------------------|---------|
+| `001_add_fact_columns.sql` | Adds the explicit `fact` and `main_content` columns, along with related indexes and `tsvector` generated columns. |
+| `002_add_session_summary.sql` | Adds rolling summaries to the `agent_sessions` table. |
+| `003_add_memory_type.sql` | Adds the `memory_type` column and a type index. |
+| `004_add_task_memory.sql` | Creates the tables required for Task Memory: `agent_task_runs`, `agent_events`, `agent_checkpoints`, and `memory_jobs`. |
+| `005_widen_memory_type_constraint.sql` | Widens the database constraint to allow all current policy memory types. |
+| `006_add_memory_lineage.sql` | Adds `status`, `lineage_id`, `revision`, and `superseded_by` columns to support immutable memory revisions and conflict resolution. |
+| `007_add_event_search.sql` | Adds nullable `event_embedding` to `agent_events` to support hybrid event recall on the task ledger. |
+
+### Step 1: Back Up Your Database
+
+Using standard `pg_dump`:
 ```bash
 pg_dump "$ENGRAM_DATABASE_URL" > backup_before_engram_migration.sql
 ```
 
-Docker:
-
+Using Docker:
 ```bash
-docker compose exec -T postgres pg_dump -U engram -d engram \
-  > backup_before_engram_migration.sql
+docker compose exec -T postgres pg_dump -U engram -d engram > backup_before_engram_migration.sql
 ```
 
-## Run Migrations
+### Step 2: Apply Migrations
 
-With `psql`:
-
-```bash
-psql "$ENGRAM_DATABASE_URL" -f src/engram/sql/migrations/001_add_fact_columns.sql
-psql "$ENGRAM_DATABASE_URL" -f src/engram/sql/migrations/002_add_session_summary.sql
-psql "$ENGRAM_DATABASE_URL" -f src/engram/sql/migrations/003_add_memory_type.sql
-psql "$ENGRAM_DATABASE_URL" -f src/engram/sql/migrations/004_add_task_memory.sql
-psql "$ENGRAM_DATABASE_URL" -f src/engram/sql/migrations/005_widen_memory_type_constraint.sql
-```
-
-With Docker:
+You can apply them one by one, or via a simple loop:
 
 ```bash
 for file in src/engram/sql/migrations/*.sql; do
@@ -77,19 +70,21 @@ for file in src/engram/sql/migrations/*.sql; do
 done
 ```
 
-## Verify
+---
 
-Columns:
+## 3. Schema Verifications
 
+After running the migrations, you can verify the tables exist with the following SQL queries.
+
+**Verify `agent_memory` columns:**
 ```sql
 SELECT column_name
 FROM information_schema.columns
 WHERE table_name = 'agent_memory'
-  AND column_name IN ('fact', 'main_content', 'memory_type');
+  AND column_name IN ('fact', 'main_content', 'memory_type', 'lineage_id', 'status');
 ```
 
-Task tables:
-
+**Verify Task Memory tables:**
 ```sql
 SELECT table_name
 FROM information_schema.tables
@@ -101,74 +96,29 @@ WHERE table_name IN (
 );
 ```
 
-Expected core tables:
+---
 
-- `agents`
-- `users`
-- `agent_memory`
-- `memory_relations`
-- `agent_sessions`
-- `agent_task_runs`
-- `agent_events`
-- `agent_checkpoints`
-- `memory_jobs`
+## 4. Troubleshooting
 
-## What Changed
+### Embedding Dimension Errors
 
-### Two-Column Memory
+By default, when `connect()` is called, Engram checks the dimension of your configured embedding provider against the `embedding` column in PostgreSQL. 
 
-`agent_memory.content` remains for compatibility. New code treats it as the
-same user-facing fact as `fact`.
+> [!CAUTION]
+> If the dimension has changed (e.g., switching from OpenAI's `1536` to local `384`), altering the pgvector column type will **permanently delete all existing embeddings** in the database.
 
-| Column | Meaning |
-|--------|---------|
-| `fact` | concise fact, embedded |
-| `main_content` | source context, not embedded |
-| `memory_type` | semantic, profile, task, constraint, and other current types |
-| `metadata` | policy metadata, conflict keys, source anchors |
-
-### Session Summaries
-
-`agent_sessions` includes:
-
-- `summary`
-- `summary_updated_at`
-
-`add_conversation(..., update_summary=True)` can update the summary when an LLM
-provider is configured and a `session_id` is supplied.
-
-### Task Memory
-
-Task memory adds:
-
-| Table | Meaning |
-|-------|---------|
-| `agent_task_runs` | durable task run state |
-| `agent_events` | append-only user/assistant/tool/artifact ledger |
-| `agent_checkpoints` | compact resumable state |
-| `memory_jobs` | durable background derivation queue |
-
-## Embedding Dimension Changes
-
-`connect()` checks the provider dimension against the vector column. If existing
-embeddings would be cleared, Engram raises a `ConfigurationError` by default.
-
-Only set this when you intentionally plan to clear and rebuild embeddings:
+To protect your data, Engram will raise a `ConfigurationError` and refuse to boot if it detects this. If you are *intentionally* switching models and are prepared to re-embed all your data (or are just running tests), you must explicitly allow the destructive schema change:
 
 ```bash
 export ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=true
 ```
 
-Use a fresh test database when switching between OpenAI 1536-dimension embeddings
-and local 384-dimension sentence-transformer embeddings.
+### Rollbacks
 
-## Rollback
+Because Engram relies heavily on generated columns, vector shapes, and immutable ledgers, manual database downgrades are **not recommended or supported**.
 
-The safest rollback is restore from backup:
+If a migration fails, the safest rollback strategy is dropping the database and restoring from the backup you took in Step 1:
 
 ```bash
 psql "$ENGRAM_DATABASE_URL" < backup_before_engram_migration.sql
 ```
-
-Manual rollback is not recommended. Task/event data, generated columns, vector
-shape changes, and policy metadata can make partial rollback unsafe.

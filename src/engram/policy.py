@@ -144,14 +144,30 @@ class MemoryPolicy:
         statements share the same slot so a correction supersedes the
         contradicted fact instead of coexisting with it. Compound allergens
         ("shellfish and peanuts") are kept whole.
+
+        Only statements that assert an allergy restriction are slotted.
+        Incidental mentions of the word "allergy" -- testing logistics, a
+        doctor visit, managing dietary profiles -- are NOT the allergy value
+        and must not occupy the slot. Slotting them lets a tangential fact
+        ingested last (conflict_key supersession is last-writer-wins)
+        supersede the real restriction and become the active head.
         """
         if "allerg" not in text:
             return None
+        # "allergic to X" is always a restriction assertion -> per-allergen slot.
         match = re.search(r"allergic to ([a-z0-9 _-]+?)(?:[,.;]|$)", text)
         if match:
             allergen = re.sub(r"[^a-z0-9]+", "_", match.group(1)).strip("_")
             return f"profile:allergy:{allergen or 'unknown'}"
-        return "profile:allergy"
+        # Otherwise slot only genuine restriction statements, not logistics.
+        is_restriction = re.search(
+            r"\b(severe|mild|food|seafood)\b[^.]*\ballerg"  # "severe shellfish allergy"
+            r"|\ballergy to\b"  # "allergy to shellfish"
+            r"|\ballerg\w*[^.]*\b(limited|restricted|strictly)\b"  # "allergy limited to..."
+            r"|\b(avoid|anaphyla|reaction)\b",
+            text,
+        )
+        return "profile:allergy" if is_restriction else None
 
 
 # Generic, domain-neutral typing rules for a general-purpose assistant.

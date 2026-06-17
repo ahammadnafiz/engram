@@ -255,7 +255,7 @@ class TestAddConversationSummary:
             == "prev"
         )
         eg._llm.update_conversation_summary.assert_awaited_once_with(
-            "prev", "hi", "hello", max_length=250, style="concise"
+            "prev", "hi", "hello", max_length=250, style="structured"
         )
         # Written via CAS against the snapshot the summary was derived from
         eg._sessions.try_update_summary.assert_awaited_once_with(
@@ -284,7 +284,7 @@ class TestAddConversationSummary:
             "What was my old meeting time?",
             "It changed from 3 PM to 10 PM.",
             max_length=250,
-            style="concise",
+            style="structured",
         )
 
     @pytest.mark.asyncio

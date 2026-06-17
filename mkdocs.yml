@@ -54,6 +54,7 @@ nav:
       - API reference: api-reference.md
       - Architecture: architecture.md
       - Diagrams: diagrams.md
+      - Benchmarks: benchmarks.md
   - Operations:
       - Production guide: production-guide.md
       - Migrations: migrations.md

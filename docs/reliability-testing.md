@@ -1,163 +1,56 @@
-# Reliability Testing
+# Reliability & Testing
 
-This page lists failure modes application teams should test around Engram. It is
-not a promise that Engram handles every case automatically. It identifies where
-the library has guards and where the application must add policy.
+This guide outlines the failure modes, edge cases, and security boundaries application teams must test when integrating Engram. 
 
-## Test Database Isolation
+> [!NOTE]
+> Engram guarantees database-level integrity, vector storage, and memory consistency. However, it **does not** enforce application-level authorization or handle external LLM network retries automatically.
 
-Integration tests should never target a development or production database.
-Use an explicit test URL:
+---
+
+## 1. Test Database Isolation
+
+Your automated test suite (e.g., `pytest`) must never execute against a development or production database.
+
+To isolate tests, provide a specific test database URL:
 
 ```bash
 export ENGRAM_TEST_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram_test
 pytest tests/integration -q --run-integration
 ```
 
-The test harness respects `ENGRAM_TEST_DATABASE_URL` and does not let `.env`
-override a caller-provided database URL.
+> [!TIP]
+> Engram's internal test harness strictly respects `ENGRAM_TEST_DATABASE_URL` and will safely ignore the standard `.env` file if the test URL is set.
 
-## Data Integrity
+---
 
-### Empty Facts
+## 2. Multi-Tenancy & Authorization
 
-`MemoryCreate` requires non-empty `content`.
+Engram scopes all data by `agent_id` and (optionally) `user_id`. It **does not** enforce authorization.
 
-```python
-from pydantic import ValidationError
+> [!CAUTION]  
+> Never trust a client-supplied `user_id` from a JSON body or URL parameter. You must resolve the `user_id` strictly from your web framework's secure authentication layer (e.g., a JWT token) before passing it to Engram.
 
-from engram.memory.models import MemoryCreate
+**Failure Mode Test:** Attempt to search memories using a valid `user_id` but with a mocked, invalid JWT token. The web layer should block the request before Engram is ever called.
 
+---
 
-try:
-    MemoryCreate(content="", agent_id="assistant")
-except ValidationError as exc:
-    print(exc)
-```
+## 3. Data Integrity & Ingestion
 
-### Long Facts And Long Context
+### Empty or Massive Facts
+Engram relies on `pydantic` for validation.
+- **Empty Facts**: `MemoryCreate` will throw a `ValidationError` if `content` is empty.
+- **Massive Facts**: `content` is capped at 100,000 characters. `main_content` is capped at 200,000. Text exceeding `ENGRAM_EMBEDDING_MAX_INPUT_CHARS` will be safely truncated before reaching the embedding provider.
 
-`Memory.content` and `MemoryCreate.content` allow up to 100,000 characters.
-`main_content` allows up to 200,000 characters. Embedding input is truncated by
-`ENGRAM_EMBEDDING_MAX_INPUT_CHARS` before it reaches the provider.
+### Concurrency and Duplicates
+Engram uses a mix of exact-hash uniqueness and vector cosine-similarity thresholds (`ENGRAM_NEAR_DUPLICATE_THRESHOLD`) to prevent fact duplication.
 
-For large source documents, prefer `record_long_input()` instead of one huge
-fact:
-
-```python
-report = await engram.record_long_input(
-    task.task_run_id,
-    text=large_document,
-    title="Vendor MSA",
-)
-```
-
-### Duplicate And Near-Duplicate Facts
-
-Engram uses an exact fact uniqueness index and a vector near-duplicate guard.
-Test both exact and reworded duplicates in your domain.
-
-```python
-first = await engram.add("User reports to Priya", "assistant", user_id="sarah")
-second = await engram.add("User's manager is Priya", "assistant", user_id="sarah")
-
-print(first.memory_id)
-print(second.memory_id)
-```
-
-Tune `ENGRAM_NEAR_DUPLICATE_THRESHOLD` if your domain needs more or less
-aggressive duplicate suppression.
-
-## Search And Recall
-
-### Empty Result Sets
-
-Your application must handle empty search results.
-
-```python
-results = await engram.search(
-    "preferences",
-    "assistant",
-    user_id="new_user",
-)
-
-if not results:
-    prompt_memory = ""
-```
-
-### Empty Or Stop-Word Queries
-
-`SearchQuery` requires a non-empty query. Treat empty user prompts as application
-input errors before calling Engram.
-
-```python
-query = user_message.strip()
-if query:
-    results = await engram.search(query, "assistant", user_id=user_id)
-else:
-    results = []
-```
-
-### Broad Prompts
-
-For broad prompts, use `trace_recall()` with expected terms so missed recall is
-visible.
-
-```python
-trace = await engram.trace_recall(
-    "Can we launch today?",
-    "assistant",
-    user_id=user_id,
-    expected_terms=["rollback owner", "error rate"],
-)
-
-if trace.missing_expected_terms:
-    logger.warning("missing expected memory terms: %s", trace.missing_expected_terms)
-```
-
-## Conflict Resolution
-
-Critical facts can share a `conflict_key`. The newer active fact supersedes the
-older one.
-
-```python
-old = await engram.add(
-    "User is allergic to cashews",
-    "assistant",
-    user_id="sarah",
-)
-new = await engram.add(
-    "Correction: user is not allergic to cashews",
-    "assistant",
-    user_id="sarah",
-)
-
-trace = await engram.trace_recall(
-    "Can the user eat cashews?",
-    "assistant",
-    user_id="sarah",
-)
-
-print(old.memory_id in trace.superseded_memory_ids)
-print(new.memory_id in trace.kept_memory_ids)
-```
-
-If a domain needs stricter slots, define explicit `SlotRule` objects. Generic
-content-digest slots are off by default because they do not match reworded
-corrections.
-
-## Concurrency
-
-The store uses database constraints and advisory locking around near-duplicate
-add paths. Still test concurrency around your highest-volume writes.
+**Test:** Fire concurrent writes using `asyncio.gather` to ensure your database pool and Engram's advisory locks handle race conditions.
 
 ```python
 import asyncio
 
-
 async def add_fact(text: str):
     return await engram.add(text, "assistant", user_id="sarah")
-
 
 await asyncio.gather(
     add_fact("User reports to Priya"),
@@ -165,184 +58,65 @@ await asyncio.gather(
 )
 ```
 
-For multi-step application workflows, wrap your own operations in application
-transactions or make them idempotent.
+---
 
-## Embedding Providers
+## 4. Intelligent Recall & Conflicts
 
-### Rate Limits And Downtime
-
-Cloud embedding calls can rate-limit or fail. Decide whether the application
-should fail fast, retry, or queue work.
+### Expected Term Validation
+For high-stakes tasks, use the `trace_recall()` operator to explicitly assert that Engram retrieved a specific concept.
 
 ```python
-try:
-    await engram.add("User prefers concise answers", "assistant", user_id=user_id)
-except Exception as exc:
-    logger.exception("memory write failed: %s", exc)
-```
-
-### Dimension Mismatch
-
-Switching providers can change vector dimension. Engram blocks destructive
-dimension changes when existing embeddings are present.
-
-```bash
-export ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=false
-```
-
-Use a fresh database for experiments that switch between OpenAI embeddings and
-sentence-transformer embeddings.
-
-## Graph Relations
-
-Recursive traversal has depth and limit guards. Test cycles, missing seeds, and
-direction filters.
-
-```python
-await engram.relate(a.memory_id, b.memory_id, "related_to")
-await engram.relate(b.memory_id, c.memory_id, "related_to")
-await engram.relate(c.memory_id, a.memory_id, "related_to")
-
-results = await engram.traverse(a.memory_id, max_depth=3, direction="any")
-```
-
-Use `traverse_many(..., skip_missing=True)` when prompt assembly should continue
-even if one seed was deleted.
-
-## Task Memory
-
-### Worker Not Running
-
-If no worker runs, raw events still exist, but derived memories and checkpoints
-lag behind.
-
-```python
-await engram.record_turn(task.task_run_id, user_message, assistant_response)
-
-context = await engram.build_context(task.task_run_id, query=user_message)
-```
-
-`build_context()` includes recent events, so the task can still resume, but
-ordinary memory search may not see derived facts until jobs are processed.
-
-### Failed Jobs
-
-```sql
-SELECT job_id, attempts, error, updated_at
-FROM memory_jobs
-WHERE status = 'failed'
-ORDER BY updated_at DESC;
-```
-
-Failed jobs preserve the raw ledger. Fix the underlying cause and decide whether
-to retry, requeue, or create a replacement event.
-
-### Redaction
-
-`redact_event()` clears event content and payload. It does not automatically
-delete memories derived from that event.
-
-```python
-await engram.redact_event(event_id)
-derived = await engram.get_memories(
-    "assistant",
+trace = await engram.trace_recall(
+    query="Can we launch today?",
+    agent_id="assistant",
     user_id=user_id,
-    metadata_filter={"source_event_id": event_id},
-)
-```
-
-Strict privacy deletion should also delete or supersede derived memories.
-
-## Long Input
-
-### Relative Dates
-
-Engram records time notes when it can, but high-stakes apps should normalize
-relative dates before ingestion.
-
-```python
-await engram.record_long_input(
-    task.task_run_id,
-    "We need this reviewed tomorrow and next Friday.",
-    metadata={"received_at": "2026-06-14T09:00:00Z"},
-)
-```
-
-### Missing Expected Terms
-
-```python
-context = await engram.build_long_input_context(
-    task.task_run_id,
-    query="termination notice",
-    expected_terms=["termination", "notice"],
+    expected_terms=["rollback owner", "error rate"],
 )
 
-if context.trace["missing_expected_terms"]:
-    raise RuntimeError("source context missing required terms")
+if trace.missing_expected_terms:
+    raise RuntimeError(f"Safety guard triggered. Missing: {trace.missing_expected_terms}")
 ```
 
-### Citation Metadata
+### Conflict Resolution
+When an agent learns a new, contradictory critical fact, Engram uses the `conflict_key` to supersede the old fact. 
 
-Engram stores character spans and quote hashes. If you need PDF page numbers,
-line numbers, or OCR boxes, add them in `metadata` before ingestion.
+**Test:** Ensure the older fact's ID moves to `trace.superseded_memory_ids` and the new fact is in `trace.kept_memory_ids`.
 
-## Multi-Tenancy
+---
 
-Engram scopes data by `agent_id` and optional `user_id`; it does not enforce
-authorization.
+## 5. Network & Infrastructure
 
-```python
-results = await engram.search(
-    "password reset",
-    "support-agent",
-    user_id=authenticated_user_id,
-)
-```
+### Embedding Dimension Mismatch
+If you change your embedding model (e.g., OpenAI `1536` to local `384`), Engram will throw a `ConfigurationError` on boot to prevent wiping your vectors. 
 
-Do not trust a client-supplied `user_id`. Resolve it from your auth layer.
+**Test:** Verify your app fails safely if this occurs, or export `ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=true` if you have an automated re-embedding pipeline.
 
-## Configuration
+### Worker Outages
+If your memory worker goes offline, raw events will continue to queue in `memory_jobs`, but new semantic facts won't be derived.
+- **Test**: Shut down the worker. Verify that `engram.build_context()` still allows the user to continue their current task using the raw recent events, even if deep semantic search degrades.
 
-Test configuration validation in CI:
+---
 
-```python
-from pydantic import ValidationError
+## 6. Privacy & Redaction
 
-from engram import EngramSettings
+When a user requests data deletion or an event is flagged for PII, you must trigger redaction.
 
+> [!WARNING]
+> Calling `engram.redact_event(event_id)` securely scrubs the raw ledger payload. However, it **does not** automatically hunt down and delete semantic facts derived from that event. You must implement a policy to `forget()` or `supersede()` those derived memories based on your application's privacy requirements.
 
-try:
-    EngramSettings(
-        weight_semantic=0.5,
-        weight_keyword=0.3,
-        weight_decay=0.3,
-        weight_importance=0.1,
-    )
-except ValidationError as exc:
-    print(exc)
-```
+---
 
-Common failures:
+## 7. The Minimum Test Matrix
 
-- weights do not sum to `1.0`
-- `max_pool_size` is lower than `min_pool_size`
-- invalid `text_search_config`
-- missing optional provider package
-- missing API key for a cloud provider
-- embedding dimension mismatch against a populated database
+Application teams should use this matrix to build their integration tests:
 
-## Minimum Test Matrix
-
-| Area | Test |
-|------|------|
-| database isolation | integration suite uses a throwaway database |
-| data integrity | empty facts fail, long facts are handled, duplicates collapse |
-| search | empty results, type filters, metadata filters, min score |
-| critical recall | critical memories appear before ordinary hits |
-| conflict resolution | corrected facts supersede older active facts |
-| task memory | events and jobs commit together, worker creates checkpoints |
-| privacy | redaction plus derived-memory cleanup policy |
-| long input | expected terms and source chunk IDs are present |
-| multi-tenancy | every app route resolves `user_id` from auth |
-| operations | failed jobs and pool saturation are monitored |
+| Domain | Required Integration Test |
+|--------|---------------------------|
+| **Isolation** | Suite executes strictly against a throwaway/test database. |
+| **Auth Boundaries** | Endpoints fail if `user_id` is missing or spoofed. |
+| **Data Integrity** | Submitting empty facts throws errors; near-duplicates gracefully collapse. |
+| **Recall Quality** | `trace_recall` confirms critical memories appear before ordinary vector hits. |
+| **Conflict Logic** | Correcting a user's preference supersedes the old active fact. |
+| **Task Resiliency** | Tasks can resume from checkpoints even if the background worker lags. |
+| **Privacy Cascade** | Scrubbing an event also triggers the deletion of downstream derived facts. |
+| **Long Documents** | `expected_terms` and source `chunk_ids` are verified during exact-document queries. |

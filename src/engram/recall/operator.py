@@ -47,6 +47,13 @@ critical routing rules:
 - A sentence can mention a memory topic without being a recall request.
   Declarative first-person updates are chat; questions about saved values are
   recall.
+- A question asking for a stored value, owner, reason, count, or list is recall
+  even when it uses "we", "our", "the team", or a project name instead of "my",
+  and even when a context clause comes before the question. Route these to
+  current (or historical/lineage if they ask about an old or changed value).
+- event is only for what was literally said or asked in the conversation. A
+  question about a stored fact (which database, who is on the team, what was
+  bought) is current, not event, even if the fact came up earlier.
 
 examples:
 - "i have a meeting at 3pm in zoom" -> {"intent":"chat","topic":"meeting","when":""}
@@ -56,6 +63,9 @@ examples:
 - "what is my name" -> {"intent":"current","topic":"name","when":""}
 - "where do i live" -> {"intent":"current","topic":"location","when":""}
 - "what time is my meeting" -> {"intent":"current","topic":"meeting time","when":""}
+- "what latency threshold must we hit before we launch?" -> {"intent":"current","topic":"latency threshold launch","when":""}
+- "who is managing the launch pipeline?" -> {"intent":"current","topic":"launch pipeline manager","when":""}
+- "which database did we pick and why?" -> {"intent":"current","topic":"database choice reason","when":""}
 - "what was my meeting time before i changed it" -> {"intent":"historical","topic":"meeting time","when":""}
 - "what did i ask yesterday about the chatbot" -> {"intent":"event","topic":"chatbot","when":"yesterday"}
 - "show the history of my meeting time" -> {"intent":"lineage","topic":"meeting time","when":""}
@@ -64,10 +74,20 @@ examples:
 topic: the subject to search for, reduced to keywords (e.g. "meeting time", "current city").
 when: a temporal phrase only if the question contains one (e.g. "yesterday", "last week"), else ""."""
 
-_COMPOSE_SYSTEM = """Answer the user's question using ONLY the memory evidence provided.
-Be concise and factual. Do not invent details not in the evidence.
-If the evidence is empty, say you have no memory of that.
-When there is both a previous value and a current value, state the current value and what it changed from."""
+_COMPOSE_SYSTEM = """Answer the user's question using only the memory evidence provided.
+
+Treat the evidence as authoritative and answer it directly:
+- If the answer is present in the evidence, state it plainly and confidently.
+  Do not say you lack memory, and do not hedge ("I don't have an entry that
+  explicitly says..."), when the evidence already contains the fact. A planned,
+  booked, or recorded detail in the evidence is the answer to a question about it.
+- Say you have no memory of it only when nothing in the evidence is relevant.
+  Never invent details that are absent.
+- CURRENT is the value now; PREVIOUS values are superseded history. State the
+  current value, and mention a previous value only to show what changed.
+- Answer every part of the question. For list, "everything", or "across all"
+  questions, include every matching item in the evidence, not just the first.
+Be concise and factual."""
 
 
 def _parse_classification(raw: str) -> tuple[RecallIntent, str, str]:

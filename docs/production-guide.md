@@ -1,287 +1,155 @@
 # Production Guide
 
-Engram is alpha software. This guide describes how to run it responsibly while
-the API and schema continue to evolve.
+Engram is an alpha-stage cognitive architecture. This guide outlines the best practices, security requirements, and operational strategies required to run it safely and reliably in a production environment.
 
-## Deployment Checklist
+> [!WARNING]
+> Because Engram is in active development, the database schema and API contracts are subject to change. Ensure you have automated backups and a staged deployment environment before upgrading versions.
 
-- Use PostgreSQL with `vector` and `pg_trgm` extensions. The local stack uses
-  `pgvector/pgvector:pg16`.
-- Back up the database before upgrades.
-- Run migrations in order for existing databases.
-- Scope every operation by `agent_id`, and by `user_id` for multi-user apps.
-- Choose a memory policy for the domain.
-- Run a memory worker if you use task memory.
-- Monitor pending and failed `memory_jobs`.
-- Inspect `trace_recall()` for missed-retrieval incidents.
-- Use source chunks for legal, compliance, financial, or exact-document answers.
-- Treat `agent_events.content`, `main_content`, and metadata as sensitive.
+---
 
-## Runtime Shape
+## 1. Deployment Checklist
 
-```text
-API / agent process
-  - builds compact context with get_context_block() and critical recall
-  - calls the application LLM, preferably with streaming in user-facing apps
-  - records turns and events
+Before taking an Engram-backed application live, ensure you have addressed the following:
 
-Memory worker process
-  - runs process_memory_jobs() or run_memory_worker()
-  - derives facts and checkpoints
+- [ ] **Database Setup**: You are running PostgreSQL 16+ with the `pgvector` and `pg_trgm` extensions enabled.
+- [ ] **Process Isolation**: You have separated your synchronous API web servers from your asynchronous background Memory Workers.
+- [ ] **Multi-Tenant Security**: Every `engram` operation is strictly scoped by `user_id` and `agent_id` at the API layer.
+- [ ] **Connection Pooling**: You are using PgBouncer (or similar) in front of PostgreSQL, and have tuned `ENGRAM_MIN_POOL_SIZE` and `ENGRAM_MAX_POOL_SIZE` appropriately for your app nodes.
+- [ ] **Policy Selection**: You have explicitly chosen or written a `MemoryPolicy` that matches your domain's needs (e.g., `coding_agent`, `legal`).
+- [ ] **Metrics**: You are actively monitoring the `memory_jobs` table for backlog saturation and derivation failures.
 
-PostgreSQL
-  - pgvector + pg_trgm
-  - backups
-  - monitoring
-```
+---
 
-Use heavier recall paths such as `deep_search()`, graph context, and
-`trace_recall()` for high-recall evaluation or debugging. Keep them out of the
-default chat hot path unless the added latency is intentional.
+## 2. Recommended Runtime Architecture
 
-## Basic Turn Loop
+Engram is designed to be highly concurrent, but to achieve low latency for the end user, you must separate **retrieval** from **derivation**.
+
+| Component | Responsibility | Scaling Strategy |
+|-----------|----------------|------------------|
+| **API / Web Process** | Executes `engram.recall()` to fetch context, streams LLM responses, and appends raw events to the ledger. | Scale horizontally based on user traffic. |
+| **Memory Worker** | Runs `engram.run_memory_worker()` continuously. Pops raw events off the queue, calls the LLM to extract facts, and creates task checkpoints. | Scale vertically or horizontally based on LLM throughput limits and job queue depth. |
+| **PostgreSQL** | Stores vectors, task ledgers, and handles recursive graph queries. | Scale vertically (RAM) to keep the active `pgvector` indexes in memory. |
+
+---
+
+## 3. The Production Turn Loop
+
+In production, you should rely on the `recall()` operator to intelligently route the user's intent, rather than manually hacking together vector searches and keyword lookups.
 
 ```python
 async def handle_turn(engram, task_id, agent_id, user_id, user_message):
-    critical = await engram.recall_critical(agent_id, user_id=user_id, limit=12)
-    relevant = await engram.get_context_block(
+    
+    # 1. Intelligently fetch evidence (Vector + Ledger + Lineage)
+    trace = await engram.recall(
         query=user_message,
         agent_id=agent_id,
         user_id=user_id,
-        limit=8,
-        max_tokens=900,
+        compose_answer=False  # We only want the context, not an auto-reply
     )
-    critical_block = "\n".join(f"- {memory.content}" for memory in critical)
 
+    # 2. Call your LLM, streaming the result to the user
     response = await call_your_llm(
-        memory_context=f"{critical_block}\n\n{relevant}",
+        memory_context=trace.context,
         user_message=user_message,
     )
 
+    # 3. Append to the immutable ledger and queue background processing
     await engram.record_turn(
         task_id,
         user_message=user_message,
         assistant_response=response,
         agent_id=agent_id,
         user_id=user_id,
-        enqueue_processing=True,
+        enqueue_processing=True,  # Crucial: defers the heavy extraction
     )
 
     return response
 ```
 
-Worker:
+### The Worker Process
+In a completely separate deployment service (e.g., a background container):
 
 ```python
 from engram import Engram
 
-async with Engram(memory_policy="coding_agent") as engram:
-    await engram.run_memory_worker(batch_size=20, interval_seconds=1.0)
+async def boot_worker():
+    async with Engram(memory_policy="coding_agent") as engram:
+        # Runs infinitely, processing 20 events per second
+        await engram.run_memory_worker(batch_size=20, interval_seconds=1.0)
 ```
 
-Small applications can call `process_memory_jobs(limit=10)` inline after a turn,
-but this makes the request wait on memory derivation.
+---
 
-## Critical Facts
+## 4. Security & Privacy
 
-Do not rely on vector search alone for:
+Engram stores raw conversations and distilled insights. Treat this data as highly sensitive.
 
-- allergies and health facts
-- identity and profile facts
-- user preferences
-- repository constraints
-- task requirements
-- legal citation rules
-- decisions and corrections
-- tool results that affect safety or rollout decisions
+- **App-Level Auth**: Engram does not enforce authentication. Your FastAPI/Django/Express layer must authenticate the user before passing their `user_id` down to Engram.
+- **Provider Leaks**: Be extremely careful about which LLM provider you use for background derivation. Do not send sensitive enterprise data to public models unless you have a zero-retention data processing agreement (DPA).
+- **Data Deletion**: To comply with GDPR or CCPA, use `purge(user_id="...")` to destroy all semantic facts, and ensure your app layer drops the corresponding task ledgers.
+- **Redaction**: If a user pastes API keys or PII, use the `redact_event()` API on the raw ledger, and supersede any semantic facts derived from that event.
 
-Use policy-backed memory and inspect `trace_recall()`.
+---
 
-```python
-trace = await engram.trace_recall(
-    query=user_message,
-    agent_id=agent_id,
-    user_id=user_id,
-    expected_terms=["allergy", "rollback owner"],
-    max_tokens=1500,
-)
+## 5. Long Inputs & Exact Context
 
-if trace.missing_expected_terms:
-    logger.warning("memory_context_missing_terms=%s", trace.model_dump())
-```
+For legal, compliance, or financial applications, vector similarity is not enough. You must be able to cite the exact source document.
 
-## Long Prompts And Documents
+Do not dump 50-page documents into standard `add()` calls. Use `record_long_input()` to securely chunk the document, generate precise quote hashes, and create bounded artifact events. 
 
-Use `record_long_input()` for prompts above a few thousand tokens or for source
-documents where exact quotes matter.
+> [!TIP]
+> When building enterprise apps, force your LLM's system prompt to cite the `chunk_id` or `quote_hash` returned by `build_long_input_context()`. This guarantees hallucination-free citations.
 
-```python
-await engram.record_long_input(
-    task_id,
-    text=document,
-    title="MSA v4",
-    metadata={"document_id": "msa-v4"},
-)
+---
 
-context = await engram.build_long_input_context(
-    task_id,
-    query="termination notice",
-    expected_terms=["termination", "notice"],
-)
-```
+## 6. Observability & Failure Modes
 
-Production rules for exact-document apps:
+When running Engram in production, monitor the following signals:
 
-- require source chunk IDs in answers
-- prefer source chunks over distilled facts
-- fail closed when expected terms are missing
-- store document IDs, page numbers, OCR coordinates, or external citation data
-  in metadata when the source parser knows them
+| Signal | Metric / Query | Mitigation |
+|--------|----------------|------------|
+| **Worker Saturation** | Count of `pending` rows in `memory_jobs` | If the backlog grows indefinitely, scale up your worker instances or switch to a faster extraction LLM model. |
+| **Extraction Failures** | Count of `failed` rows in `memory_jobs` | Typically caused by LLM rate limits. Engram will backoff and retry, but sustained failures require requesting higher quotas from OpenAI/Anthropic. |
+| **Missed Retrieval** | Monitor the `missing_expected_terms` list in the `RecallTrace` object. | Tune your `MemoryPolicy` to pin facts to `critical_slots` so they bypass vector math entirely. |
+| **Vector Index Wipes** | Application crash on boot with `ConfigurationError`. | You changed the embedding model dimension on an existing DB. You must export `ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=true` and manually trigger a re-embedding script. |
 
-## Database Operations
+---
 
-Connection pool settings:
+## 7. FastAPI Integration Sketch
 
-```bash
-export ENGRAM_MIN_POOL_SIZE=10
-export ENGRAM_MAX_POOL_SIZE=50
-```
-
-For high-traffic deployments, put PgBouncer in front of PostgreSQL and tune the
-application pool lower.
-
-Back up before migrations and provider-dimension changes:
-
-```bash
-pg_dump "$ENGRAM_DATABASE_URL" > engram_backup.sql
-```
-
-Vacuum tables with high churn:
-
-```sql
-VACUUM ANALYZE agent_memory;
-VACUUM ANALYZE agent_events;
-VACUUM ANALYZE memory_jobs;
-```
-
-## Embedding Dimension Changes
-
-Engram auto-detects the embedding dimension during `connect()` and aligns the
-`agent_memory.embedding` column. If existing embeddings would be cleared,
-Engram raises unless:
-
-```bash
-export ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=true
-```
-
-Use that flag only with a re-embedding plan. Safer options are:
-
-- keep the same embedding provider and model
-- use a fresh database for tests or experiments
-- migrate data and rebuild embeddings deliberately
-
-## Security And Privacy
-
-- Enforce authorization before passing `agent_id` and `user_id` to Engram.
-- Treat raw events, `main_content`, and metadata as sensitive.
-- Use `forget()` and `purge()` for fact memory deletion.
-- Use `redact_event()` for raw event redaction.
-- Delete or supersede derived memories linked to redacted source events when
-  strict privacy deletion is required.
-- Do not send sensitive data to cloud embedding or LLM providers unless your
-  product policy allows it.
-
-## Observability
-
-Recommended metrics:
-
-| Signal | Why |
-|--------|-----|
-| search latency | prompt assembly performance |
-| embedding latency and errors | provider health |
-| LLM extraction errors | memory freshness |
-| `memory_jobs` pending count | worker backlog |
-| `memory_jobs` failed count | derivation failures |
-| trace missing terms | recall quality incidents |
-| superseded count | correction churn |
-| database pool usage | saturation and timeout risk |
-
-Job backlog:
-
-```sql
-SELECT status, COUNT(*)
-FROM memory_jobs
-GROUP BY status;
-```
-
-Failed jobs:
-
-```sql
-SELECT job_id, attempts, error, updated_at
-FROM memory_jobs
-WHERE status = 'failed'
-ORDER BY updated_at DESC
-LIMIT 20;
-```
-
-## FastAPI Sketch
+This is the recommended way to manage the Engram connection pool inside a modern async Python web framework.
 
 ```python
 from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
-
 from engram import Engram
 
-
+# Global client
 engram: Engram | None = None
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global engram
+    # Initialize the client and DB connection pool on startup
     engram = Engram(memory_policy="default")
     await engram.connect()
     try:
         yield
     finally:
+        # Drain connections cleanly on shutdown
         await engram.close()
-
 
 app = FastAPI(lifespan=lifespan)
 
-
-@app.post("/tasks/{task_id}/turn")
-async def turn(task_id: str, body: dict):
+@app.post("/chat")
+async def chat(body: dict, current_user: User = Depends(get_user)):
     assert engram is not None
-    context = await engram.build_context(task_id, query=body["message"])
-    response = await call_your_llm(context.text, body["message"])
-    await engram.record_turn(task_id, body["message"], response)
-    return {"response": response}
-```
-
-## Failure Modes
-
-| Failure | Mitigation |
-|---------|------------|
-| Embedding provider outage | fail the request or queue retry at the app layer |
-| LLM extraction failure | raw event remains; job records failure |
-| Missed critical fact | inspect `trace_recall()` and policy slot metadata |
-| Old fact recalled | check `conflict_key`, `status`, and `superseded_by` |
-| Large prompt drifts | use `record_long_input()` and source chunks |
-| User data leak risk | always filter by `user_id` and enforce app auth |
-| Test targets production data | use `ENGRAM_TEST_DATABASE_URL` or an isolated database |
-
-## Release Readiness
-
-Before publishing or deploying:
-
-```bash
-ruff check src tests examples
-ruff format --check src tests examples
-pytest tests/unit -q
-pytest tests/integration -q --run-integration
-python -m build
-python -m twine check dist/*
-mkdocs build --strict
+    
+    # Intelligently route and fetch context
+    trace = await engram.recall(
+        query=body["message"], 
+        user_id=current_user.id
+    )
+    
+    # ... Stream LLM, record_turn, etc ...
 ```

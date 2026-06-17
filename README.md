@@ -24,6 +24,16 @@ source-anchored long-input ingestion, and traceable recall.
 > Status: **developer preview / alpha**. The architecture and local test suite
 > are in good shape, but public APIs may still change before a stable release.
 
+## The Problem: Why Conversational Memory Fails
+
+Long-term memory for LLMs is fundamentally a database engineering problem, not just a context window problem. Most memory systems fail due to a few common patterns:
+
+1. **Derivation Drift:** Summarizing old summaries eventually degrades the information (like a photocopy of a photocopy).
+2. **Stale Context Dominance:** Old, frequently discussed facts crowd out recent, updated truths.
+3. **Compaction Information Loss:** Storing only summaries loses the exact wording of what was said; storing only raw transcripts leaves the agent without any high-level understanding.
+
+Engram was built to structurally mitigate these issues, offering perfect preservation and high-fidelity interpretation simultaneously.
+
 ## Features
 
 - **Hybrid Search** - Combines vector similarity, keyword matching (BM25), time decay, and importance scoring using Reciprocal Rank Fusion
@@ -202,7 +212,7 @@ async with Engram(memory_policy=sales_policy) as engram:
 
 ## Architecture
 
-Engram uses a converged architecture where all operations run in PostgreSQL:
+Engram handles messy, unstructured streams of information and distills them into a pristine 2nd Brain. It uses a converged architecture where all operations run in PostgreSQL:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -219,13 +229,21 @@ Engram uses a converged architecture where all operations run in PostgreSQL:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Two-Column Memory System
+### Episodic vs. Semantic Separation
+
+Engram refuses to pick between raw transcripts and derived summaries. It separates the two to prevent **Compaction Loss**:
 
 | Column | Embedded | Purpose |
 |--------|----------|---------|
 | `fact` | Yes | Canonical concise facts for semantic and keyword search |
 | `content` | Yes | Backward-compatible alias of `fact` in the API |
 | `main_content` | No | Full conversation context (cost-effective storage) |
+
+### Lineages & `supersedes`
+
+When a user updates a fact, Engram does *not* destructively overwrite the old fact. Instead, it inserts the new fact, changes the old fact's status to `superseded`, and draws a physical `supersedes` graph edge between them. 
+* Active searches only retrieve the active head, eliminating **Stale Context Dominance**. 
+* The old fact is perfectly preserved for auditing or historical lineage queries (`get_lineage()`), eliminating **Derivation Drift**.
 
 ### Long-Running Task Memory
 

@@ -348,8 +348,14 @@ class LLMService:
         context_block = "\n\n".join(context_parts) + "\n\n" if context_parts else ""
 
         extraction_prompt = f"""<task>
-Extract ALL atomic facts about the user that are asserted by the USER MESSAGE below.
+Extract every atomic fact about the user that is asserted by the USER MESSAGE below.
 An atomic fact is a single, self-contained piece of information that can stand alone.
+
+These facts become the user's long-term memory and are the only thing retrieved
+later to answer questions. A fact that loses its specific value (the exact
+number, the new name, the date, every item in a list) cannot answer the
+question it was meant to. So carry the concrete value into the fact, not just
+the topic or the change.
 </task>
 
 <source_of_truth priority="highest">
@@ -420,15 +426,17 @@ Preserve possessive chains.
 NEVER return vague facts like "User has a project (not mentioned)" - either extract the specific name or don't include it.
 </rule>
 
-<rule id="9" name="third_party_attribution" priority="highest">
-CRITICAL: The User is the person chatting (saying "I", "my", "we"). When the User mentions OTHER people by name, those are NOT the User!
-<example type="bad" input="Amy quit her job">User quit her job ❌ WRONG - Amy is not the User!</example>
-<example type="good" input="Amy quit her job">User's wife Amy quit her job ✓</example>
-<example type="bad" input="Lily started school">User started school ❌ WRONG</example>
-<example type="good" input="Lily started school">User's daughter Lily started school ✓</example>
-<example type="bad" input="Karim moved to London">User moved to London ❌ WRONG</example>
-<example type="good" input="Karim moved to London">User's brother Karim moved to London ✓</example>
-Always include the RELATIONSHIP when referring to third parties: "User's wife Amy", "User's brother Karim", "User's child Lucas".
+<rule id="9" name="third_party_attribution" priority="high">
+The User is the person chatting (saying "I", "my", "we"). When the User names
+OTHER people, those people are not the User. Keep the User and the named person
+as separate subjects, and include the relationship for third parties
+("User's wife Amy", "User's brother Karim").
+<example type="bad" input="Amy quit her job">User quit her job (wrong — Amy is not the User)</example>
+<example type="good" input="Amy quit her job">User's wife Amy quit her job</example>
+<example type="bad" input="Karim moved to London">User moved to London (wrong)</example>
+<example type="good" input="Karim moved to London">User's brother Karim moved to London</example>
+<example type="bad" input="my team is me and Talha Chowdhury">User is named Talha Chowdhury (wrong — Talha is a teammate, not the User)</example>
+<example type="good" input="my team is me and Talha Chowdhury">User's team includes Talha Chowdhury</example>
 </rule>
 
 <rule id="10" name="relationship_context">
@@ -451,6 +459,32 @@ from existing memory and must not rewrite user-authored memories.
 <example type="bad" input_user="What was my meeting change?" input_assistant="It changed from 3 PM to 10 PM">User's meeting changed from 3 PM to 10 PM ❌ WRONG - assistant-only restatement</example>
 <example type="good" input_user="What was my meeting change?" input_assistant="It changed from 3 PM to 10 PM">NONE</example>
 <example type="good" input_user="Actually move my meeting from 3 PM to 10 PM" input_assistant="Noted">User changed their meeting from 3 PM to 10 PM</example>
+</rule>
+
+<rule id="13" name="replacements_keep_the_new_value" priority="high">
+When the user changes a value from one thing to another ("change X from A to B",
+"no longer A", "instead of A", "moved to B"), extract the NEW state as a
+standalone present-tense fact. Capturing only the negation of the old value
+leaves memory unable to answer what the value is now.
+<example type="bad" input="change the demo city from Dhaka to Chattogram">User's demo city is no longer Dhaka</example>
+<example type="good" input="change the demo city from Dhaka to Chattogram">User's demo city is now Chattogram</example>
+<example type="good" input="we pivoted the codebase from Go to Python">User's codebase is now Python (changed from Go)</example>
+</rule>
+
+<rule id="14" name="preserve_specifics_and_units" priority="high">
+Keep the exact value: every number with its unit, and every item when the user
+lists or narrows a set. Do not generalize a list to a category or drop members.
+<example type="bad" input="the p95 latency must be under 110ms now">User updated the latency rules</example>
+<example type="good" input="the p95 latency must be under 110ms now">User's mandatory p95 latency threshold is under 110ms</example>
+<example type="bad" input="my allergy is now only shrimp and prawns; crab and lobster are fine">User can eat lobster</example>
+<example type="good" input="my allergy is now only shrimp and prawns; crab and lobster are fine">User is allergic to shrimp and prawns; User can eat crab and lobster</example>
+</rule>
+
+<rule id="15" name="retain_dates" priority="high">
+Keep any date or timeframe the user gives inside the fact, including a leading
+[date] marker on the message, so the event can be ordered and recalled later.
+<example type="bad" input="[Oct 11] bought a Luxury Leaf Knit Tshirt">User bought a Luxury Leaf Knit Tshirt</example>
+<example type="good" input="[Oct 11] bought a Luxury Leaf Knit Tshirt">User bought a Luxury Leaf Knit Tshirt on October 11</example>
 </rule>
 </rules>
 
@@ -553,6 +587,7 @@ An atomic fact is one self-contained statement that can stand alone.
 
 <rules>
 <rule>Preserve exact names, numbers, dates, thresholds, and identifiers.</rule>
+<rule>When the document changes or supersedes an earlier value, state the new value as a standalone fact, not only that the old one changed.</rule>
 <rule>State requirements, constraints, decisions, and deadlines as the document states them.</rule>
 <rule>Do NOT phrase facts as being about "the User" — this is a document, not a chat.</rule>
 <rule>One fact per line. No numbering, no commentary.</rule>
@@ -690,7 +725,11 @@ constraints and preferences: food queries should search for allergies,
 avoidances, dietary restrictions, and restaurant preferences; scheduling
 queries should search for time boundaries and preferred call windows; update or
 "old plan" queries should search for cancelled, superseded, replaced, moved, and
-"no longer" facts.
+"no longer" facts. For "which/who currently" or "right now" queries, also search
+for the latest assignment and any "moved to"/"repurposed" facts. For
+"across all", "for each", or list/summary queries that name several entities,
+emit a separate query per named entity (one per project, person, or item) so
+each one's facts are retrieved.
 </task>
 
 <query>{query}</query>
@@ -755,19 +794,21 @@ Compare this new fact against existing memories and decide the appropriate memor
 
 <decision_rules priority_order="true">
 <rule operation="DELETE" priority="1">
-Use when new fact CONTRADICTS/REPLACES an existing memory about the SAME person and attribute.
+Use when the new fact changes or replaces the value of an existing memory about the same person/entity and attribute. This supersedes the old value (kept for history) so recall returns the current one.
 <criteria>
 <item>Same person's job changed (quit old job, joined new company)</item>
 <item>Same person's location changed (moved from X to Y)</item>
 <item>Same person's status changed (was X, now Y)</item>
-<item>Correction of previous information (had ADHD → is autistic)</item>
+<item>Correction of previous information (had ADHD, is autistic)</item>
+<item>Directional replacement of a value ("now B" where the old memory said A)</item>
+<item>Narrowing or broadening of the same attribute (allergy to all shellfish, narrowed to shrimp and prawns)</item>
 </criteria>
 <examples>
-<example>"Amy joined Doctors Without Borders" contradicts "Amy is a doctor at Johns Hopkins" = DELETE</example>
-<example>"User switched to Bank B" contradicts "User banks at Bank A" = DELETE</example>
-<example>"User now lives in NYC" contradicts "User lives in Dhaka" = DELETE</example>
-<example>"Lucas is autistic" contradicts "Lucas has ADHD" = DELETE (correction!)</example>
-<example>"Amy quit her job at Johns Hopkins" contradicts "Amy works at Johns Hopkins" = DELETE</example>
+<example>"Amy joined Doctors Without Borders" replaces "Amy is a doctor at Johns Hopkins" = DELETE</example>
+<example>"User now lives in NYC" replaces "User lives in Dhaka" = DELETE</example>
+<example>"User's demo city is now Chattogram" replaces "User's demo city is Dhaka" = DELETE (directional)</example>
+<example>"User's p95 threshold is under 110ms" replaces "User's p95 threshold is 150ms" = DELETE (value changed)</example>
+<example>"User is allergic to shrimp and prawns only" replaces "User avoids all shellfish" = DELETE (narrowed)</example>
 </examples>
 </rule>
 
@@ -1048,20 +1089,31 @@ REASON: [brief explanation]
         facts_block = "\n\n".join(blocks)
 
         prompt = f"""<task>
-For EACH numbered fact, compare it against ONLY that fact's own existing
+For each numbered fact, compare it against only that fact's own existing
 memories and decide exactly one operation: ADD, UPDATE, DELETE, or NOOP.
+
+DELETE replaces the old value with the new one (the old memory is superseded but
+kept for history). Choosing NOOP or ADD instead of DELETE on a changed value
+leaves two conflicting memories active, so later recall can return the stale
+value as if it were current. When a value changed, supersede the old one.
 </task>
 
 <decision_rules priority_order="true">
-<rule operation="DELETE" priority="1">New fact CONTRADICTS/REPLACES an existing memory about the SAME person and attribute (job/location/status change, or a correction).</rule>
-<rule operation="ADD" priority="2">Fact contains NEW INFORMATION not in any existing memory (different topic, attribute, or person).</rule>
-<rule operation="NOOP" priority="3">Fact is SEMANTICALLY IDENTICAL to an existing memory (same topic AND same information; only wording differs).</rule>
-<rule operation="UPDATE" priority="4">Fact ADDS DETAIL to an existing memory (merge them into one).</rule>
+<rule operation="DELETE" priority="1">New fact changes or replaces the value of an existing memory about the same person/entity and attribute: a job/location/status change, a correction, a directional replacement ("now B" where the old memory said A), or a narrowing/broadening of the same attribute.</rule>
+<rule operation="ADD" priority="2">Fact contains new information not in any existing memory (different topic, attribute, or person).</rule>
+<rule operation="NOOP" priority="3">Fact is semantically identical to an existing memory (same topic and same information; only wording differs).</rule>
+<rule operation="UPDATE" priority="4">Fact adds detail to an existing memory without changing its value (merge them into one).</rule>
 </decision_rules>
+
+<examples>
+<example>new "User's demo city is now Chattogram" vs existing "User's demo city is Dhaka" = DELETE (directional replacement)</example>
+<example>new "User's p95 threshold is under 110ms" vs existing "User's p95 threshold is 150ms" = DELETE (value changed)</example>
+<example>new "User is allergic to shrimp and prawns only" vs existing "User avoids all shellfish" = DELETE (narrowed correction)</example>
+</examples>
 
 <common_mistakes>
 <mistake>NOOP for a job/location/status change — that is DELETE.</mistake>
-<mistake>NOOP for a correction — that is DELETE.</mistake>
+<mistake>NOOP for a correction or a directional replacement — that is DELETE.</mistake>
 <mistake>NOOP for loosely related facts (job vs project) — that is ADD.</mistake>
 </common_mistakes>
 

@@ -1,211 +1,128 @@
-# Task Memory
+# Task Memory & Checkpointing
 
-Task memory is the part of Engram built for agents that keep working across
-many turns, tool calls, large prompts, and process restarts.
+Task Memory is the stateful half of the Engram architecture. While **Fact Memory** stores distilled, semantic knowledge across time, **Task Memory** provides the immutable ledger of what happened, when it happened, and what decisions were made during a specific job.
 
-Engram keeps two memory planes connected:
+| Plane | Tables | Primary Purpose |
+|-------|--------|-----------------|
+| **Fact Memory** | `agent_memory`, `memory_relations` | Fast semantic retrieval, semantic deduplication, and policy pinning. |
+| **Task Memory** | `agent_task_runs`, `agent_events`, `agent_checkpoints` | Auditability, resumability, and raw conversational ledgers. |
 
-| Plane | Tables | Purpose |
-|-------|--------|---------|
-| Fact memory | `agent_memory`, `memory_relations` | searchable, typed, deduped facts and graph relations |
-| Task memory | `agent_task_runs`, `agent_events`, `agent_checkpoints`, `memory_jobs` | durable task state, raw ledger, checkpoints, and background derivation |
+## 1. When to use Task Memory
 
-Fact memory is optimized for retrieval. Task memory is optimized for continuity
-and auditability.
+You should use Task Memory for any agent that:
+- Runs for more than one single conversational turn.
+- Needs to pause and resume work after process restarts.
+- Requires auditability (knowing exactly what prompt the LLM saw).
+- Generates artifacts or executes tool calls.
+- Ingests massive documents that need to be chunked and cited.
 
-## When To Use Task Memory
+> [!NOTE]
+> If you are building a simple, stateless Slack bot that only answers isolated questions without needing to "resume" ongoing work, you can bypass Task Memory and just use `add()` and `search()`.
 
-Use task memory when:
+---
 
-- work spans more than one turn
-- the agent should resume after process restart
-- raw user, assistant, tool, and artifact events matter
-- memory extraction should run after the user-facing response
-- you need compact checkpoints instead of replaying every event
-- large prompts or documents need source anchors
+## 2. Managing the Task Lifecycle
 
-For a short stateless chatbot, direct `add()` and `search()` may be enough.
-
-## Start A Task
+### Starting a Task
+Tasks are scoped to an agent and an optional user. You can pass arbitrary metadata to track app-specific identifiers (like repository names or ticket IDs).
 
 ```python
 task = await engram.start_task(
-    "Ship persistent memory for the coding agent",
-    "codex",
+    goal="Ship persistent memory for the coding agent",
+    agent_id="codex",
     user_id="nafiz",
     metadata={"repo": "engram"},
 )
 
-print(task.task_run_id)
-print(task.status)
+print(f"Task ID: {task.task_run_id}")
 ```
 
-Task status can move through `active`, `paused`, `completed`, `failed`, and
-`cancelled`.
+### Managing Status
+The Task Manager guards status transitions. A task moves from `active` -> `paused` -> `completed` (or `failed` / `cancelled`).
 
 ```python
-await engram.pause_task(task.task_run_id, outcome="Waiting on review")
-await engram.complete_task(task.task_run_id, outcome="Docs and tests passed")
+await engram.pause_task(task.task_run_id, outcome="Waiting on PR review")
+await engram.complete_task(task.task_run_id, outcome="PR merged successfully")
 ```
 
-Terminal statuses are guarded by the task manager.
+---
 
-## Record Turns And Tool Output
+## 3. The Immutable Ledger
 
-`record_turn()` writes user and assistant messages, optional tool calls, optional
-artifacts, and a background `turn_ingest` job in one transaction.
+Instead of manually updating the database, agents append events to the Task Ledger.
 
-```python
-events = await engram.record_turn(
-    task.task_run_id,
-    user_message="Implement deterministic recall and failure traces.",
-    assistant_response="I will add policy metadata, trace_recall, and tests.",
-    tool_calls=[{"name": "pytest", "result": "273 passed"}],
-    artifacts=[{"path": "docs/api-reference.md", "type": "markdown"}],
-)
-```
-
-Use `record_event()` for single ledger entries.
+### Recording Turns
+The `record_turn()` helper writes user messages, assistant responses, tool executions, and artifact generation into a single atomic transaction.
 
 ```python
-event = await engram.record_event(
-    agent_id="codex",
+await engram.record_turn(
     task_run_id=task.task_run_id,
-    user_id="nafiz",
-    role="tool",
-    event_type="tool_result",
-    content="ruff check src tests: All checks passed",
-    payload={"command": "ruff check src tests", "exit_code": 0},
+    user_message="Implement deterministic recall.",
+    assistant_response="I will add the trace_recall method.",
+    tool_calls=[{"name": "pytest", "result": "273 passed"}],
+    enqueue_processing=True  # Important: Queues semantic extraction!
 )
 ```
 
-Use `redact_event()` when raw event content must be removed while preserving
-audit metadata.
+> [!WARNING]
+> By default, `record_turn` does **not** extract semantic facts (like "User prefers pytest") immediately. If `enqueue_processing=True`, it writes a job to `memory_jobs`. You must run the background worker to actually convert these raw events into semantic Facts.
 
-```python
-redacted = await engram.redact_event(event.event_id)
-print(redacted.redacted_at)
-```
-
-## Search The Event Ledger
-
-`list_events()` returns events in chronological order. When you need to recall
-*what was said or asked* about a topic — "what did I ask about the chatbot last
-week?" — use `search_events()`. It ranks events with hybrid retrieval: semantic
-similarity over event embeddings plus PostgreSQL full-text keyword relevance.
-It also supports temporal, type, and role filters. Events created before event
-embeddings are backfilled still match through the keyword branch.
+### Searching the Ledger
+If you need to know what was *said* recently, rather than what was *learned*, you can search the event ledger using hybrid (vector + keyword) search.
 
 ```python
 hits = await engram.search_events(
-    "chatbot memory jobs",
+    query="chatbot memory jobs",
     agent_id="codex",
     roles=["user"],
-    since=last_week,          # optional datetime lower bound
-    until=now,                # optional datetime upper bound
     event_types=["user_message"],
-    limit=20,
+    limit=5,
 )
-for event in hits:
-    print(event.created_at, event.content)
 ```
 
-Results are ordered by relevance, then recency. Soft-deleted events are excluded
-unless `include_deleted=True`. An empty query raises `ValueError`. This is the
-"event recall" surface — distinct from `search()` (active facts) and
-`get_history()` (the chronological memory timeline).
+---
 
-Migration `007` is online-safe: it adds a nullable `event_embedding` column and
-builds indexes separately, but it does not embed old events at startup. For a
-large existing ledger, backfill in bounded batches:
+## 4. Checkpoints & Resumability
 
-```python
-while True:
-    count = await engram.backfill_event_embeddings(limit=1000, agent_id="codex")
-    if count == 0:
-        break
-```
+If an agent has 500 events in its ledger, sending all 500 back to the LLM will exhaust the context window. Instead, the background worker periodically compresses the ledger into a **Checkpoint**.
 
-## Process Memory Jobs
-
-`record_turn()` queues a `turn_ingest` job by default. Processing that job can
-derive facts with `add_conversation()` when an LLM is configured, and it always
-updates task checkpoints.
-
-Turn ingestion treats the user message as the source of new memory. Assistant
-responses remain in the event ledger and checkpoint summary, but they do not
-create or revise memories unless your application explicitly opts into
-assistant-response extraction.
-
-```python
-jobs = await engram.process_memory_jobs(limit=10)
-
-for job in jobs:
-    print(job.job_id, job.status, job.error)
-```
-
-For production, run a worker process:
-
-```python
-async with Engram(memory_policy="coding_agent") as engram:
-    await engram.run_memory_worker(batch_size=20, interval_seconds=1.0)
-```
-
-For tests, scripts, or local demos, inline `process_memory_jobs()` is easier to
-inspect.
-
-## Create Checkpoints
-
-Checkpoints are compact task state. Use them for resumability; use events for
-audit history; use fact memory for retrieval.
+You can also create checkpoints manually:
 
 ```python
 checkpoint = await engram.create_checkpoint(
-    task.task_run_id,
-    "Ruff is clean and unit tests pass.",
+    task_run_id=task.task_run_id,
+    summary="Ruff is clean and unit tests pass.",
     completed_steps=["Clean Ruff", "Restore CI lint gates"],
     pending_steps=["Update docs", "Run final package checks"],
     decisions=["Keep public API examples in docs syntax-checked"],
-    source_event_ids=[event.event_id],
 )
 ```
 
-## Build Resume Context
+---
 
-`build_context()` combines task metadata, recent events, checkpoints, memory
-search, and optional graph expansion.
+## 5. The Production Turn Loop
 
-```python
-context = await engram.build_context(
-    task.task_run_id,
-    query="resume implementation",
-    max_tokens=120000,
-    recent_event_limit=40,
-    memory_limit=25,
-    checkpoint_limit=3,
-    include_graph=True,
-)
+In production, you should combine Task Memory (the ledger) with Fact Memory (retrieval) using the intelligent `engram.recall()` operator. 
 
-print(context.text)
-print(context.sections.keys())
-```
-
-The result is deterministic enough for prompt assembly and cache-friendly
-context building.
-
-## Recommended Turn Loop
+`recall()` uses an LLM intent classifier to decide whether the user is asking about the current task state, broad historical facts, or an exact past event.
 
 ```python
 async def handle_turn(engram, task_id, user_message):
-    context = await engram.build_context(
-        task_id,
+    
+    # 1. Fetch cognitive context (Checkpoints + Semantic Facts)
+    trace = await engram.recall(
         query=user_message,
-        max_tokens=120000,
-        include_graph=True,
+        task_run_id=task_id,  # Scopes recall to current task state
+        compose_answer=False
     )
 
-    response = await call_your_llm(context.text, user_message)
+    # 2. Call your LLM
+    response = await call_your_llm(
+        memory_context=trace.context,
+        user_message=user_message
+    )
 
+    # 3. Append to the ledger
     await engram.record_turn(
         task_id,
         user_message=user_message,
@@ -216,129 +133,38 @@ async def handle_turn(engram, task_id, user_message):
     return response
 ```
 
-Run `run_memory_worker()` separately so the user-facing request does not wait on
-fact extraction.
+> [!TIP]
+> Run `engram.run_memory_worker()` in a separate background process to digest the `record_turn` events without blocking the user's web request.
 
-## Long Input
+---
 
-Use `record_long_input()` for large prompts, legal documents, specs, or any
-source where exact text matters.
+## 6. Long Documents & Exact Citation
+
+If you pass a 100-page Legal PDF to an LLM, you must be able to cite the exact paragraph it used to make a decision. 
+
+Use `record_long_input()` to chunk the document into Artifact Events.
 
 ```python
 report = await engram.record_long_input(
     task.task_run_id,
-    text=huge_prompt_or_document,
+    text=massive_legal_document,
     title="Vendor agreement review",
     max_chunk_tokens=700,
-    extract_with_llm=True,
+    extract_with_llm=True, # Extracts searchable facts from the chunks
 )
-
-print(report.source_event_id)
-print(report.manifest)
 ```
 
-`record_long_input()`:
-
-1. stores the raw input as a source event
-2. splits it into chunks with character spans and quote hashes
-3. stores each chunk as an artifact event
-4. extracts or heuristically derives anchored facts
-5. creates a manifest checkpoint
-
-Build source-aware context when answering:
+When building context to answer a question about this document, Engram returns the exact source chunk IDs.
 
 ```python
 context = await engram.build_long_input_context(
     task.task_run_id,
     query="What are the termination obligations?",
     expected_terms=["termination", "notice"],
-    max_tokens=4000,
 )
 
-print(context.text)
 print(context.trace["source_chunk_event_ids"])
-print(context.trace["missing_expected_terms"])
 ```
 
-For legal or exact-document answers, prefer source chunks over distilled memory
-summaries and require source chunk IDs in the application response.
-
-## Critical Recall In Long Tasks
-
-Vector search alone can miss broad but important facts. Policy-backed critical
-memory gives you deterministic recall.
-
-```python
-trace = await engram.trace_recall(
-    "Can we order dinner and continue the repo work?",
-    "assistant",
-    user_id="user_123",
-    expected_terms=["shellfish", "never revert"],
-    max_tokens=1200,
-)
-
-print(trace.context)
-print(trace.critical_memory_ids)
-print(trace.missing_expected_terms)
-```
-
-Use the trace to distinguish:
-
-| Symptom | Trace field |
-|---------|-------------|
-| fact was never stored | absent from `critical_memory_ids` and `search_memory_ids` |
-| fact was not critical | present in `search_memory_ids`, absent from `critical_memory_ids` |
-| fact ranked but did not fit | present in `trimmed_memory_ids` |
-| old fact was corrected | present in `superseded_memory_ids` |
-| caller-required term is missing | present in `missing_expected_terms` |
-
-## Evidence Retrieval For Aggregation
-
-Aggregation questions often need coverage across sessions rather than the
-single highest-ranked memory. Compose this from the public primitives:
-`deep_search()` for high-recall retrieval, `get_memories()` to pull surrounding
-turns from a session group, and `engram.llm` for a custom reader.
-
-```python
-hits = await engram.deep_search(
-    "Which payments did Sarah make in March?",
-    "assistant",
-    user_id="sarah",
-    limit=12,
-)
-
-# Expand a hit with the rest of its source session.
-session_id = hits[0].memory.metadata.get("original_session_id")
-group = await engram.get_memories(
-    "assistant",
-    user_id="sarah",
-    metadata_filter={"original_session_id": session_id},
-)
-context = "\n".join(m.content for m in group)
-
-if engram.llm is not None:
-    answer = await engram.llm.complete(
-        f"Context:\n{context}\n\n"
-        "Which payments did Sarah make in March? Answer concisely.",
-    )
-```
-
-A fuller reference implementation of this pattern — session-diversified
-evidence selection, turn-window expansion, and a multi-call evidence-ledger
-reader — lives in `scripts/longmemeval_harness.py`
-(`search_evidence_set`, `get_neighboring_context_block`,
-`answer_from_evidence`). It is QA-harness machinery built on these same public
-APIs, useful for LongMemEval-style workloads, support history, and
-multi-session personal memory.
-
-## Current Limits
-
-- Search is scoped by `agent_id` and optionally `user_id`; authorization is the
-  application layer's responsibility.
-- `trace_recall()` only reports missing terms that callers pass through
-  `expected_terms`.
-- Long-input anchoring records text spans and quote hashes. PDF page numbers,
-  OCR coordinates, and external citation IDs must be supplied by the caller.
-- Job processing is durable, but applications still need monitoring and retry
-  policy around failed `memory_jobs`.
-- The schema is alpha. Back up data before migrations.
+> [!IMPORTANT]
+> For legal or medical applications, configure your LLM System Prompt to explicitly cite the `source_chunk_event_ids` provided in the context block. Fail closed if the `missing_expected_terms` array is populated.

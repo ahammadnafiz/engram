@@ -9,7 +9,10 @@ This module registers the built-in embedding providers:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
+import re
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -649,3 +652,162 @@ class HuggingFaceEmbeddingProvider(EmbeddingProvider):
     async def close(self) -> None:
         """Close the HTTP client."""
         await self._client.aclose()
+
+
+# =============================================================================
+# Gemini Provider
+# =============================================================================
+
+
+@embedding_registry.register("gemini")
+class GeminiEmbeddingProvider(EmbeddingProvider):
+    """Embedding provider using Gemini's API.
+
+    Supports gemini-embedding-2 (multimodal/aggregated text) and legacy gemini-embedding-001.
+
+    Args:
+        api_key: Gemini API key (required).
+        model: Model name (default: "gemini-embedding-2").
+        dimension: Vector dimension (default: 768).
+
+    Example:
+        provider = GeminiEmbeddingProvider(
+            api_key="...",
+            model="gemini-embedding-2",
+            dimension=768,
+        )
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gemini-embedding-2",
+        dimension: int | None = None,
+        **_kwargs: Any,
+    ) -> None:
+        if not api_key:
+            raise ConfigurationError(
+                "Gemini API key is required. Pass api_key parameter or set "
+                "ENGRAM_GEMINI_API_KEY environment variable."
+            )
+
+        try:
+            from google import genai
+            from google.genai import types
+
+            self._genai = genai
+            self._types = types
+        except ImportError as e:
+            raise ImportError(
+                "google-genai package not installed. Install with: pip install google-genai"
+            ) from e
+
+        self._client = self._genai.Client(api_key=api_key)
+        self._model = model
+        self._dimension = dimension or 768
+        self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=5)
+
+    # Max attempts (including the first) for a single embed call before giving
+    # up on a 429. With backoff this self-throttles to Gemini's per-minute
+    # quota instead of dropping data when many callers embed concurrently.
+    _MAX_ATTEMPTS: ClassVar[int] = 7
+    _MAX_BACKOFF_SECONDS: ClassVar[float] = 90.0
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    @staticmethod
+    def _is_rate_limit(message: str) -> bool:
+        return "429" in message or "RESOURCE_EXHAUSTED" in message
+
+    @classmethod
+    def _backoff_seconds(cls, message: str, attempt: int) -> float:
+        """Honor the server's retry hint when present, else exponential backoff."""
+        hint = re.search(r"retry in ([0-9.]+)s", message) or re.search(
+            r"retryDelay['\"]?:\s*['\"]?([0-9.]+)s", message
+        )
+        base = float(hint.group(1)) if hint else 2.0**attempt
+        return min(base + random.uniform(0.0, 1.0), cls._MAX_BACKOFF_SECONDS)
+
+    async def _embed_with_retry(self, call: partial[Any]) -> Any:
+        """Run an embed_content call in the executor, retrying 429s with backoff."""
+        loop = asyncio.get_running_loop()
+        last_exc: Exception | None = None
+        for attempt in range(self._MAX_ATTEMPTS):
+            try:
+                return await loop.run_in_executor(self._executor, call)
+            except Exception as exc:
+                last_exc = exc
+                message = str(exc)
+                if (
+                    not self._is_rate_limit(message)
+                    or attempt == self._MAX_ATTEMPTS - 1
+                ):
+                    raise EmbeddingProviderError(
+                        f"Failed to embed: {exc}", model=self._model
+                    ) from exc
+                delay = self._backoff_seconds(message, attempt)
+                logger.warning(
+                    "Gemini embed rate-limited (attempt %d/%d); retrying in %.1fs",
+                    attempt + 1,
+                    self._MAX_ATTEMPTS,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        # Unreachable: the loop either returns or raises.
+        raise EmbeddingProviderError(
+            f"Failed to embed: {last_exc}", model=self._model
+        ) from last_exc
+
+    async def embed(self, text: str) -> list[float]:
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "contents": text,
+        }
+        if self._dimension:
+            kwargs["config"] = self._types.EmbedContentConfig(
+                output_dimensionality=self._dimension
+            )
+
+        result = await self._embed_with_retry(
+            partial(self._client.models.embed_content, **kwargs)
+        )
+        return list(result.embeddings[0].values)
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+        }
+        if self._dimension:
+            kwargs["config"] = self._types.EmbedContentConfig(
+                output_dimensionality=self._dimension
+            )
+
+        # Gemini Embedding 2 produces aggregated embeddings if we just pass a list of strings.
+        # To get separate embeddings for each string, we must wrap them in Content objects.
+        if "gemini-embedding-2" in self._model:
+            kwargs["contents"] = [
+                self._types.Content(parts=[self._types.Part.from_text(text=t)])
+                for t in texts
+            ]
+        else:
+            kwargs["contents"] = texts
+
+        result = await self._embed_with_retry(
+            partial(self._client.models.embed_content, **kwargs)
+        )
+        return [list(emb.values) for emb in result.embeddings]
+
+    async def close(self) -> None:
+        """Shutdown the executor."""
+        if self._executor:
+            self._executor.shutdown(wait=False)
+            self._executor = None

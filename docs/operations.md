@@ -1,145 +1,61 @@
-# Operations
+# Operational Reference
 
-This page collects local development, database, migration, worker, and
-verification commands.
+This guide provides a cheat sheet of useful commands for local development, database introspection, and maintenance operations.
 
-## Docker
+> [!NOTE]
+> For configuration environment variables, see [Configuration](configuration.md). For schema upgrades, see [Migrations](migrations.md). For running the chatbot or other demo scripts, see [Examples](examples.md).
 
-Start only PostgreSQL:
+---
 
-```bash
-docker compose up -d postgres
-docker compose ps postgres
-```
+## 1. Docker & Infrastructure
 
-Start the full default compose set:
+Manage the local PostgreSQL instance equipped with `pgvector` and `pg_trgm`:
 
-```bash
-docker compose up -d
-```
+| Action | Command |
+|--------|---------|
+| Start Database | `docker compose up -d postgres` |
+| Stop Database | `docker compose down` |
+| **Wipe All Data** | `docker compose down -v` |
+| Tail Logs | `docker compose logs -f postgres` |
 
-Stop containers without deleting data:
+> [!TIP]
+> The repository includes a helper script for common workflows: `./scripts/docker-setup.sh`. It automatically provisions `.env` files and handles port binding (e.g., `./scripts/docker-setup.sh --reset`).
 
-```bash
-docker compose down
-```
+---
 
-Delete the local database volume:
+## 2. Database Introspection
 
-```bash
-docker compose down -v
-```
+These commands allow you to inspect the database schema and running state directly via `psql`.
 
-Follow logs:
-
-```bash
-docker compose logs -f postgres
-```
-
-The helper script wraps common compose flows:
-
-```bash
-./scripts/docker-setup.sh
-./scripts/docker-setup.sh --status
-./scripts/docker-setup.sh --logs
-./scripts/docker-setup.sh --down
-./scripts/docker-setup.sh --reset
-```
-
-The helper creates `.env` on the first run. On later runs it preserves existing
-values, including `ENGRAM_OPENAI_API_KEY`, embedding settings, and other local
-secrets. It only appends missing Docker defaults. Use
-`./scripts/docker-setup.sh --port 5433` when you intentionally want to change
-the local PostgreSQL port.
-
-## Environment
-
-Local compose defaults:
-
-```bash
-export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
-export ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
-export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
-```
-
-OpenAI:
-
-```bash
-export ENGRAM_EMBEDDING_PROVIDER=openai
-export ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
-export ENGRAM_EMBEDDING_DIMENSION=1536
-export ENGRAM_LLM_PROVIDER=openai
-export ENGRAM_LLM_MODEL=gpt-4o-mini
-export ENGRAM_OPENAI_API_KEY=sk-your-key
-```
-
-## Database Shell
-
-Interactive shell:
-
+**Interactive Shell:**
 ```bash
 docker compose exec postgres psql -U engram -d engram
 ```
 
-Single command:
-
-```bash
-docker compose exec -T postgres psql -U engram -d engram -c "SELECT version();"
-```
-
-List tables:
-
+**List all tables:**
 ```bash
 docker compose exec -T postgres psql -U engram -d engram -c "\dt"
 ```
 
-Describe core tables:
-
+**Describe table schema:**
 ```bash
 docker compose exec -T postgres psql -U engram -d engram -c "\d agent_memory"
-docker compose exec -T postgres psql -U engram -d engram -c "\d agent_task_runs"
-docker compose exec -T postgres psql -U engram -d engram -c "\d agent_events"
-docker compose exec -T postgres psql -U engram -d engram -c "\d agent_checkpoints"
-docker compose exec -T postgres psql -U engram -d engram -c "\d memory_jobs"
 ```
 
-## Schema Initialization
+---
 
-Normal library use initializes schema during `Engram.connect()`.
+## 3. Useful SQL Queries
 
-```python
-from engram import Engram
+You can execute these directly against the running Docker container to debug what your agent is storing.
 
-async with Engram() as engram:
-    health = await engram.health_check()
-    print(health["status"])
-```
+### Fact Memory
 
-For manual database setup, run the schema directly:
-
+**Count total stored facts:**
 ```bash
-docker compose exec -T postgres psql -U engram -d engram \
-  < src/engram/sql/schema.sql
+docker compose exec -T postgres psql -U engram -d engram -c "SELECT COUNT(*) FROM agent_memory;"
 ```
 
-Verify required extensions:
-
-```bash
-docker compose exec -T postgres psql -U engram -d engram -c \
-  "SELECT extname FROM pg_extension WHERE extname IN ('vector', 'pg_trgm');"
-```
-
-## Memory Queries
-
-Count memories:
-
-```bash
-docker compose exec -T postgres psql -U engram -d engram -c \
-  "SELECT COUNT(*) FROM agent_memory;"
-```
-
-Recent memories:
-
+**View the 10 most recently stored facts:**
 ```bash
 docker compose exec -T postgres psql -U engram -d engram -c \
   "SELECT memory_id, memory_type, fact, importance, created_at
@@ -148,31 +64,7 @@ docker compose exec -T postgres psql -U engram -d engram -c \
    LIMIT 10;"
 ```
 
-Context usage:
-
-```bash
-docker compose exec -T postgres psql -U engram -d engram -c \
-  "SELECT COUNT(*) AS total,
-          COUNT(main_content) AS with_context,
-          COUNT(*) - COUNT(main_content) AS without_context
-   FROM agent_memory;"
-```
-
-Active critical memories:
-
-```bash
-docker compose exec -T postgres psql -U engram -d engram -c \
-  "SELECT memory_type, fact, metadata->>'critical_slot' AS slot
-   FROM agent_memory
-   WHERE metadata->>'critical' = 'true'
-     AND status <> 'superseded'
-     AND COALESCE(metadata->>'status', 'active') <> 'superseded'
-   ORDER BY created_at DESC
-   LIMIT 20;"
-```
-
-Superseded memories:
-
+**View superseded (historical) facts:**
 ```bash
 docker compose exec -T postgres psql -U engram -d engram -c \
   "SELECT fact, superseded_by_memory_id, lineage_id, revision
@@ -182,10 +74,9 @@ docker compose exec -T postgres psql -U engram -d engram -c \
    LIMIT 20;"
 ```
 
-## Task And Worker Queries
+### Task Ledger
 
-Active tasks:
-
+**View active tasks:**
 ```bash
 docker compose exec -T postgres psql -U engram -d engram -c \
   "SELECT task_run_id, agent_id, user_id, status, goal, updated_at
@@ -195,26 +86,13 @@ docker compose exec -T postgres psql -U engram -d engram -c \
    LIMIT 20;"
 ```
 
-Recent events:
-
-```bash
-docker compose exec -T postgres psql -U engram -d engram -c \
-  "SELECT event_id, task_run_id, role, event_type, left(content, 80) AS content
-   FROM agent_events
-   WHERE deleted_at IS NULL
-   ORDER BY created_at DESC
-   LIMIT 20;"
-```
-
-Job backlog:
-
+**View the background derivation backlog:**
 ```bash
 docker compose exec -T postgres psql -U engram -d engram -c \
   "SELECT status, COUNT(*) FROM memory_jobs GROUP BY status;"
 ```
 
-Failed jobs:
-
+**Debug failed background jobs:**
 ```bash
 docker compose exec -T postgres psql -U engram -d engram -c \
   "SELECT job_id, attempts, left(error, 160) AS error, updated_at
@@ -224,74 +102,45 @@ docker compose exec -T postgres psql -U engram -d engram -c \
    LIMIT 20;"
 ```
 
-## Run The Memory Worker
+---
 
-One inline batch:
+## 4. Running the Memory Worker
 
-```python
-jobs = await engram.process_memory_jobs(limit=10)
-print([job.status for job in jobs])
-```
+If you are using deferred memory jobs (which is recommended for production), you must run the background worker to parse the event ledger into semantic facts.
 
-Long-running worker:
-
+**Run inline (batch mode):**
 ```python
 from engram import Engram
 
-async with Engram(memory_policy="coding_agent") as engram:
-    processed = await engram.run_memory_worker(
-        batch_size=20,
-        interval_seconds=1.0,
-    )
-    print(processed)
+async def run_batch():
+    async with Engram() as engram:
+        jobs = await engram.process_memory_jobs(limit=10)
+        print(f"Processed {len(jobs)} jobs.")
 ```
 
-For application deployments, run the worker as a separate process or service.
+**Run continuously (daemon mode):**
+```python
+from engram import Engram
 
-## Migrations
-
-Fresh databases can use `schema.sql`. Existing databases should run migrations
-in numeric order:
-
-```bash
-for file in src/engram/sql/migrations/*.sql; do
-  docker compose exec -T postgres psql -U engram -d engram < "$file"
-done
+async def run_daemon():
+    async with Engram(memory_policy="coding_agent") as engram:
+        await engram.run_memory_worker(batch_size=20, interval_seconds=1.0)
 ```
 
-Verify migration state:
+---
 
-```bash
-docker compose exec -T postgres psql -U engram -d engram -c \
-  "SELECT column_name
-   FROM information_schema.columns
-   WHERE table_name = 'agent_memory'
-     AND column_name IN ('fact', 'main_content', 'memory_type');"
-```
+## 5. Cleanup & Data Wiping
 
-```bash
-docker compose exec -T postgres psql -U engram -d engram -c \
-  "SELECT table_name
-   FROM information_schema.tables
-   WHERE table_name IN (
-     'agent_task_runs',
-     'agent_events',
-     'agent_checkpoints',
-     'memory_jobs'
-   );"
-```
+> [!CAUTION]
+> These commands are destructive. Ensure you are executing them against a local or test database.
 
-## Cleanup
-
-Delete memories for one agent:
-
+**Delete all facts for a specific agent:**
 ```bash
 docker compose exec -T postgres psql -U engram -d engram -c \
   "DELETE FROM agent_memory WHERE agent_id = 'assistant';"
 ```
 
-Delete fact, graph, session, and task data while keeping schema:
-
+**Truncate all tables (wipe data, keep schema):**
 ```bash
 docker compose exec -T postgres psql -U engram -d engram -c \
   "TRUNCATE agent_memory, memory_relations, agent_sessions,
@@ -299,99 +148,29 @@ docker compose exec -T postgres psql -U engram -d engram -c \
    CASCADE;"
 ```
 
-Vacuum:
-
+**Re-index and clean up dead tuples:**
 ```bash
-docker compose exec -T postgres psql -U engram -d engram -c \
-  "VACUUM ANALYZE agent_memory;"
+docker compose exec -T postgres psql -U engram -d engram -c "VACUUM ANALYZE agent_memory;"
 ```
 
-## Examples
+---
 
+## 6. Testing & CI Checks
+
+If you are contributing to Engram or running it locally, use these commands to verify repository health.
+
+**Run the Python test suite:**
 ```bash
-python examples/basic_usage.py
-python examples/long_input_usage.py
-python examples/chatbot.py
-```
-
-For the real OpenAI-backed chatbot, the default is operator recall plus inline
-memory-job processing:
-
-```bash
-export ENGRAM_CHATBOT_RECALL_MODE=operator
-export ENGRAM_CHATBOT_MEMORY_JOBS=inline
-export ENGRAM_CHATBOT_RERANK=auto
-python examples/chatbot.py
-```
-
-`operator` first calls the LLM recall router with
-`compose_answer=False`. `recall()` classifies the turn and retrieves structured
-memory evidence; the chatbot then uses its regular OpenAI chat prompt to produce
-the final answer from recall evidence, active memory context, and the memory
-history timeline. This keeps broad history questions such as "what changed?"
-from depending on the narrow recall composer. Set
-`ENGRAM_CHATBOT_MEMORY_JOBS=deferred` to process jobs with `/jobs`,
-`process_memory_jobs()`, or `run_memory_worker()`.
-
-For lower latency and cost, set `ENGRAM_CHATBOT_RECALL_MODE=fast`. `fast`
-performs one embedding-backed memory context lookup and critical-memory recall
-before the OpenAI chat call.
-
-For broad recall evaluation, use `ENGRAM_CHATBOT_RECALL_MODE=deep`. For
-retrieval debugging, use `ENGRAM_CHATBOT_RECALL_MODE=debug`, which includes
-`trace_recall()` output in the prompt and turn metadata.
-
-`ENGRAM_CHATBOT_RERANK=auto` keeps reranking off in `fast` mode and enables it
-in `deep` and `debug`. Set it to `true` to force reranking for every mode, or
-`false` to disable it everywhere.
-
-`deep` and `debug` also add a bounded recent-memory safety net for broad recall
-questions. Tune `ENGRAM_CHATBOT_BROAD_MEMORY_LIMIT` and
-`ENGRAM_CHATBOT_BROAD_MEMORY_CHARS` if your prompt budget is tight.
-
-Chatbot commands:
-
-| Command | Behavior |
-|---------|----------|
-| `/remember <fact>` | store a durable fact immediately |
-| `/revise <memory_id> <fact>` | create a new active revision |
-| `/lineage <memory_id>` | show the current head and revision history |
-| `/history [active\|limit\|memory_id]` | show memory add/update timeline |
-| `/memories` | list recent chatbot memories |
-| `/jobs` | process queued memory extraction jobs |
-| `/search <query>` | run hybrid search and reinforce hits |
-| `/recall <question>` | ask current, historical, event, or lineage memory directly |
-| `/trace <query>` | inspect recall trace |
-| `/context <query>` | render memory and task context used for prompting |
-| `/task` | show current resumable task/session |
-| `/forget <memory_id>` | delete one memory |
-| `/clear` | purge memories for the configured agent/user |
-| `/help` | show help |
-| `/quit` | exit |
-
-## Verification Commands
-
-```bash
-python -c "from engram import Engram; print('OK')"
-ruff check src tests examples
 pytest tests/unit -q
 pytest tests/integration -q --run-integration
-mkdocs build --strict
 ```
 
-Health check:
+**Run code quality checks:**
+```bash
+ruff check src tests examples
+```
 
-```python
-import asyncio
-
-from engram import Engram
-
-
-async def check() -> None:
-    async with Engram() as engram:
-        health = await engram.health_check()
-        print(health)
-
-
-asyncio.run(check())
+**Build documentation locally:**
+```bash
+mkdocs build --strict
 ```

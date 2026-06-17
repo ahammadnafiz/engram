@@ -2,16 +2,15 @@
 
 # Engram
 
-Persistent memory for AI agents that have to remember across sessions.
+**Persistent memory for AI agents that have to remember across sessions.**
 
 Engram keeps an agent's memory in PostgreSQL: the facts it has learned, the raw
 history of what happened, large documents split into traceable pieces, and the
-links between them. What you get back is recall you can inspect. You can rank
-it, see why a memory surfaced, and pick a task back up days later.
+links between them. What you get back is a cognitive `recall()` operator that routes intents, retrieves exact citations, and traces its own logic.
 
 [Quickstart](quickstart.md){ .md-button .md-button--primary }
-[API reference](api-reference.md){ .md-button }
 [Architecture](architecture.md){ .md-button }
+[API Reference](api-reference.md){ .md-button }
 
 </section>
 
@@ -41,49 +40,54 @@ superseded.
 
 </div>
 
-!!! warning "Alpha"
-    Engram is at `0.3.0a2`. It has unit and integration tests behind it, but the
-    public API and the database schema can still change before 1.0. Back up your
-    data before you run a migration.
+> [!WARNING]  
+> **Alpha Status**: Engram is at `0.3.0a2`. It is rigorously tested, but the public API and the database schema are subject to change before 1.0. Always back up your data before you run a migration.
 
-## Guides
+## Documentation Guides
 
 <div class="grid cards" markdown="1">
 
 - :material-rocket-launch-outline: **[Quickstart](quickstart.md)**
 
-    Install Engram, point it at Postgres, and store and recall your first memory.
+    Install Engram, boot Postgres, and build an end-to-end memory loop in 10 minutes.
 
-- :material-lightbulb-on-outline: **[Core concepts](concepts.md)**
+- :material-lightbulb-on-outline: **[Core Concepts](concepts.md)**
 
-    How facts, memory types, conflict handling, search, and the graph fit together.
+    How facts, conflict resolution, semantic search, and the intelligent `recall` operator fit together.
 
-- :material-history: **[Task memory](task-memory.md)**
+- :material-history: **[Task Memory](task-memory.md)**
 
-    Runs, events, checkpoints, and background jobs for work that spans sessions.
+    Resumability, the immutable event ledger, checkpoints, and exact-citation chunking.
 
-- :material-api: **[API reference](api-reference.md)**
+- :material-api: **[API Reference](api-reference.md)**
 
-    Every public method, with signatures and examples taken straight from the code.
+    The complete public API, including type signatures and code examples.
 
 - :material-tune: **[Configuration](configuration.md)**
 
-    Environment variables, provider extras, search tuning, and the safety flags.
+    Environment variables, `EngramSettings`, search weight tuning, and provider extras.
 
-- :material-shield-check-outline: **[Production guide](production-guide.md)**
+- :material-shield-check-outline: **[Production Guide](production-guide.md)**
 
-    Deployment shape, privacy boundaries, observability, and the failure modes to plan for.
+    Process isolation, privacy boundaries, observability, and failure modes.
+
+- :material-chart-bar: **[Benchmarks](benchmarks.md)**
+
+    View Engram's industry-leading 89.8% score on the LongMemEval standard memory benchmark.
 
 </div>
 
-## Install and run
+## Install & Run
 
 ```bash
 git clone https://github.com/ahammadnafiz/engram.git
 cd engram
 pip install -e ".[dev,examples,sentence-transformers]"
+
+# Start the database
 docker compose up -d postgres
 
+# Configure for local embeddings
 export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
 export ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
 export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
@@ -91,69 +95,64 @@ export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
 
 ```python
 import asyncio
-
 from engram import Engram
 
-
 async def main() -> None:
+    # 1. Connect and automatically apply schema migrations
     async with Engram(memory_policy="coding_agent") as engram:
+        
+        # 2. Store a durable, critical fact
         memory = await engram.add(
             "Repo constraint: never revert user changes without approval",
-            "codex",
+            agent_id="codex",
             user_id="nafiz",
         )
 
-        trace = await engram.trace_recall(
-            "continue the repository work",
-            "codex",
+        # 3. Intelligently recall context based on user intent
+        trace = await engram.recall(
+            query="continue the repository work",
+            agent_id="codex",
             user_id="nafiz",
-            expected_terms=["never revert"],
+            compose_answer=False
         )
 
         print(memory.memory_type)
         print(trace.context)
 
-
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-This stores one repo constraint, then asks Engram to build the recall block for
-the next turn. `trace_recall()` hands back the context it would inject plus the
-bookkeeping: which memories it kept, which it dropped, and whether your expected
-term ("never revert") actually made it in.
+This snippet stores a strict repo constraint, then asks Engram to build the exact context block the LLM needs for the next turn.
 
-## How it works
+## How It Works
 
 Engram keeps two kinds of memory side by side.
 
-| Plane | Tables | Built for |
-|-------|--------|-----------|
-| Fact memory | `agent_memory`, `memory_relations` | search, type filters, conflict resolution, graph recall |
-| Task memory | `agent_task_runs`, `agent_events`, `agent_checkpoints`, `memory_jobs` | resuming work, audit history, background processing |
+| Plane | Tables | Primary Purpose |
+|-------|--------|-----------------|
+| **Fact Memory** | `agent_memory`, `memory_relations` | Vector search, type filters, conflict resolution, and graph traversal. |
+| **Task Memory** | `agent_task_runs`, `agent_events`, `agent_checkpoints` | Resuming workflows, exact audit history, and background semantic extraction. |
 
-`Engram.connect()` creates the schema, or migrates an existing one, and sizes
-the vector column to match your embedding model. If a config change would shrink
-or wipe stored embeddings, it stops and tells you instead of destroying data.
+When `Engram.connect()` is called, it automatically creates the database schema, ensures the `pgvector` and `pg_trgm` extensions exist, and sizes the vector columns to match your chosen embedding model.
 
-## Common tasks
+## Common Operations
 
-| You want to | Use |
-|-------------|-----|
-| Store durable facts | `add()`, `add_batch()`, `add_conversation()` |
-| Retrieve memories | `search()`, `deep_search()`, `get_context_block()` |
-| Figure out why recall missed | `trace_recall()` |
-| Keep critical facts from getting buried | `MemoryPolicy`, `recall_critical()` |
-| Handle corrections and contradictions | `conflict_key`, active/superseded status |
-| Resume long-running work | tasks, events, checkpoints, memory jobs |
-| Work with large documents | `record_long_input()`, `build_long_input_context()` |
-| Follow related context | graph relations and traversal |
+| Objective | Recommended API |
+|-----------|-----------------|
+| Store new facts | `add()`, `add_batch()`, `add_conversation()` |
+| Intelligently fetch context | `recall()` |
+| Query the raw event ledger | `search_events()` |
+| Analyze why recall failed | `trace_recall()` |
+| Extract facts asynchronously | `run_memory_worker()`, `process_memory_jobs()` |
+| Ingest & cite a 50-page PDF | `record_long_input()`, `build_long_input_context()` |
 
-## What's in the box
+## Included Examples
 
-| File | What it shows |
-|------|---------------|
-| `examples/basic_usage.py` | a tour of most of the API |
-| `examples/chatbot.py` | a real OpenAI-backed chatbot with fast, deep, and debug recall modes |
-| `examples/long_input_usage.py` | ingesting a long document and answering from anchored chunks |
+Engram ships with working reference implementations in the `examples/` directory.
 
-See [Examples](examples.md) for what each script covers.
+| File | What it demonstrates |
+|------|----------------------|
+| `examples/basic_usage.py` | A comprehensive tour of almost the entire API surface. |
+| `examples/chatbot.py` | A real OpenAI-backed terminal chatbot with background event extraction. |
+| `examples/long_input_usage.py` | Securely ingesting a massive document and answering questions from anchored source chunks. |

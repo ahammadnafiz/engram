@@ -1,11 +1,17 @@
-# API Reference
+# Engram Client API Reference
 
-This page documents the public API exported by `engram.Engram` in the current
-alpha release. The examples are syntax-checked by the test suite.
+This document provides a comprehensive, OSS-grade reference for the `engram.Engram` asynchronous client. 
 
-## Client Lifecycle
+> [!NOTE]
+> All methods (except context managers) are asynchronous and must be awaited. The code snippets assume you have instantiated an `engram` client.
 
-```text
+---
+
+## 1. Client Lifecycle
+
+### `Engram()`
+
+```py
 Engram(
     settings: EngramSettings | None = None,
     *,
@@ -14,724 +20,573 @@ Engram(
     memory_policy: str | MemoryPolicy | None = None,
 )
 ```
+Initializes the Engram client. Providers are lazy-loaded upon `connect()`. Use `memory_policy` to configure how facts are typed and slotted (valid strings: `"default"`, `"legal"`, `"coding_agent"`).
 
-`memory_policy` accepts `"default"`, `"legal"`, `"coding_agent"`, a custom
-`MemoryPolicy`, or `None` for the default policy.
+### `connect()`
 
-```python
-from engram import Engram
-
-async with Engram(memory_policy="coding_agent") as engram:
-    health = await engram.health_check()
-    print(health["status"])
+```py
+await engram.connect() -> None
 ```
+Establishes the database connection pool and initializes configured providers.
 
-Manual lifecycle is useful in web application startup and shutdown hooks.
+### `close()`
 
-```python
-engram = Engram(database_url="postgresql://engram:engram_secret@localhost:5432/engram")
-await engram.connect()
-try:
-    results = await engram.search("repo constraints", "codex")
-finally:
-    await engram.close()
+```py
+await engram.close() -> None
 ```
+Safely tears down the database connection pool and releases provider resources.
 
-## Memory API
+---
+
+## 2. Memory Operations
 
 ### `add()`
 
-```text
+```py
 await engram.add(
-    content,
-    agent_id,
+    content: str,
+    agent_id: str,
     *,
-    main_content=None,
-    user_id=None,
-    session_id=None,
-    memory_type="semantic",
-    metadata=None,
+    main_content: str | None = None,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    memory_type: str = "semantic",
+    metadata: dict | None = None,
 ) -> Memory
 ```
-
-`content` is the concise fact passed by callers. Engram stores the same value in
-`fact`, the canonical field used for vector and keyword search, while preserving
-`content` as a backward-compatible alias. `main_content` stores source
-conversation or document context and is not embedded.
-
-```python
-memory = await engram.add(
-    "User is allergic to shellfish",
-    "assistant",
-    user_id="user_123",
-    main_content="[USER]: Shellfish makes me sick.\n[AI]: I will remember that.",
-)
-
-print(memory.memory_id)
-print(memory.fact)      # canonical searched fact
-print(memory.content)   # compatibility alias for fact
-print(memory.memory_type)
-print(memory.metadata)
-```
-
-The active policy can infer a more specific `memory_type`, mark critical facts,
-and assign a `conflict_key`.
+Stores a single atomic memory fact. The `content` is the exact fact to embed and index (mapped to `.fact` internally). `main_content` is used for storing the raw context the fact was extracted from, but it is not embedded for search.
 
 ### `add_batch()`
 
-```text
+```py
 await engram.add_batch(memories: list[dict[str, Any]]) -> list[Memory]
 ```
-
-Each dictionary can contain `content`, `agent_id`, `main_content`, `user_id`,
-`session_id`, `memory_type`, and `metadata`. Use `content` for the fact text in
-create calls; returned `Memory` objects expose both `fact` and the compatibility
-alias `content`.
-
-```python
-memories = await engram.add_batch(
-    [
-        {"content": "User prefers concise answers", "agent_id": "assistant"},
-        {
-            "content": "Project Atlas launch date is July 18",
-            "agent_id": "assistant",
-            "memory_type": "project",
-            "metadata": {"project": "atlas"},
-        },
-    ]
-)
-```
+Efficiently adds multiple memories in a single transaction with batch-vectorization. The `memories` list should contain dictionaries with `content`, `agent_id`, and other optional arguments corresponding to `add()`.
 
 ### `add_conversation()`
 
-```text
+```py
 await engram.add_conversation(
-    user_message,
-    assistant_response,
-    agent_id,
+    user_message: str,
+    assistant_response: str,
+    agent_id: str,
     *,
-    user_id=None,
-    session_id=None,
-    conversation_history=None,
-    conversation_summary=None,
-    metadata=None,
-    search_limit=10,
-    update_summary=True,
-    extract_assistant_response=False,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
+    conversation_summary: str | None = None,
+    metadata: dict | None = None,
+    search_limit: int = 10,
+    update_summary: bool = True,
+    extract_assistant_response: bool = False,
 ) -> list[Memory]
 ```
+Processes a conversation turn to intelligently extract, compare, and store new memories using the configured LLM provider. Set `extract_assistant_response=True` only if you want the assistant's own statements converted into stored memories.
 
-This method requires a configured LLM provider. It extracts facts, compares them
-with existing memories, stores add/update/delete/noop decisions, and writes the
-raw exchange to `main_content`.
+---
 
-By default, only the user message is treated as a source of new memory. The
-assistant response is still stored in `main_content` and can update the session
-summary, but it is not used for fact extraction. This keeps read-only recall
-answers from rewriting user-authored memories. Set
-`extract_assistant_response=True` only when your application intentionally wants
-assistant-authored facts to become memories.
+## 3. Memory Helpers & Lineage
 
-```python
-memories = await engram.add_conversation(
-    user_message="I'm Sarah. I am allergic to shellfish.",
-    assistant_response="I will avoid shellfish recommendations.",
-    agent_id="assistant",
-    user_id="sarah",
-)
+### `get()`
 
-for memory in memories:
-    print(memory.memory_type, memory.content)
+```py
+await engram.get(memory_id: str) -> Memory
 ```
+Fetches a single memory by ID and updates its internal access count.
 
-### Read And Write Helpers
+### `update()`
 
-```text
-await engram.get(memory_id) -> Memory
-await engram.update(memory_id, *, content=None, importance=None, metadata=None) -> Memory
-await engram.revise(memory_id, *, content=None, importance=None, metadata=None, reason=None) -> Memory
-await engram.get_current(memory_id) -> Memory
-await engram.get_lineage(memory_id) -> MemoryLineage
-await engram.explain_memory(memory_id) -> MemoryExplanation
-await engram.reinforce(memory_id, importance_boost=0.1) -> Memory
-await engram.forget(memory_id) -> bool
-await engram.purge(agent_id, user_id=None) -> int
-await engram.list_recent(agent_id, user_id=None, limit=10) -> list[Memory]
-await engram.get_history(agent_id, *, user_id=None, limit=50, include_superseded=True, memory_types=None, since=None, until=None) -> list[MemoryHistoryEvent]
-await engram.get_memories(agent_id, *, user_id=None, session_id=None, metadata_filter=None, memory_types=None, limit=200) -> list[Memory]
+```py
+await engram.update(
+    memory_id: str, 
+    *, 
+    content: str | None = None, 
+    importance: float | None = None, 
+    metadata: dict | None = None
+) -> Memory
 ```
+Edits a memory directly in-place. Use with caution, as it bypasses version lineage tracking.
 
-`get()` updates access metadata. `get_memories()` is a plain filtered read and
-does not rank by relevance. Use `revise()` for user corrections: it creates a
-new active revision and marks the previous current memory superseded. Use
-`get_history()` for a user-facing timeline of added, revised, and superseded
-facts. Use `update()` only when you intentionally want an in-place edit.
+### `revise()`
 
-```python
-old = await engram.add(
-    "User lives in Dhaka",
-    "assistant",
-    user_id="sarah",
-    metadata={"conflict_key": "assistant:sarah:profile:city"},
-)
-
-new = await engram.revise(
-    old.memory_id,
-    content="User lives in Singapore",
-    metadata={"source": "manual_correction"},
-    reason="user_correction",
-)
-
-current = await engram.get_current(old.memory_id)
-lineage = await engram.get_lineage(old.memory_id)
-explanation = await engram.explain_memory(old.memory_id)
-
-assert current.memory_id == new.memory_id
-assert lineage.current_memory_id == new.memory_id
-assert explanation.memory.status == "superseded"
-
-await engram.reinforce(new.memory_id, importance_boost=0.2)
-recent = await engram.list_recent("assistant", user_id="sarah", limit=5)
-history = await engram.get_history("assistant", user_id="sarah", limit=10)
-
-for event in history:
-    print(event.event_type, event.memory.revision, event.memory.content)
-
-deleted = await engram.forget(new.memory_id)
+```py
+await engram.revise(
+    memory_id: str, 
+    *, 
+    content: str | None = None, 
+    importance: float | None = None, 
+    metadata: dict | None = None, 
+    reason: str | None = None
+) -> Memory
 ```
+Updates a memory by creating a new active head in the lineage and marking the old memory as superseded. Essential for user corrections.
 
-## Search And Recall
+### `get_current()`
+
+```py
+await engram.get_current(memory_id: str) -> Memory
+```
+Fetches the active head of a memory's lineage. If passed an old (superseded) ID, it resolves forward to the current version.
+
+### `get_lineage()`
+
+```py
+await engram.get_lineage(memory_id: str) -> MemoryLineage
+```
+Retrieves the full version history (all updates and supersessions) of a specific memory.
+
+### `explain_memory()`
+
+```py
+await engram.explain_memory(memory_id: str) -> MemoryExplanation
+```
+Returns an LLM-generated explanation of a memory's intent and context based on its graph relations.
+
+### `reinforce()`
+
+```py
+await engram.reinforce(memory_id: str, importance_boost: float = 0.1) -> Memory
+```
+Increases the importance score of a memory, typically used when a recalled memory was proven highly useful.
+
+### `forget()`
+
+```py
+await engram.forget(memory_id: str) -> bool
+```
+Soft-deletes a memory from the active search index. Returns `True` if successfully deleted.
+
+### `purge()`
+
+```py
+await engram.purge(agent_id: str, user_id: str | None = None) -> int
+```
+Hard-deletes all memories belonging to an agent (and optionally a specific user). Returns the number of deleted records.
+
+### `list_recent()`
+
+```py
+await engram.list_recent(agent_id: str, user_id: str | None = None, limit: int = 10) -> list[Memory]
+```
+Returns the most recently created or updated active memories.
+
+### `get_history()`
+
+```py
+await engram.get_history(
+    agent_id: str, 
+    *, 
+    user_id: str | None = None, 
+    limit: int = 50, 
+    include_superseded: bool = True, 
+    memory_types: list[str] | None = None, 
+    since: datetime | None = None, 
+    until: datetime | None = None
+) -> list[MemoryHistoryEvent]
+```
+Retrieves a chronological event timeline of added, revised, and superseded facts. Useful for rendering user-facing memory audit logs.
+
+### `get_memories()`
+
+```py
+await engram.get_memories(
+    agent_id: str, 
+    *, 
+    user_id: str | None = None, 
+    session_id: str | None = None, 
+    metadata_filter: dict | None = None, 
+    memory_types: list[str] | None = None, 
+    limit: int = 200
+) -> list[Memory]
+```
+A plain filtered read operation without vector ranking. Ideal for bulk exporting or aggregating specific memory segments.
+
+---
+
+## 4. Search and Recall
 
 ### `search()`
 
-```text
+```py
 await engram.search(
-    query,
-    agent_id,
+    query: str,
+    agent_id: str,
     *,
-    user_id=None,
-    limit=10,
-    min_score=0.0,
-    metadata_filter=None,
-    memory_types=None,
-    mode="hybrid",
-    rerank=False,
-    include_superseded=False,
+    user_id: str | None = None,
+    limit: int = 10,
+    min_score: float = 0.0,
+    metadata_filter: dict | None = None,
+    memory_types: list[str] | None = None,
+    mode: str = "hybrid", 
+    rerank: bool = False,
+    include_superseded: bool = False,
 ) -> list[SearchResult]
 ```
-
-Modes are `"hybrid"`, `"semantic"`, and `"keyword"`. Hybrid search combines
-pgvector similarity, PostgreSQL full-text search, decay, and importance. Normal
-search hides memories whose first-class `status` column or compatibility
-`metadata.status` value is `"superseded"`.
-
-Set `include_superseded=True` to also return historical (superseded) revisions
-ranked by relevance, each labeled by `result.memory.status`. This is the
-historical-recall surface for "what did I say before" / audit queries; it
-applies to all three modes.
-
-```python
-results = await engram.search(
-    "rollback owner for Atlas checkout",
-    "codex",
-    user_id="nafiz",
-    memory_types=["project", "constraint", "tool_result"],
-    metadata_filter={"project": "atlas_checkout"},
-    limit=5,
-)
-
-for result in results:
-    print(result.score, result.memory.content)
-```
-
-Set `rerank=True` to reorder overfetched candidates with the configured local
-cross-encoder. This requires the optional `sentence-transformers` dependency.
+Core hybrid search combining semantic similarity, full-text keywords, and importance/decay. Setting `rerank=True` activates local cross-encoder re-sorting (requires the `sentence-transformers` dependency).
 
 ### `deep_search()`
 
-```text
+```py
 await engram.deep_search(
-    query,
-    agent_id,
+    query: str,
+    agent_id: str,
     *,
-    user_id=None,
-    limit=10,
-    min_score=0.0,
-    metadata_filter=None,
-    memory_types=None,
-    mode="hybrid",
-    n_queries=4,
-    rerank=False,
+    user_id: str | None = None,
+    limit: int = 10,
+    min_score: float = 0.0,
+    metadata_filter: dict | None = None,
+    memory_types: list[str] | None = None,
+    mode: str = "hybrid", 
+    n_queries: int = 4,
+    rerank: bool = False,
 ) -> list[SearchResult]
 ```
+Expands broad queries by asking the LLM to generate `n_queries` permutations, runs them concurrently, and fuses the results using Reciprocal Rank Fusion (RRF).
 
-`deep_search()` expands broad queries with the configured LLM, runs each variant,
-and fuses rankings with Reciprocal Rank Fusion. Without an LLM provider, it
-falls back to one `search()` call.
+### `recall()`
+
+```py
+await engram.recall(
+    question: str,
+    agent_id: str,
+    *,
+    user_id: str | None = None,
+    question_date: datetime | None = None,
+    limit: int = 10,
+    compose_answer: bool = True,
+) -> RecallAnswer
+```
+The high-level autonomous operator. Classifies user intent (e.g. current vs historical), maps natural language timeframes (e.g., "yesterday"), and composes a fully grounded answer. Set `compose_answer=False` to skip the final LLM composition.
 
 ### `recall_critical()`
 
-```text
+```py
 await engram.recall_critical(
-    agent_id,
-    *,
-    user_id=None,
-    limit=50,
-    memory_types=None,
+    agent_id: str, 
+    *, 
+    user_id: str | None = None, 
+    limit: int = 50, 
+    memory_types: list[str] | None = None
 ) -> list[Memory]
 ```
-
-This reads active critical memories by metadata. It does not use vector rank.
-
-```python
-critical = await engram.recall_critical(
-    "codex",
-    user_id="nafiz",
-    memory_types=["constraint", "decision", "preference"],
-)
-```
+Reads active critical memories (like constraints, base logic, or profile info) directly via metadata, bypassing vector similarity rank.
 
 ### `trace_recall()`
 
-```text
+```py
 await engram.trace_recall(
-    query,
-    agent_id,
-    *,
-    user_id=None,
-    limit=20,
-    min_score=0.0,
-    max_tokens=2000,
-    expected_terms=None,
-    use_deep_search=True,
-    memory_types=None,
-    token_counter=None,
+    query: str, 
+    agent_id: str, 
+    *, 
+    user_id: str | None = None, 
+    limit: int = 20, 
+    min_score: float = 0.0,
+    max_tokens: int = 2000, 
+    expected_terms: list[str] | None = None, 
+    use_deep_search: bool = True, 
+    memory_types: list[str] | None = None, 
+    token_counter: Callable | None = None
 ) -> RecallTrace
 ```
-
-`trace_recall()` builds a prompt-ready memory block and tells you what happened:
-critical hits, search hits, ranked IDs, kept IDs, trimmed IDs, superseded IDs,
-missing expected terms, notes, and metadata counts.
-
-```python
-trace = await engram.trace_recall(
-    "resume repository work",
-    "codex",
-    user_id="nafiz",
-    expected_terms=["never revert", "pytest"],
-    max_tokens=1200,
-)
-
-print(trace.context)
-print(trace.missing_expected_terms)
-print(trace.trimmed_memory_ids)
-```
+A diagnostic utility. Returns a full observability trace of retrieval performance, including hit/miss metrics against `expected_terms` and truncation flags.
 
 ### `get_context_block()`
 
-```text
+```py
 await engram.get_context_block(
-    query,
-    agent_id,
-    *,
-    user_id=None,
-    session_id=None,
-    limit=10,
-    min_score=0.0,
-    max_tokens=None,
-    header="## Relevant memories",
-    token_counter=None,
-    memory_types=None,
-    group_by_type=False,
-    rerank=False,
+    query: str, 
+    agent_id: str, 
+    *, 
+    user_id: str | None = None, 
+    session_id: str | None = None, 
+    limit: int = 10, 
+    min_score: float = 0.0,
+    max_tokens: int | None = None, 
+    header: str = "## Relevant memories", 
+    token_counter: Callable | None = None,
+    memory_types: list[str] | None = None, 
+    group_by_type: bool = False, 
+    rerank: bool = False
 ) -> str
 ```
+Formats retrieved search results directly into a budgeted, prompt-ready markdown block. If `session_id` is provided and has a rolling summary, the summary is prepended.
 
-Use this when you want a compact memory block for a system or context prompt.
-If `session_id` has a rolling summary, the summary is prepended.
+---
 
-```python
-block = await engram.get_context_block(
-    query=user_message,
-    agent_id="assistant",
-    user_id="sarah",
-    max_tokens=800,
-    group_by_type=True,
-)
+## 5. Graph API
+
+### `relate()`
+
+```py
+await engram.relate(
+    source_id: str, 
+    target_id: str, 
+    relation_type: str = "related_to", 
+    weight: float = 1.0, 
+    metadata: dict | None = None
+) -> None
 ```
+Creates a directional edge between two memories to form associative networks. Common relation types: `related_to`, `supports`, `causes`.
 
-## Evidence and aggregation reading
+### `traverse()`
 
-Aggregation and evidence-reading workloads — where one ranked memory is not
-enough — are built from the public primitives above rather than a dedicated
-method:
-
-- `deep_search()` for high-recall multi-query retrieval.
-- `get_memories()` to pull a known group (e.g. every memory from one source
-  session via `metadata_filter`) for window/neighbor expansion.
-- `get_context_block()` to render a budgeted, prompt-ready block.
-- `engram.llm` to run any custom reader prompt over the assembled context.
-
-The session-diversified evidence selection, turn-window expansion, and the
-multi-call "chain-of-note" reader that the LongMemEval benchmark uses are
-QA-harness machinery, not part of the library's public surface. They live in
-`scripts/longmemeval_harness.py` (`search_evidence_set`,
-`get_neighboring_context_block`, `answer_from_evidence`) and drive Engram only
-through the public APIs above — use them as a reference implementation if you
-need that composition.
-
-```python
-# A simple evidence-reading recipe on public primitives:
-hits = await engram.deep_search(
-    "Where did the user buy the replacement charger?",
-    "assistant",
-    user_id="sarah",
-    limit=8,
-)
-context = await engram.get_context_block(
-    "Where did the user buy the replacement charger?",
-    "assistant",
-    user_id="sarah",
-    max_tokens=3000,
-)
-if engram.llm is not None:
-    answer = await engram.llm.complete(
-        f"Context:\n{context}\n\nAnswer concisely.",
-    )
+```py
+await engram.traverse(
+    start_memory_id: str, 
+    max_depth: int = 3, 
+    direction: str = "outbound", 
+    relation_types: list[str] | None = None, 
+    min_weight: float = 0.0, 
+    limit: int = 50
+) -> list[TraversalResult]
 ```
+Performs a multi-hop traversal starting from a single memory using recursive Postgres CTEs.
 
-## Task Memory
+### `traverse_many()`
 
-### Task Lifecycle
-
-```text
-await engram.start_task(goal, agent_id, *, user_id=None, session_id=None, metadata=None) -> TaskRun
-await engram.get_task(task_run_id, *, include_deleted=False) -> TaskRun
-await engram.list_tasks(*, agent_id=None, user_id=None, status=None, limit=100, include_deleted=False) -> list[TaskRun]
-await engram.pause_task(task_run_id, *, outcome=None) -> TaskRun
-await engram.complete_task(task_run_id, *, outcome=None) -> TaskRun
-await engram.fail_task(task_run_id, *, outcome=None) -> TaskRun
-await engram.cancel_task(task_run_id, *, outcome=None) -> TaskRun
-await engram.soft_delete_task(task_run_id) -> TaskRun
+```py
+await engram.traverse_many(
+    start_memory_ids: list[str], 
+    *, 
+    max_depth: int = 2, 
+    direction: str = "any", 
+    relation_types: list[str] | None = None, 
+    min_weight: float = 0.0, 
+    limit_per_seed: int = 25, 
+    total_limit: int = 100, 
+    skip_missing: bool = True
+) -> list[TraversalResult]
 ```
+Traverses the memory graph concurrently from multiple starting seeds and returns deduplicated, ranked results.
 
-```python
-task = await engram.start_task(
-    "Ship the memory docs",
-    "codex",
-    user_id="nafiz",
-    metadata={"repo": "engram"},
-)
+### `render_graph_context()`
 
-await engram.pause_task(task.task_run_id, outcome="Waiting for review")
+```py
+engram.render_graph_context(
+    results: list[TraversalResult], 
+    *, 
+    max_tokens: int | None = None, 
+    token_counter: Callable | None = None, 
+    include_paths: bool = False, 
+    header: str = "## Related memory graph"
+) -> str
 ```
+Utility to render traversal results into a markdown context block suitable for LLM injection.
 
-### Events And Turns
+---
 
-```text
+## 6. Sessions
+
+### `session()`
+
+```py
+async with engram.session(
+    agent_id: str, 
+    user_id: str | None = None, 
+    metadata: dict | None = None
+) -> Session
+```
+Context manager that creates a conversational session boundary. Memory additions scoped to the active session can automatically maintain a rolling conversational summary.
+
+---
+
+## 7. Task Memory
+
+### `start_task()`
+
+```py
+await engram.start_task(
+    goal: str, 
+    agent_id: str, 
+    *, 
+    user_id: str | None = None, 
+    session_id: str | None = None, 
+    metadata: dict | None = None
+) -> TaskRun
+```
+Initializes a durable event ledger for a long-running autonomous agent.
+
+### `get_task()` / `list_tasks()`
+
+```py
+await engram.get_task(task_run_id: str, *, include_deleted: bool = False) -> TaskRun
+await engram.list_tasks(*, agent_id: str | None = None, user_id: str | None = None, status: str | None = None, limit: int = 100, include_deleted: bool = False) -> list[TaskRun]
+```
+Query existing tasks based on their status or ownership.
+
+### State Transitions
+
+```py
+await engram.pause_task(task_run_id: str, *, outcome: str | None = None) -> TaskRun
+await engram.complete_task(task_run_id: str, *, outcome: str | None = None) -> TaskRun
+await engram.fail_task(task_run_id: str, *, outcome: str | None = None) -> TaskRun
+await engram.cancel_task(task_run_id: str, *, outcome: str | None = None) -> TaskRun
+await engram.soft_delete_task(task_run_id: str) -> TaskRun
+```
+Methods to manage the lifecycle and terminal outcomes of a task.
+
+### `record_event()`
+
+```py
 await engram.record_event(
-    *,
-    agent_id,
-    role,
-    event_type,
-    content="",
-    task_run_id=None,
-    session_id=None,
-    user_id=None,
-    payload=None,
-    metadata=None,
+    *, 
+    agent_id: str, 
+    role: str, 
+    event_type: str, 
+    content: str = "", 
+    task_run_id: str | None = None, 
+    session_id: str | None = None, 
+    user_id: str | None = None, 
+    payload: dict | None = None, 
+    metadata: dict | None = None
 ) -> AgentEvent
-
-await engram.list_events(*, task_run_id=None, session_id=None, agent_id=None, limit=100, include_deleted=False) -> list[AgentEvent]
-await engram.search_events(
-    query,
-    *,
-    agent_id=None,
-    task_run_id=None,
-    session_id=None,
-    user_id=None,
-    event_types=None,
-    roles=None,
-    since=None,
-    until=None,
-    limit=50,
-    include_deleted=False,
-    mode="hybrid",
-) -> list[AgentEvent]
-await engram.backfill_event_embeddings(limit=1000, agent_id=None) -> int
-await engram.redact_event(event_id) -> AgentEvent
 ```
+Logs a single, immutable action, observation, or tool call to the event ledger.
 
-`search_events()` is hybrid "event recall": it ranks ledger events by vector
-similarity over `event_embedding` plus PostgreSQL full-text keyword relevance,
-then recency, with optional temporal/type/role filters. Old rows without
-embeddings still match through the keyword branch. Empty queries raise
-`ValueError`.
+### `record_turn()`
 
-Migration `007` does not backfill large ledgers during startup. Run
-`backfill_event_embeddings()` repeatedly from a worker or admin task until it
-returns `0` if you want old events to participate in semantic event recall.
-
-### `recall()` — the memory operator
-
-```text
-await engram.recall(
-    question,
-    agent_id,
-    *,
-    user_id=None,
-    question_date=None,
-    limit=10,
-    compose_answer=True,
-) -> RecallAnswer
-```
-
-`recall()` is the high-level "ask my memory anything" surface. It classifies the
-question's intent (`current` | `historical` | `event` | `lineage`), routes to the
-matching recall surface(s), and composes a source-backed answer. Non-recall chat
-turns are classified as `chat` and return an empty `answer_text`; callers such
-as `examples/chatbot.py` can then use their normal chat path instead of telling
-the user there is no matching memory. The returned `RecallAnswer` carries
-`answer_text` plus the structured facts behind it: `current`, `previous`,
-`when_changed`, `sources`, `conflict_note`, `evidence`, `events`, and a debug
-`trace`.
-
-Set `compose_answer=False` to skip the final recall-composer LLM call and return
-only structured evidence. This is useful for chatbots that want to combine recall
-evidence with broader prompt context, such as active memory blocks and memory
-history timelines, before generating the user-facing answer.
-
-Requires a configured LLM (raises `ConfigurationError` otherwise). Natural-language
-temporal phrases ("yesterday", "last week") in the question are resolved with the
-optional `dateparser` dependency (`engram[temporal]`); without it, recall still
-works but skips the temporal filter.
-
-```python
-answer = await engram.recall(
-    "what was my meeting before I changed it?",
-    "my_agent",
-    user_id="nafiz",
-)
-print(answer.answer_text)        # "It was 3 PM before you changed it to 10 PM."
-print(answer.intent)             # "historical"
-print([m.fact for m in answer.previous])
-```
-
-Roles are `user`, `assistant`, `agent`, `tool`, and `system`. Event types are
-`user_message`, `assistant_message`, `tool_call`, `tool_result`,
-`agent_action`, `decision`, `observation`, `artifact`, `error`, and
-`system_note`.
-
-```text
+```py
 await engram.record_turn(
-    task_run_id,
-    user_message,
-    assistant_response,
-    *,
-    agent_id=None,
-    user_id=None,
-    session_id=None,
-    tool_calls=None,
-    artifacts=None,
-    metadata=None,
-    enqueue_processing=True,
+    task_run_id: str, 
+    user_message: str, 
+    assistant_response: str, 
+    *, 
+    agent_id: str | None = None, 
+    user_id: str | None = None, 
+    session_id: str | None = None, 
+    tool_calls: list[dict] | None = None, 
+    artifacts: list[dict] | None = None, 
+    metadata: dict | None = None, 
+    enqueue_processing: bool = True
 ) -> list[AgentEvent]
 ```
+Writes a complete conversation turn (user, assistant, and tools) in one transaction and optionally queues a background analysis job for derivation.
 
-`record_turn()` writes user, assistant, tool, and artifact events in one
-transaction and queues a `turn_ingest` job by default.
+### `search_events()`
 
-```python
-events = await engram.record_turn(
-    task.task_run_id,
-    user_message="Update the API reference.",
-    assistant_response="I rewrote it from the current client signatures.",
-    tool_calls=[{"name": "pytest", "result": "docs examples passed"}],
-)
+```py
+await engram.search_events(
+    query: str, 
+    *, 
+    agent_id: str | None = None, 
+    task_run_id: str | None = None, 
+    session_id: str | None = None, 
+    user_id: str | None = None, 
+    event_types: list[str] | None = None, 
+    roles: list[str] | None = None, 
+    since: datetime | None = None, 
+    until: datetime | None = None, 
+    limit: int = 50, 
+    include_deleted: bool = False, 
+    mode: str = "hybrid"
+) -> list[AgentEvent]
 ```
+Perform hybrid search directly on the event ledger to recall prior actions or specific tool calls.
 
-### Checkpoints, Context, And Jobs
+### `create_checkpoint()`
 
-```text
+```py
 await engram.create_checkpoint(
-    task_run_id,
-    summary,
-    *,
-    completed_steps=None,
-    pending_steps=None,
-    decisions=None,
-    blockers=None,
-    artifacts=None,
-    source_event_ids=None,
-    metadata=None,
+    task_run_id: str, 
+    summary: str, 
+    *, 
+    completed_steps: list[str] | None = None, 
+    pending_steps: list[str] | None = None, 
+    decisions: list[str] | None = None, 
+    blockers: list[str] | None = None, 
+    artifacts: list[dict] | None = None, 
+    source_event_ids: list[str] | None = None, 
+    metadata: dict | None = None
 ) -> TaskCheckpoint
+```
+Saves a compact state snapshot summarizing the agent's progress, pending goals, and blockers.
 
+### `build_context()`
+
+```py
 await engram.build_context(
-    task_run_id,
-    *,
-    query="",
-    max_tokens=200000,
-    token_counter=None,
-    recent_event_limit=40,
-    memory_limit=25,
-    checkpoint_limit=3,
-    include_graph=True,
+    task_run_id: str, 
+    *, 
+    query: str = "", 
+    max_tokens: int = 200000, 
+    token_counter: Callable | None = None, 
+    recent_event_limit: int = 40, 
+    memory_limit: int = 25, 
+    checkpoint_limit: int = 3, 
+    include_graph: bool = True
 ) -> ContextBuildResult
-
-await engram.process_memory_jobs(*, limit=10) -> list[MemoryJob]
-await engram.run_memory_worker(*, batch_size=10, interval_seconds=1.0, stop_event=None, max_iterations=None) -> int
 ```
+Assembles a unified prompt context encompassing the latest checkpoints, recent events, relevant semantic memories, and graph traversal logic.
 
-```python
-await engram.create_checkpoint(
-    task.task_run_id,
-    "API docs now match the Engram client signatures.",
-    completed_steps=["Read client.py", "Rewrote API reference"],
-    pending_steps=["Run mkdocs build"],
-)
+---
 
-context = await engram.build_context(task.task_run_id, query="resume docs work")
-jobs = await engram.process_memory_jobs(limit=10)
-```
+## 8. Long Input Processing
 
-## Long Input
+### `record_long_input()`
 
-```text
+```py
 await engram.record_long_input(
-    task_run_id,
-    text,
-    *,
-    title=None,
-    agent_id=None,
-    user_id=None,
-    session_id=None,
-    metadata=None,
-    max_chunk_tokens=700,
-    extract_with_llm=True,
-    max_facts_per_chunk=6,
+    task_run_id: str, 
+    text: str, 
+    *, 
+    title: str | None = None, 
+    agent_id: str | None = None, 
+    user_id: str | None = None, 
+    session_id: str | None = None, 
+    metadata: dict | None = None, 
+    max_chunk_tokens: int = 700, 
+    extract_with_llm: bool = True, 
+    max_facts_per_chunk: int = 6
 ) -> LongInputIngestionReport
+```
+Ingests massive text contexts (e.g., source code, PR diffs, or contracts) and recursively chunks them, extracting actionable and citable facts.
 
+### `build_long_input_context()`
+
+```py
 await engram.build_long_input_context(
-    task_run_id,
-    *,
-    query,
-    max_tokens=4000,
-    source_chunk_limit=6,
-    expected_terms=None,
-    token_counter=None,
+    task_run_id: str, 
+    *, 
+    query: str, 
+    max_tokens: int = 4000, 
+    source_chunk_limit: int = 6, 
+    expected_terms: list[str] | None = None, 
+    token_counter: Callable | None = None
 ) -> LongInputContextResult
 ```
+Retrieves targeted, source-anchored chunks from a previously recorded long input for precise answering.
 
-```python
-report = await engram.record_long_input(
-    task.task_run_id,
-    text=contract_text,
-    title="Vendor MSA",
-    max_chunk_tokens=700,
-)
+---
 
-context = await engram.build_long_input_context(
-    task.task_run_id,
-    query="termination notice requirements",
-    expected_terms=["termination", "notice"],
-    max_tokens=4000,
-)
+## 9. Background Jobs
 
-print(report.manifest)
-print(context.trace["missing_expected_terms"])
+### `process_memory_jobs()`
+
+```py
+await engram.process_memory_jobs(*, limit: int = 10) -> list[MemoryJob]
 ```
+Manually processes a batch of deferred derivation jobs queued by operations like `record_turn`.
 
-## Graph API
+### `run_memory_worker()`
 
-```text
-await engram.relate(source_id, target_id, relation_type="related_to", weight=1.0, metadata=None) -> None
-await engram.traverse(start_memory_id, max_depth=3, direction="outbound", relation_types=None, min_weight=0.0, limit=50) -> list[TraversalResult]
-await engram.traverse_many(start_memory_ids, *, max_depth=2, direction="any", relation_types=None, min_weight=0.0, limit_per_seed=25, total_limit=100, skip_missing=True) -> list[TraversalResult]
-engram.render_graph_context(results, *, max_tokens=None, token_counter=None, include_paths=False, header="## Related memory graph") -> str
+```py
+await engram.run_memory_worker(
+    *, 
+    batch_size: int = 10, 
+    interval_seconds: float = 1.0, 
+    stop_event: asyncio.Event | None = None, 
+    max_iterations: int | None = None
+) -> int
 ```
+Runs a continuous loop to consume background memory jobs. Suitable for launching in an `asyncio.create_task()` daemon.
 
-```python
-await engram.relate(
-    source_id=requirement.memory_id,
-    target_id=decision.memory_id,
-    relation_type="supports",
-    weight=0.8,
-)
+---
 
-graph = await engram.traverse_many(
-    [requirement.memory_id, decision.memory_id],
-    max_depth=2,
-    direction="any",
-)
+## 10. Health & Diagnostics
 
-graph_context = engram.render_graph_context(graph, max_tokens=800)
-```
+### `health_check()`
 
-## Sessions
-
-```text
-async with engram.session(agent_id, user_id=None, metadata=None) -> Session
-```
-
-```python
-async with engram.session("assistant", user_id="sarah") as session:
-    await engram.add(
-        "User asked about deployment",
-        "assistant",
-        user_id="sarah",
-        session_id=session.session_id,
-    )
-```
-
-`add_conversation(..., update_summary=True)` can maintain the session rolling
-summary when an LLM provider is configured.
-
-## Models
-
-Key models exported from `engram`:
-
-| Model | Purpose |
-|-------|---------|
-| `Memory` | Stored fact, source context, embedding, type, importance, metadata |
-| `SearchResult` | Memory plus ranking scores |
-| `RecallTrace` | Retrieval observability record |
-| `TaskRun` | Durable unit of agent work |
-| `AgentEvent` | Raw event ledger entry |
-| `TaskCheckpoint` | Compact task state snapshot |
-| `MemoryJob` | Durable background derivation job |
-| `ContextBuildResult` | Rendered task context plus sections |
-| `LongInputChunk` | Source-anchored chunk |
-| `LongInputIngestionReport` | Result of `record_long_input()` |
-| `LongInputContextResult` | Prompt context for long-input answers |
-| `TraversalResult` | Memory graph traversal hit |
-| `Session` | Agent/user conversation session |
-
-## Services
-
-`EmbeddingService.from_settings(settings)` creates the configured embedding
-provider. `LLMService.from_settings(settings)` returns `None` when no
-`llm_provider` is configured.
-
-```python
-from engram import EmbeddingService, LLMService, get_settings
-
-settings = get_settings()
-embedding = EmbeddingService.from_settings(settings)
-vector = await embedding.embed("hello")
-
-llm = LLMService.from_settings(settings)
-if llm is not None:
-    facts = await llm.extract_facts("I like tea.", "I will remember that.")
-```
-
-## Health
-
-```text
+```py
 await engram.health_check() -> dict[str, Any]
 ```
-
-```python
-health = await engram.health_check()
-print(health["status"])
-print(health["components"])
-```
+Runs diagnostic checks verifying the database connection, schema version, and accessibility of configured LLM/Embedding providers.

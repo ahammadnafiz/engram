@@ -6,29 +6,68 @@ long-input handling, graph expansion, and resumable long-running task state.
 
 ## System View
 
-```text
-Application / Agent
-        |
-        v
-Engram Client
-  |-- Memory API: add, search, deep_search, trace_recall
-  |-- Context API: get_context_block, get_memories
-  |-- Policy: memory typing, critical slots, conflict keys
-  |-- Task API: tasks, events, checkpoints, jobs
-  |-- Long Input API: source events, chunks, anchored memories
-  |-- Graph API: relations, traversal, prompt graph rendering
-        |
-        v
-Services
-  |-- MemoryStore
-  |-- TaskMemoryManager
-  |-- ContextBuilder
-  |-- GraphTraversal
-  |-- EmbeddingService
-  |-- LLMService
-        |
-        v
-PostgreSQL + pgvector + pg_trgm
+```mermaid
+---
+config:
+  theme: base
+  look: handDrawn
+  themeVariables:
+    primaryColor: '#e1f5fe'
+    secondaryColor: '#fffde7'
+    tertiaryColor: '#f3e5f5'
+    fourthColor: '#e8f5e9'
+---
+flowchart TD
+    %% Input
+    App{{<b>Application / Agent</b>}}
+
+    %% Engram Client Subgraph
+    subgraph CLIENT ["🔵 Engram Client"]
+        direction TB
+        MemAPI([<b>Memory API</b><br/>add, search, trace])
+        CtxAPI([<b>Context API</b><br/>block builder])
+        Pol([<b>Policy</b><br/>metadata & conflict])
+        TaskAPI([<b>Task API</b><br/>events, jobs])
+        LongAPI([<b>Long Input API</b><br/>chunking])
+        GraphAPI([<b>Graph API</b><br/>relations])
+    end
+
+    %% Services Subgraph
+    subgraph SERVICES ["🟢 Backend Services"]
+        direction TB
+        MemStore(MemoryStore)
+        TaskMgr(TaskMemoryManager)
+        CtxBld(ContextBuilder)
+        GraphTrav(GraphTraversal)
+        EmbSvc(EmbeddingService)
+        LLMSvc(LLMService)
+    end
+
+    %% Database Subgraph
+    subgraph DB_LAYER ["🟡 Data Layer"]
+        direction TB
+        DB[(<b>PostgreSQL</b><br/>pgvector + pg_trgm)]
+    end
+
+    %% Flow
+    App ==> CLIENT
+    CLIENT ==> SERVICES
+    SERVICES ==> DB_LAYER
+
+    %% Styling
+    style CLIENT fill:#e1f5fe,stroke:#01579b,stroke-width:2px,rx:10,ry:10
+    style SERVICES fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,rx:10,ry:10
+    style DB_LAYER fill:#fffde7,stroke:#fbc02d,stroke-width:2px,rx:10,ry:10
+
+    classDef process fill:#fff,stroke:#333,stroke-width:1px,rx:8,ry:8;
+    classDef api fill:#fff,stroke:#333,stroke-width:2px,rx:20,ry:20;
+    classDef source fill:#fff,stroke:#01579b,stroke-width:2px;
+    classDef dbnode fill:#fff,stroke:#fbc02d,stroke-width:2px;
+
+    class MemStore,TaskMgr,CtxBld,GraphTrav,EmbSvc,LLMSvc process;
+    class MemAPI,CtxAPI,Pol,TaskAPI,LongAPI,GraphAPI api;
+    class App source;
+    class DB dbnode;
 ```
 
 ## Design Choices
@@ -107,28 +146,47 @@ extraction, query expansion, and evidence answering.
 
 ## Connect Flow
 
-```text
-Engram.connect()
-        |
-        v
-EmbeddingService.from_settings()
-        |
-        v
-detect embedding dimension
-        |
-        v
-PostgresStorage.connect()
-        |
-        v
-init_schema(embedding_dimension)
-  - create extensions, tables, indexes
-  - run idempotent migrations
-  - align text-search config
-  - align vector dimension or raise on unsafe change
-        |
-        v
-initialize MemoryStore, GraphTraversal, SessionManager, HealthChecker,
-TaskMemoryManager, optional LLMService
+```mermaid
+---
+config:
+  theme: base
+  look: handDrawn
+  themeVariables:
+    primaryColor: '#e1f5fe'
+    secondaryColor: '#fffde7'
+---
+flowchart TD
+    %% Input
+    Start{{<b>Engram.connect()</b>}}
+
+    subgraph PREP ["🔵 1 · Preparation"]
+        direction TB
+        Emb([<b>EmbeddingService</b><br/>from_settings]) --> 
+        Detect(Detect embedding dimension)
+    end
+
+    subgraph INIT ["🟡 2 · Initialization"]
+        direction TB
+        DBConn([<b>PostgresStorage</b><br/>connect]) --> 
+        Schema(<b>init_schema</b><br/>run migrations, align dimension) -->
+        Svcs(<b>Initialize Services</b><br/>MemoryStore, Tasks, etc.)
+    end
+
+    %% Flow
+    Start ==> PREP
+    PREP ==> INIT
+
+    %% Styling
+    style PREP fill:#e1f5fe,stroke:#01579b,stroke-width:2px,rx:10,ry:10
+    style INIT fill:#fffde7,stroke:#fbc02d,stroke-width:2px,rx:10,ry:10
+
+    classDef process fill:#fff,stroke:#333,stroke-width:1px,rx:8,ry:8;
+    classDef api fill:#fff,stroke:#333,stroke-width:2px,rx:20,ry:20;
+    classDef source fill:#fff,stroke:#01579b,stroke-width:2px;
+
+    class Detect,Schema,Svcs process;
+    class Emb,DBConn api;
+    class Start source;
 ```
 
 If a vector dimension change would clear existing embeddings,
@@ -136,46 +194,103 @@ If a vector dimension change would clear existing embeddings,
 
 ## Memory Write Flow
 
-```text
-engram.add(content, main_content, memory_type, metadata)
-        |
-        v
-MemoryPolicy.apply_metadata()
-  - infer type
-  - assign critical_slot
-  - assign conflict_key
-        |
-        v
-MemoryStore.add()
-  - embed content/fact
-  - acquire duplicate-scope lock
-  - check near duplicates
-  - insert into agent_memory
-  - supersede older active rows with same conflict_key
-        |
-        v
-return Memory
+```mermaid
+---
+config:
+  theme: base
+  look: handDrawn
+  themeVariables:
+    primaryColor: '#e1f5fe'
+    secondaryColor: '#e8f5e9'
+---
+flowchart TD
+    %% Input
+    Input{{<b>engram.add()</b><br/>fact, context, metadata}}
+
+    subgraph POLICY ["🔵 1 · Policy Check"]
+        direction TB
+        Pol([<b>MemoryPolicy</b><br/>apply_metadata]) -->
+        Infer(Infer type & assign conflict_key)
+    end
+
+    subgraph STORAGE ["🟢 2 · Storage & Dedup"]
+        direction TB
+        Add([<b>MemoryStore</b><br/>add]) -->
+        Lock(Acquire duplicate-scope lock) -->
+        Dedup(Check near duplicates) -->
+        Insert[(Insert to agent_memory)] -->
+        Supersede(Supersede older conflict rows)
+    end
+
+    Out((<b>Memory</b>))
+
+    %% Flow
+    Input ==> POLICY
+    POLICY ==> STORAGE
+    STORAGE ==> Out
+
+    %% Styling
+    style POLICY fill:#e1f5fe,stroke:#01579b,stroke-width:2px,rx:10,ry:10
+    style STORAGE fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,rx:10,ry:10
+
+    classDef process fill:#fff,stroke:#333,stroke-width:1px,rx:8,ry:8;
+    classDef api fill:#fff,stroke:#333,stroke-width:2px,rx:20,ry:20;
+    classDef source fill:#fff,stroke:#01579b,stroke-width:2px;
+    classDef dbnode fill:#fff,stroke:#2e7d32,stroke-width:2px;
+
+    class Infer,Lock,Dedup,Supersede process;
+    class Pol,Add api;
+    class Input source;
+    class Insert dbnode;
 ```
 
 ## Recall Flow
 
-```text
-trace_recall(query)
-        |
-        +--> recall_critical()
-        |      metadata lookup
-        |
-        +--> deep_search() or search()
-        |      vector + keyword + decay + importance
-        |
-        +--> list superseded policy memories
-        |
-        +--> dedupe critical + search hits
-        |
-        +--> trim to prompt budget
-        |
-        v
-RecallTrace(context, kept, trimmed, missing, superseded)
+```mermaid
+---
+config:
+  theme: base
+  look: handDrawn
+  themeVariables:
+    primaryColor: '#e1f5fe'
+    secondaryColor: '#f3e5f5'
+---
+flowchart TD
+    %% Input
+    Input{{<b>trace_recall(query)</b>}}
+
+    subgraph RETRIEVAL ["🔵 1 · Retrieval Pipelines"]
+        direction TB
+        Crit([<b>recall_critical()</b><br/>metadata lookup])
+        Srch([<b>deep_search() / search()</b><br/>vector + keyword + decay])
+        Hist(List superseded history)
+    end
+
+    subgraph RANKING ["🟣 2 · Fusion & Ranking"]
+        direction TB
+        Dedupe(Dedupe critical + search hits) -->
+        Trim(Trim to prompt budget)
+    end
+
+    Out((<b>RecallTrace</b>))
+
+    %% Flow
+    Input ==> Crit & Srch & Hist
+    Crit & Srch ==> Dedupe
+    Hist ==> Trim
+    Trim ==> Out
+
+    %% Styling
+    style RETRIEVAL fill:#e1f5fe,stroke:#01579b,stroke-width:2px,rx:10,ry:10
+    style RANKING fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,rx:10,ry:10
+
+    classDef process fill:#fff,stroke:#333,stroke-width:1px,rx:8,ry:8;
+    classDef api fill:#fff,stroke:#333,stroke-width:2px,rx:20,ry:20;
+    classDef source fill:#fff,stroke:#01579b,stroke-width:2px;
+
+    class Dedupe,Trim,Hist process;
+    class Crit,Srch api;
+    class Input source;
 ```
 
 ## Evidence Flow
@@ -183,17 +298,45 @@ RecallTrace(context, kept, trimmed, missing, superseded)
 Aggregation questions, where the answer may be spread across several turns or
 sessions, are composed from public primitives:
 
-```text
-deep_search(query)            high-recall multi-query retrieval
-        |
-        v
-get_memories(session group)   pull neighboring turns for a hit
-        |
-        v
-get_context_block(query)      render a budgeted, prompt-ready block
-        |
-        v
-engram.llm.complete(...)      run a reader prompt over the context
+```mermaid
+---
+config:
+  theme: base
+  look: handDrawn
+  themeVariables:
+    primaryColor: '#e1f5fe'
+    secondaryColor: '#fffde7'
+    tertiaryColor: '#f3e5f5'
+---
+flowchart TD
+    %% Stages
+    subgraph SEARCH ["🔵 1 · Search"]
+        direction TB
+        Deep([<b>deep_search()</b><br/>multi-query retrieval])
+    end
+
+    subgraph EXPAND ["🟡 2 · Expand Context"]
+        direction TB
+        Mem([<b>get_memories()</b><br/>neighboring session turns]) -->
+        Ctx([<b>get_context_block()</b><br/>budgeted prompt block])
+    end
+
+    subgraph READ ["🟣 3 · Machine Reading"]
+        direction TB
+        LLM([<b>LLM.complete()</b><br/>answer from evidence])
+    end
+
+    %% Flow
+    SEARCH ==> EXPAND
+    EXPAND ==> READ
+
+    %% Styling
+    style SEARCH fill:#e1f5fe,stroke:#01579b,stroke-width:2px,rx:10,ry:10
+    style EXPAND fill:#fffde7,stroke:#fbc02d,stroke-width:2px,rx:10,ry:10
+    style READ fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,rx:10,ry:10
+
+    classDef api fill:#fff,stroke:#333,stroke-width:2px,rx:20,ry:20;
+    class Deep,Mem,Ctx,LLM api;
 ```
 
 The session-diversified selection, turn-window expansion, and multi-call
@@ -203,22 +346,55 @@ same public APIs rather than baked into the library.
 
 ## Task Flow
 
-```text
-start_task(goal)
-        |
-record_turn(user, assistant, tools, artifacts)
-        |
-agent_events append records
-        |
-memory_jobs enqueue turn_ingest
-        |
-process_memory_jobs() or run_memory_worker()
-        |
-add_conversation-like fact derivation when LLM exists
-        |
-create/update checkpoint
-        |
-build_context(task_id, query)
+```mermaid
+---
+config:
+  theme: base
+  look: handDrawn
+  themeVariables:
+    primaryColor: '#e1f5fe'
+    secondaryColor: '#fffde7'
+    tertiaryColor: '#e8f5e9'
+---
+flowchart TD
+    Start{{<b>start_task(goal)</b>}}
+
+    subgraph LEDGER ["🔵 1 · Event Ledger"]
+        direction TB
+        Turn([<b>record_turn()</b><br/>user, assistant, tools]) -->
+        App(agent_events append) -->
+        Enq(Enqueue turn_ingest)
+    end
+
+    subgraph DERIVE ["🟡 2 · Background Derivation"]
+        direction TB
+        Work([<b>process_memory_jobs()</b>]) -->
+        Fact(Fact extraction via LLM)
+    end
+
+    subgraph STATE ["🟢 3 · Context Assembly"]
+        direction TB
+        Ckpt([<b>create_checkpoint()</b>]) -->
+        Ctx([<b>build_context()</b>])
+    end
+
+    %% Flow
+    Start ==> LEDGER
+    LEDGER ==> DERIVE
+    DERIVE ==> STATE
+
+    %% Styling
+    style LEDGER fill:#e1f5fe,stroke:#01579b,stroke-width:2px,rx:10,ry:10
+    style DERIVE fill:#fffde7,stroke:#fbc02d,stroke-width:2px,rx:10,ry:10
+    style STATE fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,rx:10,ry:10
+
+    classDef process fill:#fff,stroke:#333,stroke-width:1px,rx:8,ry:8;
+    classDef api fill:#fff,stroke:#333,stroke-width:2px,rx:20,ry:20;
+    classDef source fill:#fff,stroke:#01579b,stroke-width:2px;
+
+    class App,Enq,Fact process;
+    class Turn,Work,Ckpt,Ctx api;
+    class Start source;
 ```
 
 The raw ledger is authoritative. Derived memories and checkpoints are optimized
@@ -226,20 +402,49 @@ views used for recall and prompt assembly.
 
 ## Long-Input Flow
 
-```text
-record_long_input(task_id, text)
-        |
-raw source event
-        |
-chunk by heading and token estimate
-        |
-artifact event per chunk with char span + quote_hash
-        |
-extract facts per chunk using LLM or heuristic fallback
-        |
-anchored memories with source metadata
-        |
-manifest checkpoint
+```mermaid
+---
+config:
+  theme: base
+  look: handDrawn
+  themeVariables:
+    primaryColor: '#e1f5fe'
+    secondaryColor: '#fffde7'
+---
+flowchart TD
+    Input{{<b>record_long_input()</b><br/>text payload}}
+
+    subgraph CHUNKING ["🔵 1 · Chunking"]
+        direction TB
+        Src(Raw source event) -->
+        Split(Chunk by headings) -->
+        Art[(Artifact event<br/>char span + quote_hash)]
+    end
+
+    subgraph EXTRACTION ["🟡 2 · Fact Extraction"]
+        direction TB
+        LLM([<b>LLM Extractor</b>]) -->
+        Mem[(Anchored memories<br/>with source metadata)] -->
+        Man(Manifest checkpoint)
+    end
+
+    %% Flow
+    Input ==> CHUNKING
+    CHUNKING ==> EXTRACTION
+
+    %% Styling
+    style CHUNKING fill:#e1f5fe,stroke:#01579b,stroke-width:2px,rx:10,ry:10
+    style EXTRACTION fill:#fffde7,stroke:#fbc02d,stroke-width:2px,rx:10,ry:10
+
+    classDef process fill:#fff,stroke:#333,stroke-width:1px,rx:8,ry:8;
+    classDef api fill:#fff,stroke:#333,stroke-width:2px,rx:20,ry:20;
+    classDef dbnode fill:#fff,stroke:#333,stroke-width:1px,rx:2,ry:2;
+    classDef source fill:#fff,stroke:#01579b,stroke-width:2px;
+
+    class Src,Split,Man process;
+    class LLM api;
+    class Art,Mem dbnode;
+    class Input source;
 ```
 
 `build_long_input_context()` combines recall trace, selected source chunks, and

@@ -140,6 +140,7 @@ class EngramSettings(BaseSettings):
         default=None, description="Custom OpenAI base URL"
     )
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
+    gemini_api_key: str | None = Field(default=None, description="Gemini API key")
     cohere_api_key: str | None = Field(default=None, description="Cohere API key")
     groq_api_key: str | None = Field(default=None, description="Groq API key")
     hf_api_key: str | None = Field(default=None, description="HuggingFace API key")
@@ -311,6 +312,9 @@ class EngramSettings(BaseSettings):
         elif self.embedding_provider in ("ollama", "ollama-embedding"):
             if self.ollama_base_url:
                 kwargs["base_url"] = self.ollama_base_url
+        elif self.embedding_provider == "gemini":
+            if self.gemini_api_key:
+                kwargs["api_key"] = self.gemini_api_key
 
         return kwargs
 

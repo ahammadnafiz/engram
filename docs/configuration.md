@@ -1,30 +1,26 @@
 # Configuration
 
-Engram uses `pydantic-settings`. Environment variables use the `ENGRAM_`
-prefix, and `.env` is read from the current working directory.
+Engram is configured using `pydantic-settings`. By default, it reads environment variables prefixed with `ENGRAM_` and automatically loads from a `.env` file in the current working directory if one exists.
 
-## Local Development
+> [!NOTE]
+> `EngramSettings` handles connections, models, and search tuning. Behavior policies (like `memory_policy`) are passed directly to the `Engram` client at instantiation rather than via environment variables.
 
-The repository `docker-compose.yml` defaults to this PostgreSQL URL:
+---
+
+## 1. Quickstarts
+
+### Local / Offline Development
+To run entirely offline using local embeddings (no API keys required):
 
 ```bash
 export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
-```
-
-Use local embeddings when you do not want API-key-backed embedding calls:
-
-```bash
 export ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
 export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
 ```
+*Requires `pip install -e ".[sentence-transformers]"`*
 
-Install the matching extra:
-
-```bash
-pip install -e ".[dev,examples,sentence-transformers]"
-```
-
-## OpenAI Setup
+### Cloud Providers (OpenAI)
+To use OpenAI for both embeddings and the optional LLM capabilities (required for `deep_search` and automated intent parsing via `recall`):
 
 ```bash
 export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
@@ -34,177 +30,110 @@ export ENGRAM_LLM_PROVIDER=openai
 export ENGRAM_LLM_MODEL=gpt-4o-mini
 export ENGRAM_OPENAI_API_KEY=sk-...
 ```
+*Requires `pip install -e ".[openai]"`*
 
-Install:
+---
 
-```bash
-pip install -e ".[dev,examples,openai]"
-```
+## 2. Environment Variables
 
-The LLM provider is optional. Direct `add()`, `search()`, `trace_recall()`,
-task/event storage, graph operations, and heuristic long-input extraction work
-without it. `add_conversation()`, LLM query expansion, richer memory jobs, and
-any LLM-backed reader over retrieved context need an LLM provider.
-
-## Database Settings
+### Database Settings
+Engram requires PostgreSQL equipped with the `vector` and `pg_trgm` extensions.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENGRAM_DATABASE_URL` | `postgresql://localhost:5432/engram` | PostgreSQL connection URL |
-| `ENGRAM_MIN_POOL_SIZE` | `5` | Minimum asyncpg pool size |
-| `ENGRAM_MAX_POOL_SIZE` | `20` | Maximum asyncpg pool size |
-| `ENGRAM_CONNECTION_TIMEOUT` | `30.0` | Connection timeout in seconds |
-| `ENGRAM_COMMAND_TIMEOUT` | `60.0` | SQL command timeout in seconds |
+| `ENGRAM_DATABASE_URL` | `postgresql://localhost:5432/engram` | Connection string |
+| `ENGRAM_MIN_POOL_SIZE` | `5` | Minimum active asyncpg connections |
+| `ENGRAM_MAX_POOL_SIZE` | `20` | Maximum asyncpg connections |
+| `ENGRAM_CONNECTION_TIMEOUT`| `30.0` | Connection timeout (seconds) |
+| `ENGRAM_COMMAND_TIMEOUT` | `60.0` | SQL statement timeout (seconds) |
 
-Use PostgreSQL with the `vector` and `pg_trgm` extensions. The local compose
-stack uses `pgvector/pgvector:pg16`.
-
-## Embedding Settings
+### Embedding Settings
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENGRAM_EMBEDDING_PROVIDER` | `openai` | `openai`, `sentence-transformers`, `cohere`, `ollama`, or `huggingface` |
-| `ENGRAM_EMBEDDING_MODEL` | `text-embedding-3-small` | Provider-specific model |
-| `ENGRAM_EMBEDDING_DIMENSION` | unset | Optional explicit dimension. Usually auto-detected |
-| `ENGRAM_EMBEDDING_BATCH_SIZE` | `100` | Batch size for embedding writes |
-| `ENGRAM_EMBEDDING_CACHE_SIZE` | `1000` | In-memory embedding cache entries. `0` disables caching |
-| `ENGRAM_EMBEDDING_MAX_INPUT_CHARS` | `30000` | Text longer than this is truncated before embedding |
-| `ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE` | `false` | Permit clearing existing embeddings when the provider dimension changes |
+| `ENGRAM_EMBEDDING_PROVIDER`| `openai` | Valid: `openai`, `sentence-transformers`, `cohere`, `ollama`, `huggingface` |
+| `ENGRAM_EMBEDDING_MODEL` | `text-embedding-3-small`| Provider-specific model ID |
+| `ENGRAM_EMBEDDING_DIMENSION`| `None` | Optional explicit dimension. Usually auto-detected from provider. |
+| `ENGRAM_EMBEDDING_BATCH_SIZE`| `100` | Vector batch size for ingestion |
+| `ENGRAM_EMBEDDING_CACHE_SIZE`| `1000` | In-memory cache entries. `0` disables caching. |
+| `ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE` | `false` | **Crucial:** Set to `true` if changing dimension against existing DB. |
 
-Dimension changes are protected by default. If a database already has 1536
-dimension embeddings and you connect with a 384 dimension model, Engram raises a
-configuration error instead of clearing stored vectors. Use a fresh database, or
-set `ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=true` only when you plan to
-re-embed affected memories.
+> [!WARNING]
+> Changing the embedding model against an already-populated database will raise an error on startup to prevent catastrophic data corruption. To override this and allow Engram to alter the pgvector column (which drops existing vectors), you must set `ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=true`.
 
-## Provider Packages
-
-| Provider | Extra | Notes |
-|----------|-------|-------|
-| OpenAI embeddings and LLM | `engram[openai]` | Uses `ENGRAM_OPENAI_API_KEY`; `ENGRAM_OPENAI_BASE_URL` supports compatible APIs |
-| Anthropic LLM | `engram[anthropic]` | Uses `ENGRAM_ANTHROPIC_API_KEY` |
-| Cohere embeddings | `engram[cohere]` | Uses `ENGRAM_COHERE_API_KEY` |
-| Ollama embeddings or LLM | `engram[http]` | Uses `ENGRAM_OLLAMA_BASE_URL`, default `http://localhost:11434` |
-| HuggingFace Inference embeddings | `engram[http]` | Uses `ENGRAM_HF_API_KEY` when required |
-| Groq LLM | `engram[http]` | Uses `ENGRAM_GROQ_API_KEY` |
-| LiteLLM LLM | `engram[litellm]` | Uses LiteLLM model naming and provider env |
-| Sentence Transformers | `engram[sentence-transformers]` | Local embedding models |
-| Cross-encoder reranking | `engram[rerank]` | Needed for `search(..., rerank=True)` |
-
-`engram[all]` installs all provider extras plus example dependencies.
-
-## LLM Settings
+### LLM Settings
+The LLM is technically optional for CRUD memory, but strictly required for high-level cognitive operations like `recall()`, `deep_search()`, and intelligent intent parsing.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENGRAM_LLM_PROVIDER` | unset | `openai`, `anthropic`, `ollama`, `groq`, or `litellm` |
-| `ENGRAM_LLM_MODEL` | `gpt-4o-mini` | Provider-specific model |
-| `ENGRAM_OPENAI_API_KEY` | unset | OpenAI key for embeddings and LLM |
-| `ENGRAM_OPENAI_BASE_URL` | unset | OpenAI-compatible endpoint |
-| `ENGRAM_ANTHROPIC_API_KEY` | unset | Anthropic key |
-| `ENGRAM_GROQ_API_KEY` | unset | Groq key |
-| `ENGRAM_OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint |
+| `ENGRAM_LLM_PROVIDER` | `None` | Valid: `openai`, `anthropic`, `ollama`, `groq`, `litellm` |
+| `ENGRAM_LLM_MODEL` | `gpt-4o-mini` | Provider-specific model ID |
+| `ENGRAM_OPENAI_API_KEY` | `None` | Required if provider is `openai` |
+| `ENGRAM_ANTHROPIC_API_KEY` | `None` | Required if provider is `anthropic` |
 
-## Search Settings
+### Search & Retrieval Settings
+These weights dictate the ranking algorithm for `hybrid` search mode. They must sum to roughly `1.0`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENGRAM_WEIGHT_SEMANTIC` | `0.40` | Vector similarity weight |
-| `ENGRAM_WEIGHT_KEYWORD` | `0.20` | Full-text weight |
-| `ENGRAM_WEIGHT_DECAY` | `0.25` | Recency/access weight |
-| `ENGRAM_WEIGHT_IMPORTANCE` | `0.15` | Importance weight |
-| `ENGRAM_DECAY_RATE` | `0.995` | Hourly decay base. Must be greater than `0` and less than `1` |
-| `ENGRAM_SEARCH_CANDIDATE_MULTIPLIER` | `5` | Overfetch factor before fusion or reranking |
-| `ENGRAM_DEFAULT_SEARCH_LIMIT` | `10` | Default result limit |
-| `ENGRAM_MAX_SEARCH_LIMIT` | `100` | API-level max result limit |
-| `ENGRAM_NEAR_DUPLICATE_THRESHOLD` | `0.95` | Cosine threshold for near-duplicate suppression. `1.0` disables the guard |
-| `ENGRAM_HNSW_EF_SEARCH` | unset | Optional per-connection `hnsw.ef_search` override |
-| `ENGRAM_TEXT_SEARCH_CONFIG` | `english` | PostgreSQL text search config for generated tsvector columns |
+| `ENGRAM_WEIGHT_SEMANTIC` | `0.40` | Importance of vector similarity |
+| `ENGRAM_WEIGHT_KEYWORD` | `0.20` | Importance of exact keyword matches |
+| `ENGRAM_WEIGHT_DECAY` | `0.25` | Importance of recency/frequency |
+| `ENGRAM_WEIGHT_IMPORTANCE` | `0.15` | Importance of memory priority |
+| `ENGRAM_DECAY_RATE` | `0.995` | Base decay per hour (0.0 to 1.0) |
+| `ENGRAM_DEFAULT_SEARCH_LIMIT`| `10` | Default results returned |
+| `ENGRAM_NEAR_DUPLICATE_THRESHOLD`| `0.95` | Cosine threshold to block near-duplicate memory ingestion |
 
-The four search weights must sum to approximately `1.0`.
-
-## Reranking
+### Reranking Settings
+If you execute `search(..., rerank=True)`, Engram uses a local Cross-Encoder to re-score the fetched documents. This lazy-loads the model into memory.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENGRAM_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder used by `rerank=True` |
-| `ENGRAM_RERANKER_BACKEND` | `torch` | `torch`, `onnx`, or `openvino` |
+| `ENGRAM_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | HuggingFace model ID |
+| `ENGRAM_RERANKER_BACKEND`| `torch` | Valid: `torch`, `onnx`, `openvino` |
 
-Reranking runs locally and is loaded lazily on the first reranked search.
+---
 
-## Logging
+## 3. Programmatic Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENGRAM_LOG_LEVEL` | `INFO` | Python log level |
-| `ENGRAM_LOG_SQL_QUERIES` | `false` | Log SQL statements for debugging |
-
-## Programmatic Settings
+While `.env` files are standard, you can fully configure Engram programmatically using the `EngramSettings` object.
 
 ```python
 from engram import Engram, EngramSettings
 
+# 1. Define infrastructure and provider settings
 settings = EngramSettings(
-    database_url="postgresql://engram:engram_secret@localhost:5432/engram",
+    database_url="postgresql://admin:secret@pg:5432/db",
     embedding_provider="sentence-transformers",
     embedding_model="all-MiniLM-L6-v2",
-    llm_provider=None,
+    llm_provider=None,  # Running in pure-storage mode
 )
 
-async with Engram(settings=settings, memory_policy="coding_agent") as engram:
+# 2. Instantiate Client (injecting behavioral policies)
+async with Engram(
+    settings=settings, 
+    memory_policy="coding_agent"  # Determines how facts are categorized
+) as engram:
+    
     health = await engram.health_check()
     print(health["status"])
 ```
 
-Constructor overrides are useful in tests and small scripts:
+> [!TIP]
+> **Behavior vs Infrastructure**: `EngramSettings` defines *how* Engram connects to the database and models (infrastructure). The `memory_policy` argument defines *what* Engram does with the memories it encounters (behavior).
 
-```python
-engram = Engram(
-    database_url="postgresql://engram:engram_secret@localhost:5432/engram",
-    memory_policy="default",
-)
-```
+---
 
-## Memory Policy
+## 4. Required Provider Packages
 
-`memory_policy` is passed to `Engram`; it is not part of `EngramSettings`.
+Because Engram supports a vast ecosystem of model providers, dependencies are split into optional `extras` to keep the footprint small.
 
-```python
-from engram import Engram
-
-async with Engram(memory_policy="default") as engram:
-    ...
-
-async with Engram(memory_policy="legal") as engram:
-    ...
-
-async with Engram(memory_policy="coding_agent") as engram:
-    ...
-```
-
-Use a custom `MemoryPolicy` when a domain needs its own type rules, critical
-slots, or conflict keys.
-
-## Docker Compose
-
-```yaml
-services:
-  app:
-    environment:
-      ENGRAM_DATABASE_URL: postgresql://engram:engram_secret@postgres:5432/engram
-      ENGRAM_EMBEDDING_PROVIDER: openai
-      ENGRAM_EMBEDDING_MODEL: text-embedding-3-small
-      ENGRAM_LLM_PROVIDER: openai
-      ENGRAM_LLM_MODEL: gpt-4o-mini
-      ENGRAM_OPENAI_API_KEY: ${ENGRAM_OPENAI_API_KEY}
-```
-
-## Common Validation Errors
-
-- `ENGRAM_MAX_POOL_SIZE` lower than `ENGRAM_MIN_POOL_SIZE`
-- search weights that do not sum to `1.0`
-- invalid `ENGRAM_EMBEDDING_DIMENSION`
-- invalid `ENGRAM_TEXT_SEARCH_CONFIG`
-- missing optional provider package
-- missing API key for cloud providers
-- embedding model dimension mismatch against an existing populated database
+| Backend Need | Installation Command |
+|--------------|----------------------|
+| OpenAI (LLM / Embed) | `pip install engram[openai]` |
+| Anthropic (LLM) | `pip install engram[anthropic]` |
+| Cohere (Embed) | `pip install engram[cohere]` |
+| Local Sentence Transformers | `pip install engram[sentence-transformers]` |
+| HTTP/Ollama/Groq | `pip install engram[http]` |
+| Reranking Support | `pip install engram[rerank]` |
+| **All Providers** | `pip install engram[all]` |

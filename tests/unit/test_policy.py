@@ -28,6 +28,37 @@ class TestAllergySlots:
             "contradictory allergy facts must conflict, not coexist"
         )
 
+    def test_incidental_allergy_mention_is_not_slotted(self) -> None:
+        """A tangential allergy mention (testing/doctor/profile logistics) must
+        NOT occupy the allergy conflict slot. Otherwise, ingested last, it
+        supersedes the real restriction (last-writer-wins on conflict_key) and
+        becomes the active head -- the bug that left 'doctor did follow-up
+        allergy testing' active while the actual restriction was superseded."""
+        from engram.policy import DEFAULT_MEMORY_POLICY
+
+        for incidental in (
+            "User has a doctor who performed follow-up allergy testing",
+            "User needs to manage dietary and allergy profiles across projects",
+        ):
+            assert DEFAULT_MEMORY_POLICY.critical_slot(incidental, "profile") is None, (
+                incidental
+            )
+
+    def test_narrowed_allergy_supersedes_prior_restriction(self) -> None:
+        """A corrected/narrowed allergy must share the slot with the prior
+        restriction so it supersedes it and becomes the active head."""
+        from engram.policy import DEFAULT_MEMORY_POLICY
+
+        old = DEFAULT_MEMORY_POLICY.critical_slot(
+            "User has a severe shellfish allergy", "profile"
+        )
+        narrowed = DEFAULT_MEMORY_POLICY.critical_slot(
+            "User's shellfish allergy is now strictly limited to shrimp and prawns",
+            "profile",
+        )
+        assert old is not None
+        assert old == narrowed
+
     def test_compound_allergens_not_truncated(self) -> None:
         from engram.policy import DEFAULT_MEMORY_POLICY
 

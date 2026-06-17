@@ -1,86 +1,32 @@
 # Examples
 
-The repository includes three example scripts. They are meant for local
-development and API exploration, not production templates.
+The Engram repository ships with three core example scripts designed for local development, API exploration, and demonstrating best practices. 
 
-## Setup
+> [!WARNING]  
+> These scripts are intended for learning and experimentation. Do not run them directly as production services without adding your own auth, rate-limiting, and error-handling wrappers.
+
+---
+
+## Environment Setup
+
+Before running the examples, you need a running PostgreSQL instance equipped with the `pgvector` and `pg_trgm` extensions. The easiest way is using the provided Docker compose file:
 
 ```bash
-pip install -e ".[dev,examples,sentence-transformers]"
 docker compose up -d postgres
+```
 
+### Option A: Local / Offline Mode
+Run the examples entirely offline using `sentence-transformers` (no API keys):
+```bash
 export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
 export ENGRAM_EMBEDDING_PROVIDER=sentence-transformers
 export ENGRAM_EMBEDDING_MODEL=all-MiniLM-L6-v2
+
+pip install -e ".[dev,examples,sentence-transformers]"
 ```
 
-For OpenAI-backed fact extraction and chat responses:
-
-```bash
-export ENGRAM_EMBEDDING_PROVIDER=openai
-export ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
-export ENGRAM_EMBEDDING_DIMENSION=1536
-export ENGRAM_LLM_PROVIDER=openai
-export ENGRAM_LLM_MODEL=gpt-4o-mini
-export ENGRAM_OPENAI_API_KEY=sk-...
-```
-
-## `examples/basic_usage.py`
-
-Run:
-
-```bash
-python examples/basic_usage.py
-```
-
-This is the broad API walkthrough. It covers:
-
-| Capability | APIs |
-|------------|------|
-| lifecycle | `connect()`, `close()`, async context manager |
-| memory CRUD | `add()`, `add_batch()`, `get()`, `update()`, `revise()`, `get_current()`, `get_lineage()`, `explain_memory()`, `get_history()`, `reinforce()`, `forget()`, `purge()` |
-| search and recall | `search()`, `deep_search()`, `recall_critical()`, `trace_recall()` |
-| context blocks | `get_context_block()`, `get_memories()` |
-| evidence reading | composed from `deep_search()` + `get_memories()` + `engram.llm` |
-| graph | `relate()`, `traverse()`, `traverse_many()`, `render_graph_context()` |
-| sessions | `session()` |
-| task memory | `start_task()`, `record_event()`, `record_turn()`, `list_events()`, `create_checkpoint()`, `build_context()`, `process_memory_jobs()`, task status APIs |
-| long input | `record_long_input()`, `build_long_input_context()` |
-| LLM extraction | `add_conversation()` when an LLM provider is configured |
-| health | `health_check()` |
-
-Use this example when you want to see the API surface in one place.
-
-## `examples/long_input_usage.py`
-
-Run:
-
-```bash
-python examples/long_input_usage.py
-```
-
-This example records a large source input, chunks it, creates anchored memories,
-and builds source-aware answer context.
-
-Important APIs:
-
-- `start_task()`
-- `record_long_input()`
-- `build_long_input_context()`
-- `trace_recall()`
-- `deep_search()`
-- `get_context_block()`
-- `build_context()`
-
-The pattern is useful for legal documents, specifications, research packets, and
-large task briefs. For production exact-document answers, store external source
-metadata such as page numbers or document IDs in the metadata you pass to
-`record_long_input()`.
-
-## `examples/chatbot.py`
-
-Configure OpenAI embeddings and chat first:
-
+### Option B: Cloud Provider (OpenAI)
+To enable LLM-backed features (like the Chatbot and Intelligent Recall):
 ```bash
 export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
 export ENGRAM_EMBEDDING_PROVIDER=openai
@@ -89,136 +35,113 @@ export ENGRAM_EMBEDDING_DIMENSION=1536
 export ENGRAM_LLM_PROVIDER=openai
 export ENGRAM_LLM_MODEL=gpt-4o-mini
 export ENGRAM_OPENAI_API_KEY=sk-...
+
+pip install -e ".[dev,examples,openai]"
 ```
 
-Run:
+---
 
-```bash
-python examples/chatbot.py
-```
+## 1. `examples/basic_usage.py`
 
-The chatbot is a real OpenAI-backed chat loop using Engram memory. It fails fast
-without `ENGRAM_OPENAI_API_KEY`, builds Engram context before every model call,
-records every turn, and queues memory jobs so later replies can recall durable
-facts from the conversation.
+**Goal:** A comprehensive, broad walkthrough of the entire Engram API surface.  
+**Command:** `python examples/basic_usage.py`
 
-By default the chatbot uses operator recall with inline memory processing:
+This script executes a series of isolated demonstrations. Use this as your primary reference when you need to see exactly how a specific API is called.
 
-```bash
-export ENGRAM_CHATBOT_RECALL_MODE=operator
-export ENGRAM_CHATBOT_MEMORY_JOBS=inline
-export ENGRAM_CHATBOT_RERANK=auto
-```
+| Domain | Demonstrated APIs |
+|--------|-------------------|
+| **Lifecycle** | `connect()`, `close()`, Async Context Manager (`async with`) |
+| **Fact CRUD** | `add()`, `add_batch()`, `update()`, `revise()`, `get_current()`, `get_lineage()`, `forget()`, `purge()` |
+| **Search** | `search()`, `deep_search()`, `recall_critical()`, `trace_recall()` |
+| **Context** | `get_context_block()`, `get_memories()` |
+| **Graph** | `relate()`, `traverse()`, `traverse_many()`, `render_graph_context()` |
+| **Task State** | `start_task()`, `record_event()`, `record_turn()`, `create_checkpoint()`, `build_context()` |
+| **Background** | `process_memory_jobs()` |
 
-`operator` routes the turn through `engram.recall(..., compose_answer=False)` to
-get intent and source-backed evidence, then uses the regular OpenAI chat path to
-write the final answer from recall evidence, active memory context, and the
-memory history timeline. After the reply, inline memory processing stores new
-facts so they are available to the next turn.
+---
 
-For lower latency, switch to `fast` mode:
+## 2. `examples/long_input_usage.py`
 
-```bash
-export ENGRAM_CHATBOT_RECALL_MODE=fast
-export ENGRAM_CHATBOT_MEMORY_JOBS=deferred
-```
+**Goal:** Demonstrates the pattern for processing massive documents securely.  
+**Command:** `python examples/long_input_usage.py`
 
-`fast` does one embedding-backed context lookup plus deterministic critical
-memory recall before the OpenAI chat call. With deferred jobs, run
-`run_memory_worker()` or call `process_memory_jobs()` from a separate process to
-ingest new facts.
+This script ingests a large block of text, chunks it using heading and token boundaries, creates source-anchored `Artifact` events, extracts searchable facts, and then answers questions by tracing back to the exact source chunks.
 
-`ENGRAM_CHATBOT_RERANK=auto` keeps reranking off in `fast` mode and enables it
-in `deep` and `debug` mode. Set `ENGRAM_CHATBOT_RERANK=true` to force reranking
-for every mode, or `false` to disable it everywhere.
+> [!TIP]
+> This pattern is highly recommended for **Legal, Medical, and Financial domains**, where you must be able to prove exactly which paragraph of a 100-page document an LLM used to make a decision.
 
-For high-recall evaluation questions, enable the broader prompt context:
+**Key APIs Showcased:**
+- `record_long_input()`
+- `build_long_input_context()`
 
-```bash
-export ENGRAM_CHATBOT_RECALL_MODE=deep
-```
+---
 
-For recall debugging, include `trace_recall()` metadata in the prompt and stored
-turn metadata:
+## 3. `examples/chatbot.py`
 
-```bash
-export ENGRAM_CHATBOT_RECALL_MODE=debug
-```
+**Goal:** A fully functional, terminal-based AI assistant backed by Engram memory.  
+**Command:** `python examples/chatbot.py` *(Requires OpenAI setup)*
 
-`deep` and `debug` include a bounded recent-memory safety net plus smaller
-hard-constraint and query-specific attention blocks in the prompt. They also
-rerank retrieved candidates when `ENGRAM_CHATBOT_RERANK=auto`. Tune the safety
-net with:
+This is a real chat loop. It builds prompt context before every LLM call, records every turn to the event ledger, and queues background memory jobs so that the agent dynamically "remembers" facts you told it earlier in the conversation.
 
-```bash
-export ENGRAM_CHATBOT_BROAD_MEMORY_LIMIT=60
-export ENGRAM_CHATBOT_BROAD_MEMORY_CHARS=3600
-```
+### Chatbot Recall Modes
 
-| Capability | API |
-|------------|-----|
-| real chat response | `engram.llm.complete_full()` |
-| operator recall evidence | `recall(..., compose_answer=False)` |
-| fast prompt memory | `recall_critical()`, `get_context_block()` |
-| deep/debug prompt memory | `deep_search()`, `list_recent()`, hard-constraint and query-specific attention blocks, `build_context()` |
-| recall debugging | `trace_recall()` |
-| persistent facts | `add()`, `revise()`, `get_history()`, `forget()`, `purge()`, `list_recent()` |
-| search and reinforcement | `search()`, `reinforce()` |
-| durable conversation ledger | `record_turn()` |
-| background derivation | `process_memory_jobs()`, `run_memory_worker()` |
-| resumable task/session state | `session()`, `start_task()`, `get_task()`, `list_tasks()` |
+You can control how the chatbot pulls memory by exporting `ENGRAM_CHATBOT_RECALL_MODE`.
 
-Chat commands:
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `operator` *(Default)* | Routes the turn through `engram.recall()`. The LLM classifies user intent (current vs history vs event) and maps temporal filters before retrieving evidence. | Production default. Balances intelligence and latency. |
+| `fast` | Single embedding-backed lookup + deterministic critical pin lookup. No pre-LLM routing. | Ultra-low latency requirements. |
+| `deep` | High-recall evaluation. Injects bounded recent-memory safety nets, hard constraints, and `deep_search()` RRF fusion. | Complex reasoning or open-ended aggregation questions. |
+| `debug` | Same as `deep`, but includes `trace_recall()` metadata directly in the terminal output. | Debugging why a specific memory was (or wasn't) injected. |
 
-| Command | Behavior |
-|---------|----------|
-| `/remember <fact>` | store a durable fact immediately |
-| `/revise <memory_id> <fact>` | create a new active revision |
-| `/lineage <memory_id>` | show current head and revision history |
-| `/history [active\|limit\|memory_id]` | show memory add/update timeline |
-| `/memories` | show recent stored facts |
-| `/search <query>` | run hybrid search and reinforce hits |
-| `/trace <query>` | run `trace_recall()` |
-| `/context <query>` | render the memory and task context used for prompting |
-| `/task` | show the resumable task/session backing this chat |
-| `/forget <memory_id>` | delete one memory |
-| `/clear` | purge memories for the configured agent/user |
-| `/help` | show command help |
-| `/quit` | exit |
+### Memory Processing Modes
 
-## How The Chatbot Builds Context
+| Mode | Behavior |
+|------|----------|
+| `inline` *(Default)* | Blocks the chat loop while background facts are derived. Slower, but facts are instantly available on the next turn. |
+| `deferred` | `fast` mode only. Queues the memory job, but requires you to run `run_memory_worker()` in a separate terminal process to actually extract the facts. |
 
-In `fast` mode the chatbot combines:
+### Built-in Chat Commands
 
-1. system prompt
-2. `recall_critical()` deterministic critical memories
-3. `get_context_block()` memory block
-4. recent in-process sliding window
-5. current user message
+Inside the terminal, you can type special commands to interact directly with the memory layer:
 
-In `deep` mode it also adds `deep_search()`, bounded `list_recent()` safety-net
-memory, hard-constraint attention, query-specific attention, and `build_context()`
-task memory. In `debug` mode it adds `trace_recall()` on top of `deep`.
+| Command | Action |
+|---------|--------|
+| `/remember <fact>` | Force-store a semantic fact bypassing background derivation. |
+| `/revise <id> <fact>` | Force-update a memory, creating a new lineage revision. |
+| `/history [limit]` | View the chronological timeline of your memory updates. |
+| `/memories` | List all recent stored facts for this session. |
+| `/trace <query>` | Run the observability trace to see what would be recalled. |
+| `/context <query>` | Render the exact prompt block the LLM would see. |
+| `/forget <id>` | Soft-delete a memory. |
 
-That mix keeps the prompt useful for short sessions, long sessions, interrupted
-work, and resumed tasks.
+---
 
-## Minimal Pattern To Copy
+## Minimal Integration Pattern
+
+If you are building your own application and want to bypass the heavy examples, this is the absolute minimum code required to implement a robust memory loop:
 
 ```python
 from engram import Engram
 
-
 async def handle_message(task_id: str, message: str) -> str:
+    # 1. Connect
     async with Engram(memory_policy="default") as engram:
+        
+        # 2. Build context from existing memory/checkpoints
         context = await engram.build_context(task_id, query=message)
-        response = await call_your_llm(context.text, message)
+        
+        # 3. Call your standard LLM pipeline
+        response = await call_your_llm(system_prompt=context.text, user_input=message)
+        
+        # 4. Commit the turn to the immutable ledger
         await engram.record_turn(task_id, message, response)
+        
+        # 5. Kick off derivation (extract facts from the turn)
         await engram.process_memory_jobs(limit=10)
+        
         return response
 ```
 
-For production, split this into two processes:
-
-- API/chat process: build context, call the model, record turns
-- worker process: run `run_memory_worker()` and handle memory derivation
+> [!IMPORTANT]
+> **Scaling for Production:** In a real-world web application, you should **remove** Step 5 (`process_memory_jobs()`) from the user's request path. Instead, run Engram's `run_memory_worker()` in a completely separate background process (like Celery or a continuous Docker service) to process the queued memory jobs asynchronously without blocking the user's API response.
