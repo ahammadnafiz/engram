@@ -232,6 +232,10 @@ class TestAddConversationSummary:
     def _wire(self, eg, stored_summary):
         from engram.llm.service import ExtractionResult
 
+        # Pin the summary style so the test is hermetic and does not depend on
+        # an ambient .env (which may set summary_style=structured locally while
+        # CI defaults to concise).
+        eg._settings.summary_style = "structured"
         eg._memory_store.search = AsyncMock(return_value=[])
         eg._sessions.get = AsyncMock(return_value=session(stored_summary))
         eg._llm.process_for_memory = AsyncMock(

@@ -335,6 +335,9 @@ class EngramSettings(BaseSettings):
         elif self.llm_provider in ("anthropic", "claude"):
             if self.anthropic_api_key:
                 kwargs["api_key"] = self.anthropic_api_key
+        elif self.llm_provider in ("gemini", "google", "google-genai"):
+            if self.gemini_api_key:
+                kwargs["api_key"] = self.gemini_api_key
         elif self.llm_provider == "groq":
             if self.groq_api_key:
                 kwargs["api_key"] = self.groq_api_key

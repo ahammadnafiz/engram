@@ -208,6 +208,7 @@ class TestLLMProviderRegistry:
 
         assert "openai" in llm_registry._providers
         assert "anthropic" in llm_registry._providers
+        assert "gemini" in llm_registry._providers
         assert "ollama" in llm_registry._providers
         assert "groq" in llm_registry._providers
 
@@ -218,6 +219,70 @@ class TestLLMProviderRegistry:
         # "gpt" should be alias for openai
         provider_class = llm_registry.get("gpt")
         assert provider_class is not None
+
+    def test_gemini_aliases_resolve(self) -> None:
+        """Test that gemini aliases resolve to the Gemini provider."""
+        from engram.providers.llm import llm_registry
+        from engram.providers.llm.builtin import GeminiLLMProvider
+
+        for name in ("gemini", "google", "google-genai"):
+            assert llm_registry.get(name) is GeminiLLMProvider
+
+
+class TestGeminiLLMProvider:
+    """Tests for Gemini LLM provider (mocked google-genai client)."""
+
+    def test_missing_api_key_raises(self) -> None:
+        from engram.core.exceptions import ConfigurationError
+        from engram.providers.llm.builtin import GeminiLLMProvider
+
+        with pytest.raises(ConfigurationError):
+            GeminiLLMProvider(api_key=None)
+
+    @pytest.mark.asyncio
+    async def test_complete_splits_system_and_contents(self) -> None:
+        """System messages map to system_instruction; turns map to contents."""
+        from engram.providers.llm.builtin import GeminiLLMProvider
+
+        captured: dict[str, object] = {}
+
+        async def fake_generate_content(*, model, contents, config):
+            captured["model"] = model
+            captured["contents"] = contents
+            captured["config"] = config
+            resp = MagicMock()
+            resp.text = "hi there"
+            resp.candidates = [MagicMock(finish_reason="STOP")]
+            resp.usage_metadata = MagicMock(
+                prompt_token_count=10,
+                candidates_token_count=3,
+                total_token_count=13,
+            )
+            return resp
+
+        provider = GeminiLLMProvider(api_key="test-key", model="gemini-3.5-flash")
+        provider._client.aio.models.generate_content = fake_generate_content
+
+        result = await provider.complete(
+            [
+                {"role": "system", "content": "be brief"},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "user", "content": "again"},
+            ],
+            max_tokens=128,
+            temperature=0.2,
+        )
+
+        assert result.content == "hi there"
+        assert result.model == "gemini-3.5-flash"
+        assert result.usage["total_tokens"] == 13
+        # 3 non-system turns become contents; system text is not a content.
+        assert len(captured["contents"]) == 3
+        roles = [c.role for c in captured["contents"]]
+        assert roles == ["user", "model", "user"]
+        assert captured["config"].system_instruction == "be brief"
+        assert captured["config"].max_output_tokens == 128
 
 
 class TestProviderRegistryGeneric:

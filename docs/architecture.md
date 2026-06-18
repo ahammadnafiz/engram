@@ -157,7 +157,7 @@ config:
 ---
 flowchart TD
     %% Input
-    Start{{<b>Engram.connect()</b>}}
+    Start{{"<b>Engram.connect()</b>"}}
 
     subgraph PREP ["🔵 1 · Preparation"]
         direction TB
@@ -205,7 +205,7 @@ config:
 ---
 flowchart TD
     %% Input
-    Input{{<b>engram.add()</b><br/>fact, context, metadata}}
+    Input{{"<b>engram.add()</b><br/>fact, context, metadata"}}
 
     subgraph POLICY ["🔵 1 · Policy Check"]
         direction TB
@@ -257,12 +257,12 @@ config:
 ---
 flowchart TD
     %% Input
-    Input{{<b>trace_recall(query)</b>}}
+    Input{{"<b>trace_recall(query)</b>"}}
 
     subgraph RETRIEVAL ["🔵 1 · Retrieval Pipelines"]
         direction TB
-        Crit([<b>recall_critical()</b><br/>metadata lookup])
-        Srch([<b>deep_search() / search()</b><br/>vector + keyword + decay])
+        Crit(["<b>recall_critical()</b><br/>metadata lookup"])
+        Srch(["<b>deep_search() / search()</b><br/>vector + keyword + decay"])
         Hist(List superseded history)
     end
 
@@ -312,18 +312,18 @@ flowchart TD
     %% Stages
     subgraph SEARCH ["🔵 1 · Search"]
         direction TB
-        Deep([<b>deep_search()</b><br/>multi-query retrieval])
+        Deep(["<b>deep_search()</b><br/>multi-query retrieval"])
     end
 
     subgraph EXPAND ["🟡 2 · Expand Context"]
         direction TB
-        Mem([<b>get_memories()</b><br/>neighboring session turns]) -->
-        Ctx([<b>get_context_block()</b><br/>budgeted prompt block])
+        Mem(["<b>get_memories()</b><br/>neighboring session turns"]) -->
+        Ctx(["<b>get_context_block()</b><br/>budgeted prompt block"])
     end
 
     subgraph READ ["🟣 3 · Machine Reading"]
         direction TB
-        LLM([<b>LLM.complete()</b><br/>answer from evidence])
+        LLM(["<b>LLM.complete()</b><br/>answer from evidence"])
     end
 
     %% Flow
@@ -357,25 +357,25 @@ config:
     tertiaryColor: '#e8f5e9'
 ---
 flowchart TD
-    Start{{<b>start_task(goal)</b>}}
+    Start{{"<b>start_task(goal)</b>"}}
 
     subgraph LEDGER ["🔵 1 · Event Ledger"]
         direction TB
-        Turn([<b>record_turn()</b><br/>user, assistant, tools]) -->
+        Turn(["<b>record_turn()</b><br/>user, assistant, tools"]) -->
         App(agent_events append) -->
         Enq(Enqueue turn_ingest)
     end
 
     subgraph DERIVE ["🟡 2 · Background Derivation"]
         direction TB
-        Work([<b>process_memory_jobs()</b>]) -->
+        Work(["<b>process_memory_jobs()</b>"]) -->
         Fact(Fact extraction via LLM)
     end
 
     subgraph STATE ["🟢 3 · Context Assembly"]
         direction TB
-        Ckpt([<b>create_checkpoint()</b>]) -->
-        Ctx([<b>build_context()</b>])
+        Ckpt(["<b>create_checkpoint()</b>"]) -->
+        Ctx(["<b>build_context()</b>"])
     end
 
     %% Flow
@@ -412,7 +412,7 @@ config:
     secondaryColor: '#fffde7'
 ---
 flowchart TD
-    Input{{<b>record_long_input()</b><br/>text payload}}
+    Input{{"<b>record_long_input()</b><br/>text payload"}}
 
     subgraph CHUNKING ["🔵 1 · Chunking"]
         direction TB

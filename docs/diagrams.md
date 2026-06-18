@@ -157,7 +157,7 @@ config:
     secondaryColor: '#f3e5f5'
 ---
 flowchart TD
-    Q{{<b>trace_recall(query)</b>}}
+    Q{{"<b>trace_recall(query)</b>"}}
     
     subgraph RETRIEVAL ["🔵 1 · Retrieval Pipelines"]
         direction TB

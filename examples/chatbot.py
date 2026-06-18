@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Real Engram-backed chatbot using OpenAI embeddings and chat completions.
+"""Real Engram-backed chatbot: on-device embeddings + Gemini for responses.
+
+This is the optimized reference stack — free, on-device sentence-transformers
+embeddings (`all-MiniLM-L6-v2`, 384-d) for retrieval and Google's
+`gemini-3.5-flash` for answer generation, driven by the same composer rules
+used in the Engram LongMemEval benchmark.
 
 Run:
     export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
-    export ENGRAM_EMBEDDING_PROVIDER=openai
-    export ENGRAM_EMBEDDING_MODEL=text-embedding-3-small
-    export ENGRAM_EMBEDDING_DIMENSION=1536
-    export ENGRAM_LLM_PROVIDER=openai
-    export ENGRAM_LLM_MODEL=gpt-4o-mini
-    export ENGRAM_OPENAI_API_KEY=sk-...
+    export ENGRAM_GEMINI_API_KEY=...   # or GEMINI_API_KEY
     python examples/chatbot.py
 
-If you have EMBEDDING_PROVIDER=openai from an older shell snippet, this script
-maps it to ENGRAM_EMBEDDING_PROVIDER for convenience.
+The embedding/LLM stack defaults are applied below and can be overridden with
+the standard ENGRAM_* environment variables (e.g. ENGRAM_LLM_MODEL). A bare
+GEMINI_API_KEY (the google-genai convention) is mapped to ENGRAM_GEMINI_API_KEY
+for convenience.
 
 Non-interactive checks:
     python examples/chatbot.py --once "What do you remember about me?"
@@ -28,6 +30,7 @@ import os
 import shutil
 import sys
 import textwrap
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -35,20 +38,21 @@ from dotenv import load_dotenv
 
 from engram.core.exceptions import DatabaseConnectionError
 
-embedding_provider_alias = os.environ.get("EMBEDDING_PROVIDER")
-openai_api_key_alias = os.environ.get("OPENAI_API_KEY")
+gemini_api_key_alias = os.environ.get("GEMINI_API_KEY")
 load_dotenv(Path(__file__).parent.parent / ".env", override=False)
-embedding_provider_alias = (
-    os.environ.get("EMBEDDING_PROVIDER") or embedding_provider_alias
-)
-openai_api_key_alias = os.environ.get("OPENAI_API_KEY") or openai_api_key_alias
+gemini_api_key_alias = os.environ.get("GEMINI_API_KEY") or gemini_api_key_alias
 
-if embedding_provider_alias:
-    os.environ["ENGRAM_EMBEDDING_PROVIDER"] = embedding_provider_alias
-if openai_api_key_alias and "ENGRAM_OPENAI_API_KEY" not in os.environ:
-    os.environ["ENGRAM_OPENAI_API_KEY"] = openai_api_key_alias
-if os.environ.get("ENGRAM_OPENAI_API_KEY") and "ENGRAM_LLM_PROVIDER" not in os.environ:
-    os.environ["ENGRAM_LLM_PROVIDER"] = "openai"
+# Map the bare google-genai convention key onto Engram's namespaced variable.
+if gemini_api_key_alias and "ENGRAM_GEMINI_API_KEY" not in os.environ:
+    os.environ["ENGRAM_GEMINI_API_KEY"] = gemini_api_key_alias
+
+# Optimized default stack: free on-device embeddings + Gemini for responses.
+# setdefault keeps any value already supplied via the environment or .env.
+os.environ.setdefault("ENGRAM_EMBEDDING_PROVIDER", "sentence-transformers")
+os.environ.setdefault("ENGRAM_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+os.environ.setdefault("ENGRAM_EMBEDDING_DIMENSION", "384")
+os.environ.setdefault("ENGRAM_LLM_PROVIDER", "gemini")
+os.environ.setdefault("ENGRAM_LLM_MODEL", "gemini-3.5-flash")
 
 AGENT_ID = os.environ.get("ENGRAM_CHATBOT_AGENT_ID", "engram-chatbot")
 USER_ID = os.environ.get("ENGRAM_CHATBOT_USER_ID", "default-user")
@@ -69,24 +73,41 @@ COLOR_ENABLED = (
     and os.environ.get("TERM") != "dumb"
 )
 
-SYSTEM_PROMPT = """You are a helpful assistant with persistent Engram memory.
-Use the supplied memory and task context as the only source for remembered facts.
-If the context does not contain something, say that you do not have it in memory.
-When the user tells you a durable preference, profile fact, project detail,
-decision, or instruction, acknowledge it naturally; Engram will store it after
-the turn. Answer every part of the user's question. For "why" questions, include
-the supporting memory detail. When correcting an outdated or false value, name
-both the outdated value and the correct value. Keep answers concise and directly
-useful.
+SYSTEM_PROMPT = """You are a helpful assistant with persistent Engram memory. Today's date is {today}. Use the supplied memory and task context as the only source for remembered facts. If the context does not contain something, say that you do not have it in memory. When the user tells you a durable preference, profile fact, project detail, decision, or instruction, acknowledge it naturally; Engram will store it after the turn.
 
-For list or aggregation questions, enumerate every relevant matching memory in
-the supplied context instead of choosing only the first examples. For planning
-food, restaurants, travel, or meetings, include any remembered allergies,
-avoidances, hard constraints, and preferences that apply. If the user asks for
-an owner, approval, threshold, date, document, or other named field, include that
-field explicitly when it exists in memory. If
-<engram_query_specific_must_use> is non-empty, every line in it is mandatory for
-the current answer."""
+Answering rules (ported from the Engram LongMemEval benchmark composer):
+
+- Compute when the data exists. If memory holds the numbers needed (ages, prices, dates to diff), do the arithmetic instead of refusing — even when the facts are scattered across different conversations. Compute every relative time expression relative to today's date above.
+
+- Respect avoidances. If memory indicates the user wants to avoid something (allergy, dislike, hard constraint), your answer must NOT contain it — not as a primary, secondary, or fallback suggestion.
+
+- Match the exact entity. Pay close attention to the specific entity/variant/role in the question. If the question asks about one variant and memory only mentions a DIFFERENT one (e.g. "electric" vs "acoustic guitar", "Sales Manager" vs "Senior Sales Engineer"), do not treat them as the same — say you do not have that information.
+
+- Enumerate everything for list / aggregation / counting questions. List every relevant memory rather than the first few, and scan the full context twice because matching items are commonly scattered far apart. Count items in a single memory separately, and only count completed actions (past tense), not plans.
+
+- Most recent wins. For conflicting values of the same fact, use the most recent memory; for "what was it before / originally" questions, use the older value. Memories about different people or contexts are not conflicting.
+
+- ACTIVE vs SUPERSEDED. Memories tagged [ACTIVE] are the truth now; [SUPERSEDED] memories are old values that were overwritten. Never present a superseded value as the current answer — use it only for "before / originally" questions.
+
+- Match context. Before using a memory's value, verify it applies to the SAME context as the question (a "while traveling" routine is not a regular weekday routine); prefer the more specific memory that matches.
+
+When correcting an outdated or false value, name both the outdated value and the correct value. For "why" questions, include the supporting memory detail. Keep answers concise and directly useful. If <engram_query_specific_must_use> is non-empty, every line in it is mandatory for the current answer.
+
+Reason step by step inside <mem_thinking>...</mem_thinking> tags first: list every relevant memory, do any counting / temporal / cross-topic computation, check avoidances and context, then state your conclusion. The user only sees text OUTSIDE the <mem_thinking> tags, so put your final answer there."""
+
+_THINKING_CLOSE = "</mem_thinking>"
+
+
+def build_system_prompt() -> str:
+    return SYSTEM_PROMPT.format(today=date.today().isoformat())
+
+
+def strip_thinking(text: str) -> str:
+    """Drop the hidden <mem_thinking> scratchpad, keeping the final answer."""
+    lowered = text.lower()
+    if _THINKING_CLOSE in lowered:
+        return text[lowered.rfind(_THINKING_CLOSE) + len(_THINKING_CLOSE) :].strip()
+    return text.strip()
 
 
 def preview(text: str, limit: int = 180) -> str:
@@ -148,7 +169,7 @@ def rule(label: str = "") -> str:
 def print_header() -> None:
     print()
     print(rule("engram"))
-    print(f"{bold('Engram Memory Chat')} | {dim('persistent OpenAI-backed recall')}")
+    print(f"{bold('Engram Memory Chat')} | {dim('persistent Gemini-backed recall')}")
     print(dim("Type a message to chat, or /help for commands."))
 
 
@@ -201,11 +222,7 @@ def prompt_text() -> str:
     return f"{accent('you')} {dim('> ')}" if COLOR_ENABLED else "you> "
 
 
-def require_real_openai_config() -> None:
-    missing = []
-    if not os.environ.get("ENGRAM_OPENAI_API_KEY"):
-        missing.append("ENGRAM_OPENAI_API_KEY")
-
+def require_real_config() -> None:
     if RECALL_MODE not in VALID_RECALL_MODES:
         raise SystemExit(
             "Invalid ENGRAM_CHATBOT_RECALL_MODE. Use 'operator', 'fast', "
@@ -220,18 +237,11 @@ def require_real_openai_config() -> None:
             "Invalid ENGRAM_CHATBOT_RERANK. Use 'auto', 'true', or 'false'."
         )
 
-    provider = os.environ.get("ENGRAM_EMBEDDING_PROVIDER", "openai")
-    if provider != "openai":
+    if not os.environ.get("ENGRAM_GEMINI_API_KEY"):
         raise SystemExit(
-            "examples/chatbot.py is configured as a real OpenAI-backed chatbot. "
-            f"Set ENGRAM_EMBEDDING_PROVIDER=openai, got {provider!r}."
-        )
-
-    if missing:
-        raise SystemExit(
-            "Missing required environment variable(s): "
-            + ", ".join(missing)
-            + "\nSet OpenAI embeddings/chat config before running the chatbot."
+            "Missing required environment variable: ENGRAM_GEMINI_API_KEY "
+            "(or GEMINI_API_KEY).\nGet a key at https://aistudio.google.com/apikey "
+            "and set it before running the chatbot."
         )
 
 
@@ -244,7 +254,7 @@ class MemoryChatbot:
         self.history: list[dict[str, str]] = []
 
     async def connect(self) -> None:
-        require_real_openai_config()
+        require_real_config()
 
         from engram import Engram
 
@@ -252,8 +262,8 @@ class MemoryChatbot:
         await self.engram.connect()
         if self.engram.llm is None:
             raise RuntimeError(
-                "LLM provider is disabled. Set ENGRAM_LLM_PROVIDER=openai and "
-                "ENGRAM_OPENAI_API_KEY before running examples/chatbot.py."
+                "LLM provider is disabled. Set ENGRAM_LLM_PROVIDER=gemini and "
+                "ENGRAM_GEMINI_API_KEY before running examples/chatbot.py."
             )
 
         await self._resume_or_start_task()
@@ -273,15 +283,17 @@ class MemoryChatbot:
                 ("session", self.session_id),
                 (
                     "embedding_provider",
-                    os.environ.get("ENGRAM_EMBEDDING_PROVIDER", "openai"),
+                    os.environ.get(
+                        "ENGRAM_EMBEDDING_PROVIDER", "sentence-transformers"
+                    ),
                 ),
                 (
                     "embedding_model",
-                    os.environ.get("ENGRAM_EMBEDDING_MODEL", "text-embedding-3-small"),
+                    os.environ.get("ENGRAM_EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
                 ),
-                ("embedding_dim", os.environ.get("ENGRAM_EMBEDDING_DIMENSION", "auto")),
-                ("llm_provider", os.environ.get("ENGRAM_LLM_PROVIDER", "openai")),
-                ("llm_model", os.environ.get("ENGRAM_LLM_MODEL", "gpt-4o-mini")),
+                ("embedding_dim", os.environ.get("ENGRAM_EMBEDDING_DIMENSION", "384")),
+                ("llm_provider", os.environ.get("ENGRAM_LLM_PROVIDER", "gemini")),
+                ("llm_model", os.environ.get("ENGRAM_LLM_MODEL", "gemini-3.5-flash")),
                 ("recall_mode", RECALL_MODE),
                 ("memory_jobs", MEMORY_JOBS_MODE),
                 ("rerank", self._rerank_enabled()),
@@ -314,7 +326,7 @@ class MemoryChatbot:
         session = await self._session_context.__aenter__()
         self.session_id = session.session_id
         task = await self.engram.start_task(
-            "Run a real OpenAI-backed chatbot with persistent Engram memory",
+            "Run a real Gemini-backed chatbot with persistent Engram memory",
             AGENT_ID,
             user_id=USER_ID,
             session_id=self.session_id,
@@ -346,11 +358,14 @@ class MemoryChatbot:
             messages, recall_metadata = await self._build_prompt_messages(message)
             llm_response = await self.engram.llm.complete_full(
                 messages,
-                max_tokens=700,
+                max_tokens=1200,
                 temperature=0.4,
             )
             response = llm_response.content.strip()
             llm_model = llm_response.model
+
+        # Drop the hidden <mem_thinking> scratchpad before storing/printing.
+        response = strip_thinking(response)
 
         metadata = {
             "application": "examples/chatbot.py",
@@ -422,7 +437,7 @@ class MemoryChatbot:
         )
         llm_response = await self.engram.llm.complete_full(
             messages,
-            max_tokens=700,
+            max_tokens=1200,
             temperature=0.4,
         )
         metadata.update(chat_metadata)
@@ -512,7 +527,7 @@ class MemoryChatbot:
         )
         history_block, history_count = await self._build_history_block()
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": build_system_prompt()},
             {
                 "role": "system",
                 "content": (
@@ -627,7 +642,7 @@ class MemoryChatbot:
             )
 
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": build_system_prompt()},
             {
                 "role": "system",
                 "content": (
@@ -1146,7 +1161,7 @@ def print_help() -> None:
     print()
     print(
         dim(
-            "Plain text runs: recall router -> OpenAI chat when needed -> "
+            "Plain text runs: recall router -> Gemini chat when needed -> "
             "record_turn -> memory jobs."
         )
     )
@@ -1155,7 +1170,7 @@ def print_help() -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a real OpenAI-backed Engram memory chatbot."
+        description="Run a real Gemini-backed Engram memory chatbot."
     )
     parser.add_argument(
         "--once",
@@ -1314,7 +1329,7 @@ async def main(argv: list[str] | None = None) -> None:
                     break
             else:
                 if COLOR_ENABLED:
-                    print_notice("recalling memory and calling OpenAI")
+                    print_notice("recalling memory and calling Gemini")
                 response = await bot.reply(line)
                 print_response(response)
     finally:

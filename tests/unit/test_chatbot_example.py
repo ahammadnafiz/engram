@@ -188,17 +188,37 @@ def test_recall_mode_default_is_operator(monkeypatch):
     assert module.RECALL_MODE == "operator"
 
 
-def test_standard_openai_key_maps_to_engram_key(monkeypatch):
+def test_standard_gemini_key_maps_to_engram_key(monkeypatch):
     def fake_load_dotenv(*_args, **_kwargs):
         return False
 
-    monkeypatch.delenv("ENGRAM_OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.delenv("ENGRAM_GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setattr("dotenv.load_dotenv", fake_load_dotenv)
 
     load_chatbot_module()
 
-    assert os.environ["ENGRAM_OPENAI_API_KEY"] == "test-key"
+    assert os.environ["ENGRAM_GEMINI_API_KEY"] == "test-key"
+
+
+def test_default_stack_is_local_embeddings_and_gemini(monkeypatch):
+    for var in (
+        "ENGRAM_EMBEDDING_PROVIDER",
+        "ENGRAM_EMBEDDING_MODEL",
+        "ENGRAM_EMBEDDING_DIMENSION",
+        "ENGRAM_LLM_PROVIDER",
+        "ENGRAM_LLM_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *_a, **_k: False)
+
+    load_chatbot_module()
+
+    assert os.environ["ENGRAM_EMBEDDING_PROVIDER"] == "sentence-transformers"
+    assert os.environ["ENGRAM_EMBEDDING_MODEL"] == "all-MiniLM-L6-v2"
+    assert os.environ["ENGRAM_EMBEDDING_DIMENSION"] == "384"
+    assert os.environ["ENGRAM_LLM_PROVIDER"] == "gemini"
+    assert os.environ["ENGRAM_LLM_MODEL"] == "gemini-3.5-flash"
 
 
 @pytest.mark.asyncio

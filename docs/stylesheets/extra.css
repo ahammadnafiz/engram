@@ -320,6 +320,12 @@
   padding: 1rem;
 }
 
+/* Diagrams are authored with light fills and dark text/edges, so a dark card
+   would hide their labels and connectors. Keep the canvas light in dark mode. */
+[data-md-color-scheme="slate"] .md-typeset .mermaid {
+  background: #ffffff;
+}
+
 .md-typeset .mermaid svg {
   display: block;
   height: auto;

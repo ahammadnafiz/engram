@@ -1,10 +1,4 @@
 (function () {
-  function mermaidTheme() {
-    return document.body.getAttribute("data-md-color-scheme") === "slate"
-      ? "dark"
-      : "default";
-  }
-
   function resetDiagram(node) {
     if (!node.dataset.mermaidSource) {
       node.dataset.mermaidSource = node.textContent;
@@ -26,7 +20,9 @@
 
     mermaid.initialize({
       startOnLoad: false,
-      theme: mermaidTheme(),
+      // Diagrams ship light fills + dark text and sit on a light card in both
+      // color schemes (see extra.css), so always render with a light theme.
+      theme: "default",
       securityLevel: "strict",
       fontFamily: "Inter, system-ui, sans-serif",
       flowchart: {
@@ -57,10 +53,4 @@
   } else {
     document.addEventListener("DOMContentLoaded", scheduleRender);
   }
-
-  const observer = new MutationObserver(scheduleRender);
-  observer.observe(document.body, {
-    attributes: true,
-    attributeFilter: ["data-md-color-scheme"],
-  });
 })();

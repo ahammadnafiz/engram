@@ -7,6 +7,34 @@ This guide provides a cheat sheet of useful commands for local development, data
 
 ---
 
+## Make Targets
+
+The repository ships a `Makefile` that wraps the most common workflows below. Run `make help` to list everything. The raw commands these wrap are documented in the sections that follow.
+
+| Target | What it does |
+|--------|--------------|
+| `make quickstart` | Start the database and install dev dependencies in one step |
+| `make docker-up` | Start PostgreSQL (auto-detects port via `scripts/docker-setup.sh`) |
+| `make docker-down` | Stop PostgreSQL |
+| `make docker-reset` | Reset the database (delete all data) |
+| `make docker-status` | Show container status |
+| `make docker-logs` | Follow container logs |
+| `make docker-shell` | Open a `psql` shell |
+| `make install` | Install the package in editable mode |
+| `make dev` | Install with `dev` + `all` extras and set up pre-commit hooks |
+| `make test` | Run unit tests |
+| `make test-cov` | Run unit tests with a coverage report |
+| `make test-integration` | Run integration tests (requires a running database) |
+| `make lint` | Run the Ruff linter |
+| `make format` | Apply Ruff fixes and formatting |
+| `make type-check` | Run mypy |
+| `make clean` | Remove build, cache, and coverage artifacts |
+| `make build` | Build the distributable package |
+| `make docs` | Build the MkDocs site |
+| `make docs-serve` | Serve the docs locally with live reload |
+
+---
+
 ## 1. Docker & Infrastructure
 
 Manage the local PostgreSQL instance equipped with `pgvector` and `pg_trgm`:

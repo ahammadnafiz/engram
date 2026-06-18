@@ -446,6 +446,22 @@ docker compose down
 docker compose down -v
 ```
 
+## Development
+
+A `Makefile` wraps the common workflows. Run `make help` to list every target.
+
+```bash
+make quickstart   # start the database and install dev dependencies
+make dev          # install with dev + all extras and pre-commit hooks
+make test         # run unit tests
+make lint         # run the Ruff linter
+make format       # apply Ruff fixes and formatting
+make type-check   # run mypy
+make docs-serve   # serve the docs locally with live reload
+```
+
+See the [Operations guide](./docs/operations.md#make-targets) for the full target list.
+
 ## Documentation
 
 The docs in `docs/` are the source for the MkDocs site.

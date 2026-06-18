@@ -74,9 +74,9 @@ flowchart LR
     %% RETRIEVE Stage
     subgraph RETRIEVE ["🟡 2 · Retrieve (Engram APIs)"]
         direction TB
-        S([<b>engram.search()</b><br/>mode='hybrid', rerank=True]) --> 
+        S(["<b>engram.search()</b><br/>mode='hybrid', rerank=True"]) --> 
         D(Diversify across sessions<br/>→ 60-memory budget) --> 
-        R([<b>engram.recall()</b><br/>compose_answer=False])
+        R(["<b>engram.recall()</b><br/>compose_answer=False"])
         
         %% Link internal details to Search
         Details1([pgvector + full-text]) -. fused .-> S

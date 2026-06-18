@@ -3,6 +3,7 @@
 This module registers the built-in LLM providers:
 - openai: OpenAI GPT models
 - anthropic: Anthropic Claude models
+- gemini: Google Gemini models (google-genai SDK)
 - ollama: Ollama local LLMs
 - groq: Groq inference API
 """
@@ -290,6 +291,127 @@ class AnthropicLLMProvider(LLMProvider):
             ) from e
         except Exception as e:
             raise LLMProviderError(f"Failed to complete: {e}", model=self._model) from e
+
+
+# =============================================================================
+# Gemini Provider
+# =============================================================================
+
+
+@llm_registry.register("gemini", aliases=["google", "google-genai"])
+class GeminiLLMProvider(LLMProvider):
+    """LLM provider using Google's Gemini models via the google-genai SDK.
+
+    Supports current Gemini models (e.g. "gemini-3.5-flash").
+
+    Args:
+        api_key: Gemini API key (required).
+        model: Model name (default: "gemini-3.5-flash").
+
+    Example:
+        provider = GeminiLLMProvider(
+            api_key="...",
+            model="gemini-3.5-flash",
+        )
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gemini-3.5-flash",
+        **_kwargs: Any,
+    ) -> None:
+        if not api_key:
+            raise ConfigurationError(
+                "Gemini API key is required. Pass api_key parameter or set "
+                "ENGRAM_GEMINI_API_KEY environment variable."
+            )
+
+        try:
+            from google import genai
+            from google.genai import types
+
+            self._genai = genai
+            self._types = types
+        except ImportError as e:
+            raise ImportError(
+                "google-genai package not installed. Install with: "
+                "pip install google-genai"
+            ) from e
+
+        self._client = self._genai.Client(api_key=api_key)
+        self._model = model
+
+        logger.info(f"Initialized Gemini LLM provider: {model}")
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    async def complete(
+        self,
+        messages: list[LLMMessage] | list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        try:
+            dict_messages = _to_dict_messages(messages)
+
+            # Gemini takes system text separately and uses "model" (not
+            # "assistant") for its own turns. Concatenate all system messages
+            # into a single system instruction and map the rest to contents.
+            system_parts: list[str] = []
+            contents: list[Any] = []
+            for msg in dict_messages:
+                if msg["role"] == "system":
+                    system_parts.append(msg["content"])
+                    continue
+                gemini_role = "model" if msg["role"] == "assistant" else "user"
+                contents.append(
+                    self._types.Content(
+                        role=gemini_role,
+                        parts=[self._types.Part.from_text(text=msg["content"])],
+                    )
+                )
+
+            config_kwargs: dict[str, Any] = {}
+            if system_parts:
+                config_kwargs["system_instruction"] = "\n\n".join(system_parts)
+            if max_tokens is not None:
+                config_kwargs["max_output_tokens"] = max_tokens
+            if temperature is not None:
+                config_kwargs["temperature"] = temperature
+            config_kwargs.update(kwargs)
+
+            response = await self._client.aio.models.generate_content(
+                model=self._model,
+                contents=contents,
+                config=self._types.GenerateContentConfig(**config_kwargs),
+            )
+
+            usage = getattr(response, "usage_metadata", None)
+            finish_reason = None
+            if response.candidates:
+                finish_reason = getattr(response.candidates[0], "finish_reason", None)
+
+            return LLMResponse(
+                content=response.text or "",
+                model=self._model,
+                usage={
+                    "prompt_tokens": getattr(usage, "prompt_token_count", 0) or 0,
+                    "completion_tokens": getattr(usage, "candidates_token_count", 0)
+                    or 0,
+                    "total_tokens": getattr(usage, "total_token_count", 0) or 0,
+                }
+                if usage
+                else {},
+                finish_reason=str(finish_reason) if finish_reason else None,
+                raw=response,
+            )
+        except Exception as e:
+            raise LLMProviderError(f"Gemini API error: {e}", model=self._model) from e
 
 
 # =============================================================================

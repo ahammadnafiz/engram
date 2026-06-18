@@ -190,7 +190,31 @@ class SentenceTransformersEmbeddingProvider(EmbeddingProvider):
             ) from e
 
         logger.info(f"Loading Sentence Transformers model: {model}")
-        self._st_model: SentenceTransformer = SentenceTransformer(model, device=device)
+        # transformers (a sentence-transformers dependency) prints a noisy
+        # "LOAD REPORT" flagging the legacy embeddings.position_ids buffer as
+        # UNEXPECTED. It is benign — the buffer is unused and embeddings are
+        # identical — so quiet the report and weight-loading progress bar
+        # during the load, then restore the previous verbosity.
+        hf_logging: Any = None
+        prev_verbosity: int | None = None
+        try:
+            from transformers.utils import logging as _hf_logging
+
+            hf_logging = _hf_logging
+            prev_verbosity = hf_logging.get_verbosity()
+            hf_logging.set_verbosity_error()
+            hf_logging.disable_progress_bar()
+        except Exception:
+            hf_logging = None
+            prev_verbosity = None
+        try:
+            self._st_model: SentenceTransformer = SentenceTransformer(
+                model, device=device
+            )
+        finally:
+            if hf_logging is not None and prev_verbosity is not None:
+                hf_logging.set_verbosity(prev_verbosity)
+                hf_logging.enable_progress_bar()
         self._model = model
         # sentence-transformers >=5 renamed get_sentence_embedding_dimension()
         # to get_embedding_dimension(); support both.
