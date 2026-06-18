@@ -39,12 +39,13 @@ In production, you should rely on the `recall()` operator to intelligently route
 ```python
 async def handle_turn(engram, task_id, agent_id, user_id, user_message):
     
-    # 1. Intelligently fetch evidence (Vector + Ledger + Lineage)
-    trace = await engram.recall(
+    # 1. Build a prompt-ready memory block (Vector + Ledger + Lineage)
+    #    trace_recall returns the assembled context plus retrieval observability,
+    #    not an auto-reply.
+    trace = await engram.trace_recall(
         query=user_message,
         agent_id=agent_id,
         user_id=user_id,
-        compose_answer=False  # We only want the context, not an auto-reply
     )
 
     # 2. Call your LLM, streaming the result to the user
@@ -145,11 +146,13 @@ app = FastAPI(lifespan=lifespan)
 async def chat(body: dict, current_user: User = Depends(get_user)):
     assert engram is not None
     
-    # Intelligently route and fetch context
-    trace = await engram.recall(
-        query=body["message"], 
-        user_id=current_user.id
+    # Build a prompt-ready context block (agent_id is required)
+    trace = await engram.trace_recall(
+        query=body["message"],
+        agent_id="assistant",
+        user_id=current_user.id,
     )
-    
+    memory_context = trace.context
+
     # ... Stream LLM, record_turn, etc ...
 ```

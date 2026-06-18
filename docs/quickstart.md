@@ -127,22 +127,21 @@ As your agent talks to the user, you should record the raw exchanges to the task
 ### Step E: Intelligent Recall
 Now, imagine it is three days later. The user comes back and asks a question. Instead of manually writing vector search queries, we use the `recall()` cognitive operator.
 
-*Note: The `recall()` operator requires an LLM to classify intent. If you don't have an LLM configured, it gracefully falls back to a standard hybrid search.*
+*Note: The `recall()` operator requires a configured LLM to classify intent and compose the answer (set `ENGRAM_LLM_PROVIDER`). Without an LLM it raises `ConfigurationError`; use the LLM-free surfaces `search()` or `trace_recall()` instead.*
 
 ```py
-        # 4. Recall context intelligently based on the user's intent
+        # 4. Recall an answer intelligently based on the user's intent
         new_query = "What was that city I wanted to visit, and do I have any dietary restrictions?"
-        
-        trace = await engram.recall(
-            query=new_query,
+
+        answer = await engram.recall(
+            new_query,
             agent_id="travel_assistant",
             user_id="alice_123",
-            compose_answer=False  # Returns the raw prompt context, not an LLM auto-reply
         )
-        
-        print("\n🔍 Recall Trace Context Block:")
+
+        print("\n🔍 Source-backed recall answer:")
         print("-------------------------------")
-        print(trace.context)
+        print(answer.answer_text)
         print("-------------------------------")
 ```
 

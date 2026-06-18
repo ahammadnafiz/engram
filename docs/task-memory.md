@@ -110,15 +110,13 @@ In production, you should combine Task Memory (the ledger) with Fact Memory (ret
 async def handle_turn(engram, task_id, user_message):
     
     # 1. Fetch cognitive context (Checkpoints + Semantic Facts)
-    trace = await engram.recall(
-        query=user_message,
-        task_run_id=task_id,  # Scopes recall to current task state
-        compose_answer=False
-    )
+    #    build_context assembles a deterministic block scoped to the task:
+    #    recent events, checkpoints, and search-ranked memories.
+    context = await engram.build_context(task_id, query=user_message)
 
     # 2. Call your LLM
     response = await call_your_llm(
-        memory_context=trace.context,
+        memory_context=context.text,
         user_message=user_message
     )
 

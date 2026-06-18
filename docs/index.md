@@ -108,22 +108,21 @@ async def main() -> None:
             user_id="nafiz",
         )
 
-        # 3. Intelligently recall context based on user intent
-        trace = await engram.recall(
-            query="continue the repository work",
+        # 3. Recall a source-backed answer, routed by the question's intent
+        answer = await engram.recall(
+            "what are my repository constraints?",
             agent_id="codex",
             user_id="nafiz",
-            compose_answer=False
         )
 
-        print(memory.memory_type)
-        print(trace.context)
+        print(memory.memory_type)   # -> "constraint"
+        print(answer.answer_text)   # -> grounded answer built from stored memory
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-This snippet stores a strict repo constraint, then asks Engram to build the exact context block the LLM needs for the next turn.
+This snippet stores a strict repo constraint, then asks Engram to answer a question about it. `recall()` classifies the question's intent, retrieves the matching memories, and composes a source-backed answer in `answer.answer_text`. It requires a configured LLM (set `ENGRAM_LLM_PROVIDER`); for LLM-free retrieval use `search()` instead.
 
 ## How It Works
 
