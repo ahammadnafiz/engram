@@ -7,12 +7,47 @@
 </p>
 
 <p align="center">
+  <a href="#benchmark-results">Benchmarks</a> •
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
   <a href="#documentation">Documentation</a> •
   <a href="#examples">Examples</a>
 </p>
+
+---
+
+## Benchmark results
+
+Engram is evaluated on two standard long-term memory benchmarks. Both runs use on-device embeddings (`all-MiniLM-L6-v2`, 384-d, free) with **no LLM calls at ingestion**. All reasoning happens at query time via hybrid search + cross-encoder rerank + `recall()`.
+
+| Benchmark | Questions | Accuracy | Composer |
+|---|---|---|---|
+| [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) (ICLR 2025) | 500 | **89.8%** | claude-sonnet-4-6 |
+| [LoCoMo-10](https://github.com/snap-research/locomo) (ACL 2024) | 1,540 | **85.7%** | claude-sonnet-4-6 |
+
+**LongMemEval-S breakdown** (500 questions, ~115k turns per question):
+
+| Question type | Accuracy |
+|---|---|
+| single-session-user | 98.6% |
+| knowledge-update | 97.4% |
+| abstention | 96.7% |
+| single-session-assistant | 94.6% |
+| temporal-reasoning | 89.5% |
+| single-session-preference | 83.3% |
+| multi-session | 80.5% |
+
+**LoCoMo-10 breakdown** (1,540 questions across 10 long conversations):
+
+| Category | Accuracy |
+|---|---|
+| multi-hop | 87.9% |
+| temporal | 86.9% |
+| single-hop | 86.6% |
+| open-domain | 67.7% |
+
+Both benchmark scripts are in [`benchmark/`](benchmark/) and can be reproduced against a real database. Full methodology, ablation table, and commands: [docs/benchmarks.md](docs/benchmarks.md).
 
 ---
 
