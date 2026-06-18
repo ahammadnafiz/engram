@@ -52,7 +52,7 @@ os.environ.setdefault("ENGRAM_EMBEDDING_PROVIDER", "sentence-transformers")
 os.environ.setdefault("ENGRAM_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 os.environ.setdefault("ENGRAM_EMBEDDING_DIMENSION", "384")
 os.environ.setdefault("ENGRAM_LLM_PROVIDER", "gemini")
-os.environ.setdefault("ENGRAM_LLM_MODEL", "gemini-3.5-flash")
+os.environ.setdefault("ENGRAM_LLM_MODEL", "gemini-3.1-flash-lite")
 
 AGENT_ID = os.environ.get("ENGRAM_CHATBOT_AGENT_ID", "engram-chatbot")
 USER_ID = os.environ.get("ENGRAM_CHATBOT_USER_ID", "default-user")
@@ -1030,7 +1030,14 @@ class MemoryChatbot:
 
     async def search(self, query: str) -> None:
         assert self.engram is not None
-        results = await self.engram.search(query, AGENT_ID, user_id=USER_ID, limit=8)
+        results = await self.engram.search(
+            query,
+            AGENT_ID,
+            user_id=USER_ID,
+            limit=8,
+            mode="hybrid",
+            include_superseded=True,
+        )
         if not results:
             print_notice("no matches", level="warn")
             return
