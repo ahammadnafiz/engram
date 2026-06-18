@@ -37,21 +37,49 @@
   --md-typeset-a-color: #b794f6;
 }
 
-/* Neural-violet active states in the sidebar nav and "On this page" TOC */
-.md-nav__link--active,
-.md-nav__link:hover,
-.md-nav__item .md-nav__link--active {
-  color: var(--engram-accent);
+/* Material's palette CSS resets --md-typeset-a-color / --md-accent-fg-color
+   to its default indigo (#4051b5 light, #5e8bde slate) on <body> via
+   scheme+primary compound selectors, shadowing the :root brand override for
+   everything inside the page — links, active nav, accents all go off-brand.
+   Re-assert the brand accent with a matching (0,2,0) compound selector that
+   loads after palette.css, so it wins by specificity and order in both modes. */
+[data-md-color-scheme="default"][data-md-color-primary="white"],
+[data-md-color-scheme="slate"][data-md-color-primary="black"] {
+  --md-typeset-a-color: var(--engram-accent);
+  --md-accent-fg-color: var(--engram-accent);
 }
 
-.md-nav__link--active {
-  font-weight: 700;
+/* ── Sidebar navigation ─────────────────────────────────────────────
+   The pill is pulled left with a negative margin so the link text stays
+   aligned with the section labels while the highlight gets real
+   horizontal breathing room — an intentional highlight, not a swatch. */
+.md-nav--primary .md-nav__link {
+  border-radius: 6px;
+  margin-left: -0.55rem;
+  padding: 0.3rem 0.55rem;
+  transition: color 100ms ease, background-color 100ms ease;
 }
 
-/* Soft highlighted active item, like the screenshot's left rail */
+.md-nav--primary a.md-nav__link:not(.md-nav__link--active):hover {
+  background: var(--engram-panel-soft);
+  color: var(--engram-ink);
+}
+
 .md-nav--primary .md-nav__item .md-nav__link--active {
   background: var(--engram-accent-soft);
-  border-radius: 6px;
+  color: var(--engram-accent-strong);
+  font-weight: 600;
+}
+
+.md-nav--primary .md-nav__item .md-nav__link--active:hover {
+  background: var(--engram-accent-soft);
+  color: var(--engram-accent-strong);
+}
+
+/* "On this page" TOC: accent text only, no background pill */
+.md-nav--secondary .md-nav__link--active {
+  color: var(--engram-accent-strong);
+  font-weight: 600;
 }
 
 /* Primary CTA uses the neural accent (the white/black header leaves
@@ -239,6 +267,21 @@
 .engram-hero .md-button:not(.md-button--primary) {
   border-color: var(--engram-border);
   color: var(--engram-accent-strong);
+}
+
+/* Secondary button hover: fill with accent and flip the text to a
+   contrasting color. Without this, Material fills the background with the
+   accent while the text stays purple — the washed-out, unreadable state. */
+.engram-hero .md-button:not(.md-button--primary):hover,
+.engram-hero .md-button:not(.md-button--primary):focus {
+  background-color: var(--engram-accent);
+  border-color: var(--engram-accent);
+  color: #ffffff;
+}
+
+[data-md-color-scheme="slate"] .engram-hero .md-button:not(.md-button--primary):hover,
+[data-md-color-scheme="slate"] .engram-hero .md-button:not(.md-button--primary):focus {
+  color: #15181d;
 }
 
 .engram-signal-grid {
