@@ -3,7 +3,7 @@
 
 This is the optimized reference stack — free, on-device sentence-transformers
 embeddings (`all-MiniLM-L6-v2`, 384-d) for retrieval and Google's
-`gemini-3.5-flash` for answer generation, driven by the same composer rules
+`gemini-3.1-flash-lite` for answer generation, driven by the same composer rules
 used in the Engram LongMemEval benchmark.
 
 Run:

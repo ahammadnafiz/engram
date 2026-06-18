@@ -218,7 +218,7 @@ def test_default_stack_is_local_embeddings_and_gemini(monkeypatch):
     assert os.environ["ENGRAM_EMBEDDING_MODEL"] == "all-MiniLM-L6-v2"
     assert os.environ["ENGRAM_EMBEDDING_DIMENSION"] == "384"
     assert os.environ["ENGRAM_LLM_PROVIDER"] == "gemini"
-    assert os.environ["ENGRAM_LLM_MODEL"] == "gemini-3.5-flash"
+    assert os.environ["ENGRAM_LLM_MODEL"] == "gemini-3.1-flash-lite"
 
 
 @pytest.mark.asyncio
