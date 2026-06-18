@@ -114,22 +114,16 @@ from engram.policy import MemoryPolicy  # noqa: E402
 DEFAULT_LLM_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001"
 
-# Gemini embedding model
-DEFAULT_EMBEDDING_PROVIDER = "gemini"
-DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2"
-DEFAULT_EMBEDDING_DIMENSION = 768
+# Embedding model
+DEFAULT_EMBEDDING_PROVIDER = "sentence-transformers"
+DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+DEFAULT_EMBEDDING_DIMENSION = 384
 
 # Local (sentence-transformers) embedding defaults for --local-embedding.
-# Runs entirely on-device: no API, no cost, no rate limits. nomic-embed-text-v1.5
-# is small (0.1B params), 768d, with an 8192-token context that comfortably
-# holds the rendered turns -- a much lighter footprint than BGE-M3.
-# NOTE: nomic is trained with asymmetric task prefixes ("search_document:" for
-# stored text, "search_query:" for queries). Engram's embedding path has no
-# query/document distinction, so prefixes are NOT applied; embeddings stay
-# symmetric (self-consistent) but a few points below nomic's prefixed ceiling.
+# Runs entirely on-device: no API, no cost, no rate limits.
 LOCAL_EMBEDDING_PROVIDER = "sentence-transformers"
-LOCAL_EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5"
-LOCAL_EMBEDDING_DIMENSION = 768
+LOCAL_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+LOCAL_EMBEDDING_DIMENSION = 384
 
 # LongMemEval histories are conversational events. We keep the default policy
 # so that add_conversation() exercises the full extraction, supersession, and

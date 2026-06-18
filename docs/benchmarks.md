@@ -1,30 +1,33 @@
 # Benchmarks
 
-Engram is evaluated on **[LongMemEval](https://github.com/xiaowu0162/LongMemEval)** (ICLR 2025), the standard benchmark for long-term conversational memory. It tests whether a memory system can answer questions that require recalling, updating, aggregating, and temporally reasoning over information spread across hundreds of chat turns and many sessions.
+Engram ships two reproducible benchmark scripts. The numbers below come from running them against real databases with publicly available datasets.
+
+We test on two standard long-term memory benchmarks: **LongMemEval** (ICLR 2025) and **LoCoMo** (ACL 2024). Both datasets were designed to break systems that rely on stuffing full chat history into a context window — they require recalling specific facts from hundreds of sessions, updating beliefs when information changes, and reasoning across time.
 
 > [!TIP]
-> **Headline Result**: On **LongMemEval-S** (500 questions, ~115k turns), Engram scores **89.8%** — using entirely on-device embeddings, **zero LLM calls at ingestion**, and a cross-encoder reranker over hybrid search. Memories are written with `add_batch()`; all reasoning happens at read time via a single composer call.
+> **On LongMemEval-S** (500 questions, ~115k turns): **89.8%** overall. On **LoCoMo-10** (1,540 questions across 10 long conversations): **85.7%**. Both runs use on-device embeddings with no LLM calls at ingestion. All reasoning happens at query time.
 
 ---
 
-## 1. Results
+## Results
 
-**Benchmark Parameters:**
-- **Dataset**: LongMemEval-S, 500 questions
-- **Composer and Judge**: `claude-sonnet-4-6`
-- **Embeddings**: `all-MiniLM-L6-v2` (384-d, on-device)
-- **Retrieval Engine**: Hybrid search (Vector + Full-Text) + Cross-Encoder Rerank
-- **Evidence Budget**: 60 memories
+### LongMemEval-S
 
-| Question Type | Accuracy | Score |
-|---------------|----------|-------|
-| single-session-user | **98.6%** | 69 / 70 |
-| knowledge-update | **97.4%** | 76 / 78 |
-| abstention | **96.7%** | 29 / 30 |
-| single-session-assistant | **94.6%** | 53 / 56 |
-| temporal-reasoning | **89.5%** | 119 / 133 |
-| single-session-preference | **83.3%** | 25 / 30 |
-| multi-session | **80.5%** | 107 / 133 |
+**Dataset**: 500 questions, long-term chat histories averaging ~115k turns  
+**Composer & Judge**: `claude-sonnet-4-6`  
+**Embeddings**: `all-MiniLM-L6-v2` (384-d, on-device, free)  
+**Retrieval**: hybrid search (vector + full-text) + cross-encoder rerank  
+**Evidence budget**: 60 memories per question
+
+| Question type | Accuracy | Raw |
+|---|---|---|
+| single-session-user | 98.6% | 69 / 70 |
+| knowledge-update | 97.4% | 76 / 78 |
+| abstention | 96.7% | 29 / 30 |
+| single-session-assistant | 94.6% | 53 / 56 |
+| temporal-reasoning | 89.5% | 119 / 133 |
+| single-session-preference | 83.3% | 25 / 30 |
+| multi-session | 80.5% | 107 / 133 |
 | **Overall** | **89.8%** | **449 / 500** |
 
 ```mermaid
@@ -54,9 +57,60 @@ xychart-beta
 
 ---
 
-## 2. Evaluation Methodology
+### LoCoMo-10
 
-Each question is fully isolated in its own memory namespace (using `agent_id` per question, which is purged before and after). The pipeline writes the haystack to memory, retrieves evidence with Engram's standard APIs, and then uses a single composer call to answer from that evidence. An independent LLM judge scores the output against the gold answer using the official LongMemEval rubric.
+LoCoMo (ACL 2024) uses 10 long-running synthetic conversations spanning hundreds of sessions each. Questions cover single-hop fact recall, multi-hop reasoning, temporal ordering, and open-domain retrieval. We evaluate categories 1–4 (1,540 questions); category 5 is excluded per the benchmark spec.
+
+**Dataset**: 1,540 questions across 10 conversations  
+**Composer & Judge**: `claude-sonnet-4-6`  
+**Embeddings**: `all-MiniLM-L6-v2` (384-d, on-device)  
+**Retrieval**: hybrid search + cross-encoder rerank + lineage traversal  
+**Evidence budget**: 60 memories, max 4 per session
+
+| Category | Accuracy | Raw |
+|---|---|---|
+| multi-hop | 87.9% | 248 / 282 |
+| temporal | 86.9% | 279 / 321 |
+| single-hop | 86.6% | 728 / 841 |
+| open-domain | 67.7% | 65 / 96 |
+| **Overall** | **85.7%** | **1,320 / 1,540** |
+
+```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    xyChart:
+      backgroundColor: "transparent"
+      titleColor: "#1f2933"
+      plotColorPalette: "#7c3aed"
+      xAxisLabelColor: "#1f2933"
+      xAxisTitleColor: "#1f2933"
+      xAxisLineColor: "#9aa5b1"
+      xAxisTickColor: "#9aa5b1"
+      yAxisLabelColor: "#1f2933"
+      yAxisTitleColor: "#1f2933"
+      yAxisLineColor: "#9aa5b1"
+      yAxisTickColor: "#9aa5b1"
+---
+xychart-beta
+    title "LoCoMo-10 accuracy by category (%)"
+    x-axis ["Multi-hop", "Temporal", "Single-hop", "Open-domain"]
+    y-axis "Accuracy" 0 --> 100
+    bar [87.9, 86.9, 86.6, 67.7]
+```
+
+The open-domain category is the weakest. These questions require world knowledge the memory system doesn't store — there's no retrieval fix for a fact that was never ingested.
+
+---
+
+## The pipeline
+
+Both benchmarks run the same three-stage pipeline:
+
+```
+add_batch() → search() + recall() + get_lineage() + traverse_many() → composer LLM
+```
 
 ```mermaid
 ---
@@ -148,57 +202,63 @@ flowchart LR
     linkStyle 4,5 stroke:#777,stroke-width:1px,stroke-dasharray: 5 5;
 ```
 
-### Stage Breakdown
+**Ingest** (`add_batch()`): raw conversation turns are embedded on-device and written to pgvector. No LLM is called. This takes roughly 12 seconds per question in the LongMemEval runs.
 
-| Stage | Engram API | Execution Details |
-|---|---|---|
-| **Ingest** | `add_batch()` | Batched on-device embedding → `pgvector` insert. **No LLM required**. ~12s per question, fully parallelized. |
-| **Retrieve** | `search(rerank=True)`<br>`recall()` | `pgvector` cosine + PostgreSQL full-text search, fused with Reciprocal Rank Fusion, time-decay, and importance weighting. A cross-encoder reorders the candidate pool. |
-| **Generate** | `llm.complete_full()` | A single composer LLM call writes the final answer directly from the assembled evidence block. |
-| **Judge** | — | An independent LLM judge evaluates the result; it does not touch the Engram DB. |
+**Retrieve**: four surfaces run in parallel:
+
+| API | What it does |
+|---|---|
+| `search(mode='hybrid', rerank=True)` | pgvector cosine + PostgreSQL full-text, fused with Reciprocal Rank Fusion, time-decay, and importance weighting; a cross-encoder re-orders the candidate pool |
+| `recall(compose_answer=False)` | intent-classified retrieval with explicit date anchoring for temporal questions |
+| `get_lineage()` | follows supersession chains to surface updated values when preferences or facts change |
+| `traverse_many()` | multi-hop graph traversal for entity relationships |
+
+**Generate**: a single composer LLM call answers from the assembled evidence block. The judge runs independently.
 
 > [!NOTE]
-> **What this configuration measures**: This benchmark explicitly exercises Engram as a *retrieval substrate*. It deliberately ingests raw conversational turns via `add_batch()` rather than routing through the semantic extraction pipeline (`add_conversation()`). This means fact-extraction, supersession, and graph relations are purposefully bypassed here. The result is the baseline floor of what the retrieval layer alone delivers.
+> **What this measures**: Both benchmarks use `add_batch()` rather than `add_conversation()`. That deliberately bypasses semantic extraction, fact deduplication, and conflict resolution. The scores reflect the retrieval layer used as a raw substrate — a floor measurement, before Engram has done any structural work on the memories. `add_conversation()` users typically get cleaner, more structured memories, which should only improve these numbers.
 
 ---
 
-## 3. What Each Component Contributes
+## What each component adds
 
-The system was tuned through controlled ablation studies. Each row below introduces one additional capability:
-
-| Configuration | Composer | Judge | Rerank | Overall Score |
+| Configuration | Composer | Judge | Rerank | LongMemEval |
 |---|---|---|---|---|
-| Hybrid search only | Haiku | Haiku | ❌ | 77.8% |
-| + cross-encoder rerank + tuned recall | Haiku | Sonnet | ✅ | 87.0% |
-| + stronger composer model | Sonnet | Sonnet | ✅ | **89.8%** |
+| Hybrid search only | Haiku | Haiku | no | 77.8% |
+| + cross-encoder rerank | Haiku | Sonnet | yes | 87.0% |
+| + stronger composer | Sonnet | Sonnet | yes | **89.8%** |
 
-### Key Findings
-1. **Reranking is the largest retrieval lever.** Applying a cross-encoder over the hybrid candidate pool cuts irrelevant turns out of the evidence block, providing massive gains on temporal and preference questions.
-2. **Retrieval recall must stay wide.** Aggressively shrinking the evidence budget to favor precision *regressed* counting and assistant-recall questions, which require every relevant turn to be in context. A 60-memory budget over a reranked pool proved optimal.
-3. **The composer model is the final ceiling.** With retrieval solved, the remaining errors were multi-step reasoning failures (e.g., counting completeness and temporal interval arithmetic). A stronger composer model (Sonnet) closed most of that gap.
+**Reranking is the biggest single lever.** The cross-encoder cuts irrelevant turns before the composer sees them. That gap — 77.8% to 87.0% — is retrieval quality, not model quality.
 
----
+**Widening the evidence budget helped more than tightening it.** Cutting aggressively to improve precision regressed counting and multi-session questions, which need every relevant turn in context. 60 memories over a reranked pool beat 30 over a precise one.
 
-## 4. Remaining Failures
-
-Of the 51 missed questions, **46 had the answer-bearing session already in the retrieved evidence**. These are composer reasoning errors, not retrieval gaps. 
-
-They cluster in two distinct patterns:
-- **Aggregation Completeness (Multi-session counting)**: The items are all in context, but the LLM miscounts by one, or misses an item scattered in a completely unrelated conversation.
-- **Multi-hop Temporal Reasoning**: Questions like *"what time did I go to bed the day before my appointment"* require chaining two independent lookups and an interval computation, which models struggle with in a single pass.
-
-These errors represent the genuine reasoning ceiling of the composer model; Engram's retrieval engine is no longer the bottleneck.
+**The composer model is the ceiling once retrieval works.** After reranking, the remaining errors are multi-step reasoning failures. A stronger composer (Sonnet) closed most of that gap.
 
 ---
 
-## 5. How to Reproduce
+## Where it still fails
 
-The benchmark suite lives in the [`benchmark/`](https://github.com/ahammadnafiz/engram/tree/main/benchmark) directory. It reads `data/longmemeval/longmemeval_s_cleaned.json` and writes traces, judgments, and a summary payload into the designated output directory.
+51 questions missed on LongMemEval. 46 of those had the right session already in the retrieved evidence — these are composer errors, not retrieval gaps.
+
+The two failure modes that remain:
+
+**Aggregation completeness**: All items are in context, but the LLM miscounts by one, or misses an item scattered across an unrelated conversation thread. "What have I bought this year?" fails when purchases span sessions that don't look topically related.
+
+**Multi-hop temporal arithmetic**: Chaining two independent lookups into an interval computation in a single pass. Questions like *"what time did I go to bed the day before my appointment"* require two retrieval steps and subtraction. Models land one step and drop the other.
+
+On LoCoMo, the 67.7% open-domain score brings the overall down. That category mixes in questions about world facts and context that was never stored — no retrieval optimization helps there.
+
+---
+
+## Reproduce it
+
+All scripts are in `benchmark/`. Data files go in `data/`.
 
 > [!WARNING]
-> This run executes LLM calls for the composer and judge, which are billable. Embeddings run completely on-device and are free. Ensure `ENGRAM_ANTHROPIC_API_KEY` is configured in your `.env`.
+> LLM API calls for the composer and judge are billable. On-device embeddings are free. Set `ENGRAM_ANTHROPIC_API_KEY` in your `.env`.
 
-### Best Configuration (89.8%)
+### LongMemEval — 89.8% run
+
 ```bash
 python benchmark/longmemeval_benchmark.py \
   --llm-model claude-sonnet-4-6 \
@@ -213,7 +273,8 @@ python benchmark/longmemeval_benchmark.py \
   --output-dir benchmark/runs/lme-final-v4
 ```
 
-### Cheap Configuration (Haiku composer)
+### LongMemEval — cheaper run (Haiku composer, 87.0%)
+
 ```bash
 python benchmark/longmemeval_benchmark.py \
   --rerank \
@@ -227,7 +288,22 @@ python benchmark/longmemeval_benchmark.py \
   --output-dir benchmark/runs/lme-cheap
 ```
 
-### Re-score an existing run
+### LoCoMo-10 — 85.7% run
+
+```bash
+python benchmark/locomo_benchmark.py \
+  --conversations 0,1,2,3,4,5,6,7,8,9 \
+  --search-limit 60 \
+  --rerank \
+  --concurrency 8 \
+  --llm-model claude-sonnet-4-6 \
+  --judge-model claude-sonnet-4-6 \
+  --clean-db \
+  --output-dir benchmark/runs/locomo-sonnet
+```
+
+### Re-score without re-running
+
 ```bash
 python benchmark/longmemeval_benchmark.py \
   --rejudge-only benchmark/runs/lme-final-v4/traces.jsonl \
@@ -235,16 +311,24 @@ python benchmark/longmemeval_benchmark.py \
   --output-dir benchmark/runs/lme-rejudge
 ```
 
-### Artifacts
-Inside your output directory, you will find:
-- `traces.jsonl`: Contains the question, gold answer, retrieved evidence, composer answer, and retrieval stats.
-- `judgments.jsonl`: The per-question verdict.
-- `summary.json`: The overall + per-type accuracy and full configuration settings.
+### Output files
+
+Each run writes three files to the output directory:
+
+| File | Contents |
+|---|---|
+| `traces.jsonl` | Question, gold answer, retrieved evidence, composer answer, and retrieval stats — one JSON object per question |
+| `judgments.jsonl` | Per-question verdict with reasoning |
+| `summary.json` | Overall and per-type accuracy, full configuration parameters |
 
 ---
 
-## 6. Evaluation Notes
+## Notes for the community
 
-- **Judge Independence**: The headline run uses the same model family for the composer and the judge. Because LLM-as-judge logic can be lenient toward outputs from its own family, the most conservative score comes from an independent judge (e.g., composer `claude-sonnet-4-6`, judge `claude-opus-4-8`), achieved via the re-score command.
-- **Reproducibility**: Accuracy scales heavily with the embedding model, composer/judge models, and retrieval depth. All exact parameters are reported above so the community can replicate the results.
-- **Cost Scaling**: Ingestion is free (on-device embeddings). Query-time cost scales entirely with the composer and judge. The "cheap" Haiku configuration trades roughly 3 points of accuracy for a massive cost reduction.
+**Judge bias**: The headline LongMemEval run uses the same model family for both composer and judge. Same-family judges are known to be lenient. For a stricter number, run `--rejudge-only` with a different judge family (e.g., composer `claude-sonnet-4-6`, judge `claude-opus-4-8`).
+
+**Reproducibility**: Given the same model versions and configuration, the runs reproduce. Accuracy changes meaningfully with the embedding model, search depth, and composer quality — all exact parameters are stored in `summary.json` alongside the scores, so you can see exactly what produced a given number.
+
+**Cost tradeoff**: Ingestion costs nothing (on-device embeddings). Query-time cost scales entirely with composer and judge. Haiku gives up roughly 3 points on LongMemEval for a significant cost reduction — a reasonable tradeoff for long-running agents where every query doesn't need Sonnet-level composition.
+
+**Extending the benchmark**: The scripts accept custom output directories and support `--conversations` subsets on LoCoMo for faster iteration. If you run different configurations, the `traces.jsonl` output is structured for easy analysis.

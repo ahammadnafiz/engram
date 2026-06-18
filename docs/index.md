@@ -73,7 +73,7 @@ superseded.
 
 - :material-chart-bar: **[Benchmarks](benchmarks.md)**
 
-    View Engram's industry-leading 89.8% score on the LongMemEval standard memory benchmark.
+    89.8% on LongMemEval-S (ICLR 2025) and 85.7% on LoCoMo-10 (ACL 2024). Both runs are reproducible with the scripts in `benchmark/`.
 
 </div>
 
@@ -145,6 +145,17 @@ When `Engram.connect()` is called, it automatically creates the database schema,
 | Analyze why recall failed | `trace_recall()` |
 | Extract facts asynchronously | `run_memory_worker()`, `process_memory_jobs()` |
 | Ingest & cite a 50-page PDF | `record_long_input()`, `build_long_input_context()` |
+
+## Benchmark results
+
+Engram is evaluated on two standard long-term memory benchmarks. Both runs use on-device embeddings (`all-MiniLM-L6-v2`) with no LLM calls at ingestion. All reasoning happens at query time via `search()` + `recall()` + `get_lineage()`.
+
+| Benchmark | Questions | Score | Composer |
+|---|---|---|---|
+| [LongMemEval-S](benchmarks.md#longmemeval-s) (ICLR 2025) | 500 | **89.8%** | claude-sonnet-4-6 |
+| [LoCoMo-10](benchmarks.md#locomo-10) (ACL 2024) | 1,540 | **85.7%** | claude-sonnet-4-6 |
+
+Both benchmark scripts are in `benchmark/` and can be run against your own database. See [Benchmarks](benchmarks.md) for the full breakdown, ablation table, and reproduce commands.
 
 ## Included Examples
 
