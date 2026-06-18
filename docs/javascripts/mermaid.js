@@ -25,6 +25,29 @@
       theme: "default",
       securityLevel: "strict",
       fontFamily: "Inter, system-ui, sans-serif",
+      // Consistent high-contrast palette for every diagram. These merge into
+      // each diagram's own frontmatter themeVariables (the diagram's keys win),
+      // so text, edges, and labels stay legible on the light card in both
+      // light and dark mode without per-diagram tweaks.
+      themeVariables: {
+        textColor: "#1f2933",
+        primaryTextColor: "#1f2933",
+        secondaryTextColor: "#1f2933",
+        tertiaryTextColor: "#1f2933",
+        lineColor: "#52606d",
+        // Sequence diagrams
+        actorTextColor: "#1f2933",
+        signalColor: "#52606d",
+        signalTextColor: "#1f2933",
+        labelTextColor: "#1f2933",
+        loopTextColor: "#1f2933",
+        noteTextColor: "#1f2933",
+        noteBkgColor: "#fff8e1",
+        noteBorderColor: "#f2c94c",
+        // Entity-relationship diagrams
+        attributeBackgroundColorOdd: "#ffffff",
+        attributeBackgroundColorEven: "#f3f5f7",
+      },
       flowchart: {
         curve: "basis",
         htmlLabels: true,
