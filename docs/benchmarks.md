@@ -31,6 +31,19 @@ Engram is evaluated on **[LongMemEval](https://github.com/xiaowu0162/LongMemEval
 ---
 config:
   theme: base
+  themeVariables:
+    xyChart:
+      backgroundColor: "transparent"
+      titleColor: "#1f2933"
+      plotColorPalette: "#2563c9"
+      xAxisLabelColor: "#1f2933"
+      xAxisTitleColor: "#1f2933"
+      xAxisLineColor: "#9aa5b1"
+      xAxisTickColor: "#9aa5b1"
+      yAxisLabelColor: "#1f2933"
+      yAxisTitleColor: "#1f2933"
+      yAxisLineColor: "#9aa5b1"
+      yAxisTickColor: "#9aa5b1"
 ---
 xychart-beta
     title "LongMemEval-S accuracy by question type (%)"
