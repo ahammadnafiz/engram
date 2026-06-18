@@ -242,6 +242,9 @@ class TestGeminiLLMProvider:
     @pytest.mark.asyncio
     async def test_complete_splits_system_and_contents(self) -> None:
         """System messages map to system_instruction; turns map to contents."""
+        # Constructing the provider builds a real google-genai client and uses
+        # its types, so this test only runs where the optional SDK is present.
+        pytest.importorskip("google.genai")
         from engram.providers.llm.builtin import GeminiLLMProvider
 
         captured: dict[str, object] = {}
