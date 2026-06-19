@@ -19,14 +19,19 @@
 
 ## Benchmark results
 
-Engram is evaluated on two standard long-term memory benchmarks. Both runs use on-device embeddings (`all-MiniLM-L6-v2`, 384-d, free) with **no LLM calls at ingestion**. All reasoning happens at query time via hybrid search + cross-encoder rerank + `recall()`.
+Engram is evaluated on three long-term memory benchmarks. All runs use on-device embeddings (`all-MiniLM-L6-v2`, 384-d, free) with **no LLM calls at ingestion** — raw episodic turns stored verbatim via `add_batch()`, all reasoning deferred to query time via hybrid search + cross-encoder rerank + `recall()`.
+
+**Honest caveats**: composer and judge are the same model family (`claude-sonnet-4-6`) across all three runs, which is a known leniency bias. `add_batch()` bypasses Engram's LLM-based extraction pipeline — these are floor numbers. `add_conversation()` is expected to score higher on structured fact types.
+
+![Engram benchmark results](assets/engram-benchmark.svg)
 
 | Benchmark | Questions | Accuracy | Composer |
 |---|---|---|---|
 | [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) (ICLR 2025) | 500 | **89.8%** | claude-sonnet-4-6 |
 | [LoCoMo-10](https://github.com/snap-research/locomo) (ACL 2024) | 1,540 | **85.7%** | claude-sonnet-4-6 |
+| [BEAM 1M](https://github.com/mohammadtavakoli78/BEAM) (ICLR 2026) | 700 | **79.6%** | claude-sonnet-4-6 |
 
-**LongMemEval-S breakdown** (500 questions, ~115k turns per question):
+**LongMemEval-S breakdown** (500 questions):
 
 | Question type | Accuracy |
 |---|---|
@@ -47,7 +52,22 @@ Engram is evaluated on two standard long-term memory benchmarks. Both runs use o
 | single-hop | 86.6% |
 | open-domain | 67.7% |
 
-Both benchmark scripts are in [`benchmark/`](benchmark/) and can be reproduced against a real database. Full methodology, ablation table, and commands: [docs/benchmarks.md](docs/benchmarks.md).
+**BEAM 1M breakdown** (700 questions, 10 question types, nugget scoring):
+
+| Question type | Accuracy |
+|---|---|
+| abstention | 97.1% |
+| preference_following | 92.9% |
+| instruction_following | 90.0% |
+| information_extraction | 84.3% |
+| event_ordering | 81.4% |
+| knowledge_update | 81.4% |
+| multi_session_reasoning | 81.4% |
+| contradiction_resolution | 80.0% |
+| temporal_reasoning | 65.7% |
+| summarization | 41.4% |
+
+Summarization (41.4%) is a known architectural floor: relevance-ranked retrieval is precision-optimized, not coverage-maximizing. Full methodology, ablation table, and reproduce commands: [docs/benchmarks.md](docs/benchmarks.md).
 
 ---
 

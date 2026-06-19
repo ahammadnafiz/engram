@@ -49,30 +49,47 @@ def _engram(classify_json: str, prose: str) -> MagicMock:
 
 class TestParseClassification:
     def test_plain_json(self) -> None:
-        intent, topic, when = _parse_classification(
-            '{"intent": "historical", "topic": "meeting", "when": "yesterday"}'
+        intent, topic, when, anchors = _parse_classification(
+            '{"intent": "historical", "topic": "meeting", "when": "yesterday", "anchors": []}'
         )
         assert (intent, topic, when) == ("historical", "meeting", "yesterday")
+        assert anchors == []
 
     def test_code_fenced_json(self) -> None:
-        intent, topic, _ = _parse_classification(
-            '```json\n{"intent": "event", "topic": "chatbot", "when": ""}\n```'
+        intent, topic, _, _anchors = _parse_classification(
+            '```json\n{"intent": "event", "topic": "chatbot", "when": "", "anchors": []}\n```'
         )
         assert intent == "event"
         assert topic == "chatbot"
 
     def test_malformed_falls_back_to_current(self) -> None:
-        assert _parse_classification("not json at all") == ("current", "", "")
+        assert _parse_classification("not json at all") == ("current", "", "", [])
 
     def test_invalid_intent_coerced_to_current(self) -> None:
-        intent, _, _ = _parse_classification('{"intent": "banana", "topic": "x"}')
+        intent, _, _, _anchors = _parse_classification('{"intent": "banana", "topic": "x"}')
         assert intent == "current"
 
     def test_chat_intent_is_supported(self) -> None:
-        intent, topic, when = _parse_classification(
-            '{"intent": "chat", "topic": "", "when": ""}'
+        intent, topic, when, anchors = _parse_classification(
+            '{"intent": "chat", "topic": "", "when": "", "anchors": []}'
         )
         assert (intent, topic, when) == ("chat", "", "")
+        assert anchors == []
+
+    def test_temporal_chain_extracts_anchors(self) -> None:
+        intent, topic, when, anchors = _parse_classification(
+            '{"intent": "temporal_chain", "topic": "project start finish", "when": "", '
+            '"anchors": ["started ML project", "submitted ML project"]}'
+        )
+        assert intent == "temporal_chain"
+        assert anchors == ["started ML project", "submitted ML project"]
+
+    def test_temporal_chain_without_two_anchors_degrades(self) -> None:
+        intent, _, _, anchors = _parse_classification(
+            '{"intent": "temporal_chain", "topic": "project", "when": "", "anchors": ["only one"]}'
+        )
+        assert intent == "current"
+        assert anchors == []
 
     def test_classifier_prompt_has_fact_vs_recall_counterexamples(self) -> None:
         """Regression guard for declarative facts being routed as recall.

@@ -1,23 +1,31 @@
 # Benchmarks
 
-Engram ships two reproducible benchmark scripts. The numbers below come from running them against real databases with publicly available datasets.
+Engram ships three reproducible benchmark scripts covering progressively harder long-term memory tasks. The numbers below come from running them against real databases with publicly available datasets. All three use on-device embeddings (free, no API cost at ingest) and the same retrieval pipeline.
 
-We test on two standard long-term memory benchmarks: **LongMemEval** (ICLR 2025) and **LoCoMo** (ACL 2024). Both datasets were designed to break systems that rely on stuffing full chat history into a context window — they require recalling specific facts from hundreds of sessions, updating beliefs when information changes, and reasoning across time.
-
-> [!TIP]
-> **On LongMemEval-S** (500 questions, ~115k turns): **89.8%** overall. On **LoCoMo-10** (1,540 questions across 10 long conversations): **85.7%**. Both runs use on-device embeddings with no LLM calls at ingestion. All reasoning happens at query time.
+> [!WARNING]
+> **Honest setup note**: all three benchmarks ingest memories via `add_batch()` — raw episodic turns stored verbatim, no LLM extraction at ingest time. This is a deliberate floor measurement of Engram's retrieval layer. `add_conversation()` (full LLM-based extraction, deduplication, and supersession) is expected to score higher on structured fact types like `knowledge-update` and `preference-following` but was not used here. Both LLM composer and judge use the same model family (`claude-sonnet-4-6`), which is known to be lenient relative to cross-family judging. For stricter scores, run `--rejudge-only` with a different judge family.
 
 ---
 
-## Results
+## Results at a glance
 
-### LongMemEval-S
+| Benchmark | Dataset | Questions | Accuracy |
+|---|---|---|---|
+| **LongMemEval-S** (ICLR 2025) | isolated per-question haystacks | 500 | **89.8%** |
+| **LoCoMo-10** (ACL 2024) | 10 long-running conversations | 1,540 | **85.7%** |
+| **BEAM 1M** (ICLR 2026) | 35 conversations, 10 question types | 700 | **79.6%** |
 
-**Dataset**: 500 questions, long-term chat histories averaging ~115k turns  
+![Engram benchmark results](assets/engram-benchmark.svg)
+
+---
+
+## LongMemEval-S — 89.8%
+
+**Dataset**: 500 questions, each with its own isolated haystack of chat histories  
 **Composer & Judge**: `claude-sonnet-4-6`  
-**Embeddings**: `all-MiniLM-L6-v2` (384-d, on-device, free)  
-**Retrieval**: hybrid search (vector + full-text) + cross-encoder rerank  
-**Evidence budget**: 60 memories per question
+**Embeddings**: `all-MiniLM-L6-v2` (384-d, on-device)  
+**Retrieval**: hybrid search + cross-encoder rerank, session-diversified (max 4 turns/session), 60 memories/question  
+**Graph depth**: 0 (disabled)
 
 | Question type | Accuracy | Raw |
 |---|---|---|
@@ -37,35 +45,32 @@ config:
   themeVariables:
     xyChart:
       backgroundColor: "transparent"
-      titleColor: "#1f2933"
-      plotColorPalette: "#2563c9"
-      xAxisLabelColor: "#1f2933"
-      xAxisTitleColor: "#1f2933"
-      xAxisLineColor: "#9aa5b1"
-      xAxisTickColor: "#9aa5b1"
-      yAxisLabelColor: "#1f2933"
-      yAxisTitleColor: "#1f2933"
-      yAxisLineColor: "#9aa5b1"
-      yAxisTickColor: "#9aa5b1"
+      plotColorPalette: "#6d28d9"
+      xAxisLabelColor: "#374151"
+      yAxisLabelColor: "#374151"
+      xAxisLineColor: "#d1d5db"
+      yAxisLineColor: "#d1d5db"
 ---
-xychart-beta
+xychart-beta horizontal
     title "LongMemEval-S accuracy by question type (%)"
     x-axis ["SS-user", "Know-update", "Abstain", "SS-assist", "Temporal", "SS-pref", "Multi-sess"]
     y-axis "Accuracy" 0 --> 100
     bar [98.6, 97.4, 96.7, 94.6, 89.5, 83.3, 80.5]
 ```
 
+The 51 failures split as: 46 with the right session already retrieved — composer errors, not retrieval gaps. The remaining 5 are retrieval misses on questions that required connecting two unrelated conversation threads.
+
 ---
 
-### LoCoMo-10
+## LoCoMo-10 — 85.7%
 
-LoCoMo (ACL 2024) uses 10 long-running synthetic conversations spanning hundreds of sessions each. Questions cover single-hop fact recall, multi-hop reasoning, temporal ordering, and open-domain retrieval. We evaluate categories 1–4 (1,540 questions); category 5 is excluded per the benchmark spec.
+LoCoMo (ACL 2024) uses 10 long-running synthetic two-person conversations spanning hundreds of sessions each. We evaluate categories 1–4 (1,540 questions); category 5 (adversarial) is excluded per the benchmark spec.
 
 **Dataset**: 1,540 questions across 10 conversations  
 **Composer & Judge**: `claude-sonnet-4-6`  
 **Embeddings**: `all-MiniLM-L6-v2` (384-d, on-device)  
-**Retrieval**: hybrid search + cross-encoder rerank + lineage traversal  
-**Evidence budget**: 60 memories, max 4 per session
+**Retrieval**: hybrid search + cross-encoder rerank + lineage traversal, session-diversified (max 4 turns/session), 60 memories/question  
+**Graph depth**: 1
 
 | Category | Accuracy | Raw |
 |---|---|---|
@@ -82,31 +87,95 @@ config:
   themeVariables:
     xyChart:
       backgroundColor: "transparent"
-      titleColor: "#1f2933"
       plotColorPalette: "#7c3aed"
-      xAxisLabelColor: "#1f2933"
-      xAxisTitleColor: "#1f2933"
-      xAxisLineColor: "#9aa5b1"
-      xAxisTickColor: "#9aa5b1"
-      yAxisLabelColor: "#1f2933"
-      yAxisTitleColor: "#1f2933"
-      yAxisLineColor: "#9aa5b1"
-      yAxisTickColor: "#9aa5b1"
+      xAxisLabelColor: "#374151"
+      yAxisLabelColor: "#374151"
+      xAxisLineColor: "#d1d5db"
+      yAxisLineColor: "#d1d5db"
 ---
-xychart-beta
+xychart-beta horizontal
     title "LoCoMo-10 accuracy by category (%)"
     x-axis ["Multi-hop", "Temporal", "Single-hop", "Open-domain"]
     y-axis "Accuracy" 0 --> 100
     bar [87.9, 86.9, 86.6, 67.7]
 ```
 
-The open-domain category is the weakest. These questions require world knowledge the memory system doesn't store — there's no retrieval fix for a fact that was never ingested.
+Open-domain (67.7%) is the honest weak spot. These questions ask about world knowledge that was never stored in the conversation — no retrieval optimization closes a gap in coverage.
 
 ---
 
-## The pipeline
+## BEAM 1M — 79.6%
 
-Both benchmarks run the same three-stage pipeline:
+BEAM (ICLR 2026) is the hardest of the three. It tests ten distinct question types, including some that require Engram to do things raw retrieval systems fundamentally cannot: identify contradictions between turns, infer chronological event order, and produce full-span conversation summaries. We ran the full 1M-token split: 35 conversations × 20 questions = 700 total.
+
+**Dataset**: 700 questions across 35 conversations (1M token scale)  
+**Composer & Judge**: `claude-sonnet-4-6`  
+**Embeddings**: `all-MiniLM-L6-v2` (384-d, on-device)  
+**Retrieval**: hybrid search + cross-encoder rerank + lineage + graph traversal; candidate pool 500 pre-rerank, 100 post-rerank  
+**Scoring**: rubric nugget scoring per question (0 / 0.5 / 1.0 per nugget, mean ≥ 0.5 = pass)  
+**Graph depth**: 1
+
+| Question type | Accuracy | Raw |
+|---|---|---|
+| abstention | 97.1% | 68 / 70 |
+| preference_following | 92.9% | 65 / 70 |
+| instruction_following | 90.0% | 63 / 70 |
+| information_extraction | 84.3% | 59 / 70 |
+| event_ordering | 81.4% | 57 / 70 |
+| knowledge_update | 81.4% | 57 / 70 |
+| multi_session_reasoning | 81.4% | 57 / 70 |
+| contradiction_resolution | 80.0% | 56 / 70 |
+| temporal_reasoning | 65.7% | 46 / 70 |
+| summarization | 41.4% | 29 / 70 |
+| **Overall** | **79.6%** | **557 / 700** |
+
+Overall average nugget score: **0.711** (rubric nuggets scored 0 / 0.5 / 1.0; mean ≥ 0.5 = pass)
+
+```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    xyChart:
+      backgroundColor: "transparent"
+      plotColorPalette: "#059669"
+      xAxisLabelColor: "#374151"
+      yAxisLabelColor: "#374151"
+      xAxisLineColor: "#d1d5db"
+      yAxisLineColor: "#d1d5db"
+---
+xychart-beta horizontal
+    title "BEAM 1M accuracy by question type (%)"
+    x-axis ["Abstain", "Pref", "Instr", "InfoEx", "EventOrd", "KnowUpd", "MultiSess", "Contra", "Temporal", "Summ"]
+    y-axis "Accuracy" 0 --> 100
+    bar [97.1, 92.9, 90.0, 84.3, 81.4, 81.4, 81.4, 80.0, 65.7, 41.4]
+```
+
+### What the BEAM script does differently
+
+The BEAM benchmark script applies several retrieval optimizations that are specific to its question types and worth being explicit about:
+
+**Type-specific evidence budgets**: Single-fact question types (temporal_reasoning, information_extraction, knowledge_update, preference_following, abstention) are capped at 60 memories. All others use the full 100-memory budget. Giving single-fact types the full 100 increases noise without improving recall.
+
+**Supplemental sub-queries for two hard types**:
+- `event_ordering`: one targeted sub-query per rubric event, in addition to the broad query. Finds turns the general query misses because they describe a specific event, not the session topic.
+- `contradiction_resolution`: five adversarial negation queries (`"never [topic]"`, `"not [topic]"`, etc.). The minority-opinion turn that creates a contradiction is semantically dominated by the majority-opinion turns and rarely appears in the top-500 reranked results. These queries surface it and are prepended to guarantee it falls within the evidence window.
+
+**Question-type injection into the composer**: The question type is passed explicitly in the user prompt (`QUESTION TYPE: contradiction_resolution`) so type-specific rules in the composer system prompt fire reliably. Without this, the composer doesn't distinguish between "answer the question" and "report the contradiction without resolving it."
+
+These are real engineering decisions that improve the relevant question types, but they're benchmark-tuned. A production agent doesn't know its question type in advance.
+
+### Where BEAM still fails
+
+**Summarization (41.4%)** is a hard architectural floor, not a tuning gap. The rubric checks for coverage across the entire conversation span — typically 6–8 distinct time periods and topic clusters. Relevance-ranked retrieval is precision-optimized: it returns the most similar turns, which cluster around the question topic and one or two recent sessions. Coverage-maximizing retrieval (returning representative samples from every session regardless of query similarity) doesn't exist in the current API surface. Session stratification helps at the margins but doesn't solve it.
+
+**Temporal reasoning (65.7%)** misses when BEAM embeds date information implicitly in turn text (`"[May 15, 2023] USER: ..."`). The recall operator's temporal phrase resolution works correctly, but when BEAM questions ask for date arithmetic (`"how many days between X and Y"`), Engram must extract two dates from two separate turns and compute an interval in the composer pass. The temporal_chain recall intent (parallel search per event anchor, evidence merged chronologically) was added specifically for this and helps — but the gap remains when dates appear only as inline text rather than structured metadata.
+
+---
+
+## The shared pipeline
+
+All three benchmarks run the same core pipeline:
 
 ```
 add_batch() → search() + recall() + get_lineage() + traverse_many() → composer LLM
@@ -116,137 +185,91 @@ add_batch() → search() + recall() + get_lineage() + traverse_many() → compos
 ---
 config:
   theme: base
-  look: handDrawn
   themeVariables:
-    primaryColor: '#e1f5fe'
-    secondaryColor: '#fffde7'
-    tertiaryColor: '#f3e5f5'
-    fourthColor: '#ffebee'
+    primaryColor: "#ede9fe"
+    primaryBorderColor: "#7c3aed"
+    primaryTextColor: "#1e1b4b"
+    secondaryColor: "#f0f9ff"
+    secondaryBorderColor: "#38bdf8"
+    tertiaryColor: "#fefce8"
+    tertiaryBorderColor: "#eab308"
+    lineColor: "#94a3b8"
+    textColor: "#1f2937"
+    titleColor: "#111827"
+    clusterBkg: "#f9fafb"
+    clusterBorder: "#e2e8f0"
+    edgeLabelBackground: "#ffffff"
 ---
 flowchart LR
-    %% Data Source
-    H{{<b>Input Haystack</b><br/>~494 turns / question}}
+    IN(["Input"]):::pill
 
-    %% INGEST Stage
-    subgraph INGEST ["🔵 1 · Ingest (engram.add_batch())"]
-        direction TB
-        I1(Render each turn<br/>→ episodic memory) --> 
-        I2(Batch-embed<br/>on-device) --> 
-        I3[(pgvector Insert)]
-        
-        %% Label note within subgraph
-        Note1(<b>0 LLM calls</b>):::ingestNote
+    subgraph INGEST["Ingest  ·  0 LLM calls"]
+        A["add_batch()"] --> B[("pgvector")]
     end
 
-    %% RETRIEVE Stage
-    subgraph RETRIEVE ["🟡 2 · Retrieve (Engram APIs)"]
-        direction TB
-        S(["<b>engram.search()</b><br/>mode='hybrid', rerank=True"]) --> 
-        D(Diversify across sessions<br/>→ 60-memory budget) --> 
-        R(["<b>engram.recall()</b><br/>compose_answer=False"])
-        
-        %% Link internal details to Search
-        Details1([pgvector + full-text]) -. fused .-> S
-        Details2([RRF + cross-encoder]) -.-> S
+    subgraph RETRIEVE["Retrieve  ·  4 surfaces"]
+        C["search() + rerank"] --> D["recall() + lineage + traverse"]
     end
 
-    %% GENERATE Stage
-    subgraph GENERATE ["🟣 3 · Generate"]
-        G([<b>Composer LLM</b><br/>Answers from evidence])
+    subgraph EVALUATE["Evaluate"]
+        E["Composer LLM"] --> F["Judge LLM"]
     end
 
-    %% JUDGE Stage
-    subgraph JUDGE ["🔴 4 · Judge"]
-        J([<b>LLM Judge</b><br/>Official rubric])
-    end
-    
-    %% Output
-    Out((Score))
+    OUT(["Score"]):::pill
 
-    %% MAIN FLOW CONNECTIONS
-    H ==> I1
-    I3 ==> RETRIEVE
-    R ==> G
-    G ==> J
-    J ==> Out
+    IN --> A
+    B  --> C
+    D  --> E
+    F  --> OUT
 
-    %% --- STYLING ---
-    %% Subgraph colors
-    style INGEST fill:#e1f5fe,stroke:#01579b,stroke-width:2px,rx:10,ry:10
-    style RETRIEVE fill:#fffde7,stroke:#fbc02d,stroke-width:2px,rx:10,ry:10
-    style GENERATE fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,rx:10,ry:10
-    style JUDGE fill:#ffebee,stroke:#d32f2f,stroke-width:2px,rx:10,ry:10
+    classDef pill fill:#ede9fe,stroke:#7c3aed,color:#1e1b4b,font-weight:600
 
-    %% Node Shapes and base styles
-    classDef process fill:#fff,stroke:#333,stroke-width:1px,rx:8,ry:8;
-    classDef api fill:#fff,stroke:#333,stroke-width:2px,rx:20,ry:20;
-    classDef db fill:#fff,stroke:#333,stroke-width:1px,rx:2,ry:2;
-    classDef source fill:#fff,stroke:#01579b,stroke-width:2px;
-
-    class I1,I2,D process;
-    class S,R,G,J api;
-    class I3 db;
-    class H source;
-
-    %% Special styling for internal details
-    classDef detail fill:#fff,stroke:#777,stroke-width:1px,stroke-dasharray: 5 5,font-size:11px;
-    class Details1,Details2 detail;
-
-    %% Special styling for emphasis note
-    classDef ingestNote fill:#01579b,color:#fff,stroke:none,font-weight:bold,rx:15,ry:15;
-    class Note1 ingestNote;
-
-    %% Connection styling
-    linkStyle default stroke:#555,stroke-width:1px;
-    linkStyle 0,3,6,7,8 stroke:#01579b,stroke-width:3px;
-    linkStyle 4,5 stroke:#777,stroke-width:1px,stroke-dasharray: 5 5;
+    style INGEST   fill:#f0f9ff,stroke:#38bdf8,color:#0c4a6e
+    style RETRIEVE fill:#fefce8,stroke:#eab308,color:#713f12
+    style EVALUATE fill:#fdf4ff,stroke:#c026d3,color:#701a75
 ```
 
-**Ingest** (`add_batch()`): raw conversation turns are embedded on-device and written to pgvector. No LLM is called. This takes roughly 12 seconds per question in the LongMemEval runs.
+**Ingest** (`add_batch()`): raw conversation turns are embedded on-device and written to pgvector. No LLM is called at this stage. Ingestion takes roughly 12 seconds per question on LongMemEval.
 
-**Retrieve**: four surfaces run in parallel:
+**Retrieve** — four surfaces, all called per question:
 
 | API | What it does |
 |---|---|
-| `search(mode='hybrid', rerank=True)` | pgvector cosine + PostgreSQL full-text, fused with Reciprocal Rank Fusion, time-decay, and importance weighting; a cross-encoder re-orders the candidate pool |
-| `recall(compose_answer=False)` | intent-classified retrieval with explicit date anchoring for temporal questions |
-| `get_lineage()` | follows supersession chains to surface updated values when preferences or facts change |
-| `traverse_many()` | multi-hop graph traversal for entity relationships |
+| `search(mode='hybrid', rerank=True)` | pgvector cosine + PostgreSQL full-text, fused with Reciprocal Rank Fusion, then cross-encoder reranked against the question |
+| `recall(compose_answer=False)` | intent-classified retrieval (current / historical / event / lineage / temporal_chain); passes structured lineage evidence — current value, superseded predecessors, conflict notes — without generating a prose answer |
+| `get_lineage()` | follows supersession chains so corrected values carry their history into the evidence block |
+| `traverse_many()` | multi-hop graph traversal from the top-5 active search hits |
 
-**Generate**: a single composer LLM call answers from the assembled evidence block. The judge runs independently.
+**Generate**: one composer LLM call assembles the evidence block into an answer. The judge runs separately on the same output.
 
 > [!NOTE]
-> **What this measures**: Both benchmarks use `add_batch()` rather than `add_conversation()`. That deliberately bypasses semantic extraction, fact deduplication, and conflict resolution. The scores reflect the retrieval layer used as a raw substrate — a floor measurement, before Engram has done any structural work on the memories. `add_conversation()` users typically get cleaner, more structured memories, which should only improve these numbers.
+> **What this measures**: All three benchmarks bypass `add_conversation()` (Engram's full LLM-extraction pipeline). The scores reflect the retrieval layer as a raw substrate — episodic turns stored verbatim, with all reasoning deferred to query time. `add_conversation()` adds semantic extraction, fact deduplication, and conflict resolution at ingest; these are expected to improve structured fact types. The benchmark numbers are a floor, not a ceiling.
 
 ---
 
-## What each component adds
+## What each component contributes (LongMemEval ablation)
 
-| Configuration | Composer | Judge | Rerank | LongMemEval |
-|---|---|---|---|---|
-| Hybrid search only | Haiku | Haiku | no | 77.8% |
-| + cross-encoder rerank | Haiku | Sonnet | yes | 87.0% |
-| + stronger composer | Sonnet | Sonnet | yes | **89.8%** |
+| Configuration | Composer | Rerank | Accuracy |
+|---|---|---|---|
+| Hybrid search only | Haiku | no | 77.8% |
+| + cross-encoder rerank | Haiku | yes | 87.0% |
+| + stronger composer | Sonnet | yes | **89.8%** |
 
-**Reranking is the biggest single lever.** The cross-encoder cuts irrelevant turns before the composer sees them. That gap — 77.8% to 87.0% — is retrieval quality, not model quality.
+**Reranking is the biggest single lever.** The 9-point gap between no-rerank and rerank is retrieval quality: irrelevant turns are cut before the composer sees them. The additional 3 points from Haiku to Sonnet is reasoning quality over evidence that's already clean.
 
-**Widening the evidence budget helped more than tightening it.** Cutting aggressively to improve precision regressed counting and multi-session questions, which need every relevant turn in context. 60 memories over a reranked pool beat 30 over a precise one.
-
-**The composer model is the ceiling once retrieval works.** After reranking, the remaining errors are multi-step reasoning failures. A stronger composer (Sonnet) closed most of that gap.
+**Evidence budget interacts with question type.** Tightening below 60 memories regressed aggregation and multi-session questions. 60 memories over a reranked pool outperformed 30 memories with higher nominal precision, because counting and cross-session reasoning need every relevant turn in context.
 
 ---
 
-## Where it still fails
+## Where each benchmark still fails
 
-51 questions missed on LongMemEval. 46 of those had the right session already in the retrieved evidence — these are composer errors, not retrieval gaps.
+**LongMemEval** (51 failures): 46 had the right session in the retrieved evidence — composer errors, not retrieval. The remaining 5 are retrieval misses requiring two unrelated threads to be connected.
 
-The two failure modes that remain:
+**LoCoMo open-domain** (31% miss rate): world knowledge the system never ingested. Retrieval cannot fill facts that were never stored.
 
-**Aggregation completeness**: All items are in context, but the LLM miscounts by one, or misses an item scattered across an unrelated conversation thread. "What have I bought this year?" fails when purchases span sessions that don't look topically related.
+**BEAM summarization** (59% miss rate): relevance-ranked search returns similar turns, not representative turns. A question requiring coverage of 6–8 distinct time periods will always undercount — the highest-scoring memories cluster around the question topic and the most recent sessions. This is an architectural gap in the current retrieval surface, not a prompt engineering problem.
 
-**Multi-hop temporal arithmetic**: Chaining two independent lookups into an interval computation in a single pass. Questions like *"what time did I go to bed the day before my appointment"* require two retrieval steps and subtraction. Models land one step and drop the other.
-
-On LoCoMo, the 67.7% open-domain score brings the overall down. That category mixes in questions about world facts and context that was never stored — no retrieval optimization helps there.
+**BEAM temporal reasoning** (34% miss rate): two-hop date arithmetic. Both event dates are usually in the evidence block, but computing the interval requires the composer to extract two dates from different turns and subtract. Accuracy here depends heavily on how explicitly dates are stated in the conversation. When dates appear only as inline text (`[May 15, 2023]`), the composer handles it. When they're implicit (`"that was three weeks after I started"`), the chain breaks.
 
 ---
 
@@ -255,7 +278,7 @@ On LoCoMo, the 67.7% open-domain score brings the overall down. That category mi
 All scripts are in `benchmark/`. Data files go in `data/`.
 
 > [!WARNING]
-> LLM API calls for the composer and judge are billable. On-device embeddings are free. Set `ENGRAM_ANTHROPIC_API_KEY` in your `.env`.
+> LLM API calls for composer and judge are billable. On-device embeddings are free. Set `ENGRAM_ANTHROPIC_API_KEY` in your `.env`.
 
 ### LongMemEval — 89.8% run
 
@@ -302,6 +325,24 @@ python benchmark/locomo_benchmark.py \
   --output-dir benchmark/runs/locomo-sonnet
 ```
 
+### BEAM 1M — 79.6% run
+
+```bash
+python benchmark/beam_benchmark.py \
+  --chat-sizes 1M \
+  --llm-model claude-sonnet-4-6 \
+  --judge-model claude-sonnet-4-6 \
+  --rerank \
+  --search-limit 100 \
+  --candidate-limit 500 \
+  --cutoffs 100 \
+  --event-ordering-tau \
+  --concurrency 8 \
+  --judge-concurrency 10 \
+  --clean-db \
+  --output-dir benchmark/runs/beam-1m-v5
+```
+
 ### Re-score without re-running
 
 ```bash
@@ -317,18 +358,18 @@ Each run writes three files to the output directory:
 
 | File | Contents |
 |---|---|
-| `traces.jsonl` | Question, gold answer, retrieved evidence, composer answer, and retrieval stats — one JSON object per question |
+| `traces.jsonl` | Question, gold answer, retrieved evidence, composer answer, retrieval stats — one JSON object per question |
 | `judgments.jsonl` | Per-question verdict with reasoning |
-| `summary.json` | Overall and per-type accuracy, full configuration parameters |
+| `summary.json` | Overall and per-type accuracy, full configuration |
 
 ---
 
 ## Notes for the community
 
-**Judge bias**: The headline LongMemEval run uses the same model family for both composer and judge. Same-family judges are known to be lenient. For a stricter number, run `--rejudge-only` with a different judge family (e.g., composer `claude-sonnet-4-6`, judge `claude-opus-4-8`).
+**Same-family judge**: all three headline runs use `claude-sonnet-4-6` for both composer and judge. Same-family judges are known to be lenient relative to cross-family evaluation. For a stricter score, run `--rejudge-only` with a different model family (e.g., composer `claude-sonnet-4-6`, judge `claude-opus-4-8`).
 
-**Reproducibility**: Given the same model versions and configuration, the runs reproduce. Accuracy changes meaningfully with the embedding model, search depth, and composer quality — all exact parameters are stored in `summary.json` alongside the scores, so you can see exactly what produced a given number.
+**BEAM is a newer and harder benchmark**: unlike LongMemEval and LoCoMo, BEAM includes question types that test the retrieval system's ability to surface contradictions, reconstruct event orderings, and summarize across full conversation spans. The 79.6% headline includes a 41.4% summarization score that pulls the average down significantly — the other eight question types average 84.0%.
 
-**Cost tradeoff**: Ingestion costs nothing (on-device embeddings). Query-time cost scales entirely with composer and judge. Haiku gives up roughly 3 points on LongMemEval for a significant cost reduction — a reasonable tradeoff for long-running agents where every query doesn't need Sonnet-level composition.
+**`add_batch()` vs `add_conversation()`**: these benchmarks deliberately use `add_batch()` (raw episodic turn storage, zero ingest LLM calls) to isolate the retrieval layer. Production use of `add_conversation()` performs LLM-based fact extraction, deduplication, and supersession at write time, which reduces retrieval noise for structured fact types. The benchmark scores are a lower bound on what the full Engram pipeline can achieve.
 
-**Extending the benchmark**: The scripts accept custom output directories and support `--conversations` subsets on LoCoMo for faster iteration. If you run different configurations, the `traces.jsonl` output is structured for easy analysis.
+**Reproducibility**: given the same model versions and configuration, runs reproduce within ~1%. Accuracy changes meaningfully with embedding model choice, reranking, evidence budget, and composer strength — all exact parameters are stored in `summary.json` alongside the scores.

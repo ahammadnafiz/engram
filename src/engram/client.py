@@ -1941,12 +1941,24 @@ class Engram:
     ) -> RecallAnswer:
         """Answer a natural-language question about memory, source-backed.
 
-        The memory operator classifies the question's intent (current fact,
-        historical/old-value, event recall, or topic lineage), routes to the
-        matching recall surface(s), and composes an answer grounded in the
-        retrieved evidence. The returned RecallAnswer carries the prose answer
-        plus the structured facts behind it (current value, previous values,
-        when it changed, sources, and any conflict note).
+        The memory operator classifies the question's intent, routes to the
+        right recall surface(s), and composes an answer grounded in retrieved
+        evidence. The returned RecallAnswer carries the prose answer plus
+        structured facts (current value, previous values, when it changed,
+        sources, and any conflict note).
+
+        Intents and their routing:
+
+        - ``current`` — single hybrid search for the most relevant active memory.
+        - ``historical`` — search + lineage traversal to surface superseded values.
+        - ``event`` — full-text event search over the raw conversation log.
+        - ``lineage`` — complete revision history for one topic.
+        - ``temporal_chain`` — **two parallel searches**, one per event anchor,
+          merged and sorted chronologically. Automatically detected for questions
+          that ask about an interval or gap between two distinct past events
+          (e.g. "how many days between starting X and finishing Y?"). The two
+          anchor queries are available in ``RecallAnswer.trace["anchors"]``.
+        - ``chat`` — not a recall request; returns an empty answer immediately.
 
         Requires a configured LLM. The underlying surfaces (search,
         search_events, explain_memory, get_lineage) work without one.
@@ -1957,7 +1969,9 @@ class Engram:
             user_id: Optional user filter.
             question_date: Reference "now" for temporal phrases ("yesterday").
                 Defaults to the current time.
-            limit: Maximum evidence items to retrieve.
+            limit: Maximum evidence items per search surface. For
+                ``temporal_chain`` this is applied per anchor (total evidence
+                may be up to ``2 * limit``).
             compose_answer: Whether to run the recall operator's final answer
                 composer. Set to False when the caller will generate its own
                 answer from the structured recall evidence.
@@ -1971,10 +1985,13 @@ class Engram:
 
         Example:
             answer = await engram.recall(
-                "what was my meeting before I changed it?",
+                "how many days between starting the ML project and submitting it?",
                 agent_id="my_agent",
                 user_id="nafiz",
             )
+            # answer.intent == "temporal_chain"
+            # answer.trace["anchors"] == ["started ML project", "submitted ML project"]
+            # answer.evidence contains memories for both events, sorted by date
             print(answer.answer_text)
         """
         self._ensure_connected()

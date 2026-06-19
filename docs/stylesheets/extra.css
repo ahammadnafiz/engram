@@ -354,26 +354,36 @@
   color: var(--engram-accent);
 }
 
+/* ── Mermaid diagrams ────────────────────────────────────────────────
+   Diagrams are always rendered in light mode (light fills, dark text).
+   We force a white card in both colour schemes so labels stay legible
+   without per-diagram dark-mode overrides. The subtle inset ring gives
+   the card a framed feel without a heavy border. */
 .md-typeset .mermaid {
-  background: var(--engram-panel);
-  border: 1px solid var(--engram-border);
-  border-radius: 8px;
-  margin: 1rem 0 1.4rem;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow:
+    0 1px 3px rgba(15, 23, 42, 0.05),
+    0 4px 12px rgba(15, 23, 42, 0.04);
+  margin: 1.75rem 0;
   overflow-x: auto;
-  padding: 1rem;
+  padding: 1.75rem 1.5rem;
+  text-align: center;
 }
 
-/* Diagrams are authored with light fills and dark text/edges, so a dark card
-   would hide their labels and connectors. Keep the canvas light in dark mode. */
 [data-md-color-scheme="slate"] .md-typeset .mermaid {
-  background: #ffffff;
+  border-color: rgba(255, 255, 255, 0.10);
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.25),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 
 .md-typeset .mermaid svg {
-  display: block;
-  height: auto;
-  margin: 0 auto;
+  display: inline-block;
+  height: auto !important;
   max-width: 100%;
+  vertical-align: middle;
 }
 
 .md-typeset .tabbed-set {

@@ -73,7 +73,7 @@ superseded.
 
 - :material-chart-bar: **[Benchmarks](benchmarks.md)**
 
-    89.8% on LongMemEval-S (ICLR 2025) and 85.7% on LoCoMo-10 (ACL 2024). Both runs are reproducible with the scripts in `benchmark/`.
+    79.6% on BEAM 1M (ICLR 2026), 89.8% on LongMemEval-S (ICLR 2025), 85.7% on LoCoMo-10 (ACL 2024). All three runs use `add_batch()` (no LLM at ingest) and are reproducible with the scripts in `benchmark/`.
 
 </div>
 
@@ -148,14 +148,17 @@ When `Engram.connect()` is called, it automatically creates the database schema,
 
 ## Benchmark results
 
-Engram is evaluated on two standard long-term memory benchmarks. Both runs use on-device embeddings (`all-MiniLM-L6-v2`) with no LLM calls at ingestion. All reasoning happens at query time via `search()` + `recall()` + `get_lineage()`.
+Engram is evaluated on three standard long-term memory benchmarks. All runs use on-device embeddings (`all-MiniLM-L6-v2`, free, no API cost at ingest) and `add_batch()` — raw episodic turns stored verbatim, with all reasoning deferred to query time via `search()` + `recall()` + `get_lineage()`. Same model is used for both composer and judge (`claude-sonnet-4-6`), which is a known leniency bias worth disclosing. These are floor numbers: `add_conversation()` (full LLM extraction at ingest) is expected to score higher.
 
-| Benchmark | Questions | Score | Composer |
+![Engram benchmark results](assets/engram-benchmark.svg)
+
+| Benchmark | Questions | Accuracy | Composer |
 |---|---|---|---|
-| [LongMemEval-S](benchmarks.md#longmemeval-s) (ICLR 2025) | 500 | **89.8%** | claude-sonnet-4-6 |
-| [LoCoMo-10](benchmarks.md#locomo-10) (ACL 2024) | 1,540 | **85.7%** | claude-sonnet-4-6 |
+| [LongMemEval-S](benchmarks.md#longmemeval-s-898) (ICLR 2025) | 500 | **89.8%** | claude-sonnet-4-6 |
+| [LoCoMo-10](benchmarks.md#locomo-10-857) (ACL 2024) | 1,540 | **85.7%** | claude-sonnet-4-6 |
+| [BEAM 1M](benchmarks.md#beam-1m-796) (ICLR 2026) | 700 | **79.6%** | claude-sonnet-4-6 |
 
-Both benchmark scripts are in `benchmark/` and can be run against your own database. See [Benchmarks](benchmarks.md) for the full breakdown, ablation table, and reproduce commands.
+All three benchmark scripts are in `benchmark/` and can be run against your own database. See [Benchmarks](benchmarks.md) for full per-type breakdowns, honest caveats, ablation table, and reproduce commands.
 
 ## Included Examples
 

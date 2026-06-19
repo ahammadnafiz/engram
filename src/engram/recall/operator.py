@@ -9,6 +9,7 @@ underlying recall surfaces (``search``, ``search_events``, ``explain_memory``,
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -23,17 +24,19 @@ if TYPE_CHECKING:
     from engram.core._types import AgentId, UserId
     from engram.memory.models import Memory
 
-_VALID_INTENTS = {"current", "historical", "event", "lineage", "chat"}
+_VALID_INTENTS = {"current", "historical", "event", "lineage", "temporal_chain", "chat"}
 
 _CLASSIFY_SYSTEM = """You route the CURRENT USER MESSAGE for a personal-memory assistant.
 Return ONLY a JSON object, no prose, no code fences:
-{"intent": "current|historical|event|lineage|chat", "topic": "<keywords>", "when": "<temporal phrase or empty>"}
+{"intent": "current|historical|event|lineage|temporal_chain|chat", "topic": "<keywords>", "when": "<temporal phrase or empty>", "anchors": []}
 
 intents:
 - current: what is true now ("when is my meeting", "where do I live now")
 - historical: what changed or the old value ("what was my meeting before I changed it", "what did I update")
 - event: what was said/asked in the conversation ("what did I ask yesterday", "what prompt did I use")
 - lineage: the full timeline of one topic ("show the history of my meeting time")
+- temporal_chain: an interval or gap between TWO distinct events at different points in time
+  ("how many days between X and Y", "how long after X did Y happen", "how much time passed between X and Y")
 - chat: not a memory recall request; the user is sharing new facts, correcting
   facts, asking a general non-memory question, or giving an instruction
 
@@ -43,7 +46,7 @@ critical routing rules:
   the user just authored in this message.
 - If the user is asking what you know/remember about them, their profile,
   schedule, preferences, history, prior messages, or saved facts, return one of
-  current/historical/event/lineage.
+  current/historical/event/lineage/temporal_chain.
 - A sentence can mention a memory topic without being a recall request.
   Declarative first-person updates are chat; questions about saved values are
   recall.
@@ -54,25 +57,37 @@ critical routing rules:
 - event is only for what was literally said or asked in the conversation. A
   question about a stored fact (which database, who is on the team, what was
   bought) is current, not event, even if the fact came up earlier.
+- temporal_chain requires TWO separable events. "How long did my sprint last?" is
+  current (one event), but "how many days between starting project X and completing it?"
+  is temporal_chain (two events).
+
+anchors field:
+- For temporal_chain: exactly 2 short search phrases, one per event anchor.
+  Example: "how many days after I started soccer practice did I reserve the court?"
+  → anchors: ["started soccer practice", "reserved the court"]
+- For all other intents: anchors must be [] (empty array).
 
 examples:
-- "i have a meeting at 3pm in zoom" -> {"intent":"chat","topic":"meeting","when":""}
-- "remember my meeting is at 3pm in zoom" -> {"intent":"chat","topic":"meeting","when":""}
-- "actually my meeting moved to 10pm" -> {"intent":"chat","topic":"meeting time","when":""}
-- "i live in dhaka and study cse at uiu" -> {"intent":"chat","topic":"location education","when":""}
-- "what is my name" -> {"intent":"current","topic":"name","when":""}
-- "where do i live" -> {"intent":"current","topic":"location","when":""}
-- "what time is my meeting" -> {"intent":"current","topic":"meeting time","when":""}
-- "what latency threshold must we hit before we launch?" -> {"intent":"current","topic":"latency threshold launch","when":""}
-- "who is managing the launch pipeline?" -> {"intent":"current","topic":"launch pipeline manager","when":""}
-- "which database did we pick and why?" -> {"intent":"current","topic":"database choice reason","when":""}
-- "what was my meeting time before i changed it" -> {"intent":"historical","topic":"meeting time","when":""}
-- "what did i ask yesterday about the chatbot" -> {"intent":"event","topic":"chatbot","when":"yesterday"}
-- "show the history of my meeting time" -> {"intent":"lineage","topic":"meeting time","when":""}
-- "explain postgres indexing" -> {"intent":"chat","topic":"postgres indexing","when":""}
+- "i have a meeting at 3pm in zoom" -> {"intent":"chat","topic":"meeting","when":"","anchors":[]}
+- "remember my meeting is at 3pm in zoom" -> {"intent":"chat","topic":"meeting","when":"","anchors":[]}
+- "actually my meeting moved to 10pm" -> {"intent":"chat","topic":"meeting time","when":"","anchors":[]}
+- "i live in dhaka and study cse at uiu" -> {"intent":"chat","topic":"location education","when":"","anchors":[]}
+- "what is my name" -> {"intent":"current","topic":"name","when":"","anchors":[]}
+- "where do i live" -> {"intent":"current","topic":"location","when":"","anchors":[]}
+- "what time is my meeting" -> {"intent":"current","topic":"meeting time","when":"","anchors":[]}
+- "what latency threshold must we hit before we launch?" -> {"intent":"current","topic":"latency threshold launch","when":"","anchors":[]}
+- "who is managing the launch pipeline?" -> {"intent":"current","topic":"launch pipeline manager","when":"","anchors":[]}
+- "which database did we pick and why?" -> {"intent":"current","topic":"database choice reason","when":"","anchors":[]}
+- "what was my meeting time before i changed it" -> {"intent":"historical","topic":"meeting time","when":"","anchors":[]}
+- "what did i ask yesterday about the chatbot" -> {"intent":"event","topic":"chatbot","when":"yesterday","anchors":[]}
+- "show the history of my meeting time" -> {"intent":"lineage","topic":"meeting time","when":"","anchors":[]}
+- "how many days between starting my ML project and submitting it?" -> {"intent":"temporal_chain","topic":"ML project start submission","when":"","anchors":["started ML project","submitted ML project"]}
+- "how long after I set my sprint deadline did I adjust it?" -> {"intent":"temporal_chain","topic":"sprint deadline","when":"","anchors":["set sprint deadline","adjusted sprint deadline"]}
+- "explain postgres indexing" -> {"intent":"chat","topic":"postgres indexing","when":"","anchors":[]}
 
 topic: the subject to search for, reduced to keywords (e.g. "meeting time", "current city").
-when: a temporal phrase only if the question contains one (e.g. "yesterday", "last week"), else ""."""
+when: a temporal phrase only if the question contains one (e.g. "yesterday", "last week"), else "".
+anchors: for temporal_chain only — exactly 2 short search phrases for the two events."""
 
 _COMPOSE_SYSTEM = """Answer the user's question using only the memory evidence provided.
 
@@ -90,7 +105,7 @@ Treat the evidence as authoritative and answer it directly:
 Be concise and factual."""
 
 
-def _parse_classification(raw: str) -> tuple[RecallIntent, str, str]:
+def _parse_classification(raw: str) -> tuple[RecallIntent, str, str, list[str]]:
     """Parse the classifier's JSON; fall back to current-intent on any error."""
     text = raw.strip()
     if text.startswith("```"):
@@ -107,9 +122,15 @@ def _parse_classification(raw: str) -> tuple[RecallIntent, str, str]:
             intent = "current"
         topic = str(data.get("topic") or "").strip()
         when = str(data.get("when") or "").strip()
-        return intent, topic, when  # type: ignore[return-value]
+        raw_anchors = data.get("anchors") or []
+        anchors = [str(a).strip() for a in raw_anchors if a][:2]
+        # temporal_chain without two anchors degrades to current-intent search
+        if intent == "temporal_chain" and len(anchors) < 2:
+            intent = "current"
+            anchors = []
+        return intent, topic, when, anchors  # type: ignore[return-value]
     except (json.JSONDecodeError, ValueError, AttributeError):
-        return "current", "", ""
+        return "current", "", "", []
 
 
 def _split_lineage(members: list[Memory]) -> tuple[Memory | None, list[Memory]]:
@@ -179,9 +200,9 @@ async def recall(
             "explain_memory() for LLM-free recall surfaces."
         )
 
-    # Step 1: classify intent + extract topic and temporal phrase.
+    # Step 1: classify intent + extract topic, temporal phrase, and event anchors.
     raw = await engram.llm.complete(question, system=_CLASSIFY_SYSTEM, temperature=0)
-    intent, topic, when_phrase = _parse_classification(raw)
+    intent, topic, when_phrase, anchors = _parse_classification(raw)
     topic = topic or question
     since, until = resolve_timeframe(when_phrase, base=question_date)
 
@@ -191,6 +212,7 @@ async def recall(
         "when_phrase": when_phrase,
         "since": since.isoformat() if since else None,
         "until": until.isoformat() if until else None,
+        "anchors": anchors,
         "raw_classification": raw,
     }
 
@@ -206,7 +228,29 @@ async def recall(
     if intent == "chat":
         return RecallAnswer(answer_text="", intent=intent, trace=trace)
 
-    if intent == "event":
+    if intent == "temporal_chain":
+        # Two parallel searches — one per event anchor — then merge by date.
+        # This solves two-hop temporal questions where both events need to be in
+        # evidence simultaneously (e.g. "how many days between starting X and Y?").
+        tasks = [
+            engram.search(anchor, agent_id, user_id=user_id, limit=limit)
+            for anchor in anchors
+        ]
+        results_per_anchor = await asyncio.gather(*tasks, return_exceptions=True)
+        seen_ids: set[str] = set()
+        for result in results_per_anchor:
+            if isinstance(result, Exception):
+                continue
+            for r in result:
+                if r.memory.memory_id not in seen_ids:
+                    seen_ids.add(r.memory.memory_id)
+                    evidence.append(r.memory)
+        # Sort chronologically so the composer can compute the interval directly.
+        evidence.sort(key=lambda m: m.created_at or m.valid_from or m.updated_at)  # type: ignore[arg-type]
+        current = evidence[0] if evidence else None
+        sources = [_source(m) for m in evidence]
+
+    elif intent == "event":
         events = await engram.search_events(
             topic,
             agent_id=agent_id,
