@@ -77,7 +77,7 @@ class TestParseClassification:
         assert anchors == []
 
     def test_temporal_chain_extracts_anchors(self) -> None:
-        intent, topic, when, anchors = _parse_classification(
+        intent, _topic, _when, anchors = _parse_classification(
             '{"intent": "temporal_chain", "topic": "project start finish", "when": "", '
             '"anchors": ["started ML project", "submitted ML project"]}'
         )
