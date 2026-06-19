@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0b1] - 2026-06-19
+
 ### Added
 - Batched memory-operation decisions: `add_conversation` now consolidates all
   extracted facts in a single LLM call, chunked into bounded concurrent
@@ -21,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the database is already at the current version.
 - `PostgresStorage.settings` accessor and `health_check(skip_embedding_test=...)`
   to skip the metered embedding probe.
+- BEAM 1M benchmark (`benchmark/beam_benchmark.py`): 700 questions across 10
+  question types with nugget scoring (0/0.5/1.0 per nugget), evaluated at the
+  1M-token scale. Engram scores 79.6% overall using `add_batch()` ingest and
+  4-surface retrieval (`search` + `recall` + `get_lineage` + `traverse_many`).
+- `temporal_chain` recall intent: two-hop temporal questions extract two anchor
+  phrases, run parallel searches, and merge results chronologically.
+- Benchmark evaluation scripts for all three standard benchmarks
+  (BEAM 1M, LongMemEval-S, LoCoMo-10) in `benchmark/` with reproducible
+  commands and honest caveats documented in `docs/benchmarks.md`.
+- `docs/assets/engram-benchmark.svg` summary chart embedded in docs.
 
 ### Changed
 - Configured search weights now apply to all search modes. Hybrid and semantic
@@ -32,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching `add_conversation`'s behavior.
 - Per-scope write advisory lock keyed with 64-bit `hashtextextended` to reduce
   false sharing across scopes.
+- MkDocs mermaid rendering overhauled: global `theme: base` with brand-aligned
+  themeVariables, `htmlLabels: false`, and a `MutationObserver` for live
+  dark/light re-render. Diagrams are always rendered in light mode and framed
+  in a white card for consistent legibility.
 
 ### Fixed
 - `forget()` repoints the lineage head to the newest surviving revision instead

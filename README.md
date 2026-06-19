@@ -71,13 +71,13 @@ Summarization (41.4%) is a known architectural floor: relevance-ranked retrieval
 
 ---
 
-Engram is an alpha-stage memory management library for AI agents and LLM
+Engram is a beta memory management library for AI agents and LLM
 applications. It provides persistent, searchable memory using PostgreSQL and
 pgvector, with hybrid retrieval, durable task ledgers, typed critical memory,
 source-anchored long-input ingestion, and traceable recall.
 
-> Status: **developer preview / alpha**. The architecture and local test suite
-> are in good shape, but public APIs may still change before a stable release.
+> Status: **beta**. The architecture and local test suite are in good shape,
+> but public APIs may still change before a stable release.
 
 ## The Problem: Why Conversational Memory Fails
 

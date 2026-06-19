@@ -3,7 +3,7 @@
 This guide covers how to initialize, upgrade, and manage the PostgreSQL database schema for Engram.
 
 > [!WARNING]
-> Engram is currently in alpha and the schema is subject to change. **Always back up your database before running migrations against an existing populated database.**
+> Engram is currently in beta and the schema is subject to change. **Always back up your database before running migrations against an existing populated database.**
 
 ---
 

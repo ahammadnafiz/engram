@@ -41,7 +41,7 @@ superseded.
 </div>
 
 > [!WARNING]  
-> **Alpha Status**: Engram is at `0.3.0a2`. It is rigorously tested, but the public API and the database schema are subject to change before 1.0. Always back up your data before you run a migration.
+> **Beta**: Engram is at `0.3.0b1`. It is rigorously tested, but the public API and the database schema are subject to change before 1.0. Always back up your data before you run a migration.
 
 ## Documentation Guides
 

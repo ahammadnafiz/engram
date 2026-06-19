@@ -1,6 +1,6 @@
 # Production Guide
 
-Engram is an alpha-stage cognitive architecture. This guide outlines the best practices, security requirements, and operational strategies required to run it safely and reliably in a production environment.
+Engram is a beta-stage cognitive architecture. This guide outlines the best practices, security requirements, and operational strategies required to run it safely and reliably in a production environment.
 
 > [!WARNING]
 > Because Engram is in active development, the database schema and API contracts are subject to change. Ensure you have automated backups and a staged deployment environment before upgrading versions.

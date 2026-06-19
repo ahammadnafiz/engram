@@ -1,7 +1,7 @@
 # Architecture
 
 Engram is an async Python memory layer backed by PostgreSQL + pgvector. The
-current alpha architecture is built for persistent fact memory, source-aware
+current beta architecture is built for persistent fact memory, source-aware
 long-input handling, graph expansion, and resumable long-running task state.
 
 ## System View
