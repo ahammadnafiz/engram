@@ -167,5 +167,5 @@ Engram ships with working reference implementations in the `examples/` directory
 | File | What it demonstrates |
 |------|----------------------|
 | `examples/basic_usage.py` | A comprehensive tour of almost the entire API surface. |
-| `examples/chatbot.py` | A real OpenAI-backed terminal chatbot with background event extraction. |
+| `examples/chatbot.py` | A real Gemini-backed terminal chatbot: the benchmark `add_batch` floor + 4-surface retrieval + composer pipeline, run live. |
 | `examples/long_input_usage.py` | Securely ingesting a massive document and answering questions from anchored source chunks. |

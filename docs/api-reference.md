@@ -83,6 +83,8 @@ await engram.add_conversation(
 ```
 Processes a conversation turn to intelligently extract, compare, and store new memories using the configured LLM provider. Set `extract_assistant_response=True` only if you want the assistant's own statements converted into stored memories.
 
+> **Use as the sole writer to a memory space.** `add_conversation()` searches the agent's existing memories to decide ADD/UPDATE/DELETE. If you also store raw turns in the same space with `add_batch()`, the freshly-extracted fact is found already present verbatim in its own raw row, so the decision step judges it identical and NOOPs it — supersession never fires. Either let `add_conversation()` own a memory space, or keep the two writers in separate namespaces. (The `examples/chatbot.py` example deliberately uses `add_batch()` only for this reason.)
+
 ---
 
 ## 3. Memory Helpers & Lineage

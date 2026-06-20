@@ -1378,15 +1378,28 @@ class MemoryStore:
         Returns:
             Number of memories deleted.
         """
+        # memory_lineages is keyed independently of agent_memory: its
+        # current_memory_id has no foreign key, so deleting memories alone
+        # orphans the lineage rows (they only cascade when the agents row is
+        # dropped). Delete them explicitly with the same agent/user predicate.
         if user_id:
             result = await self._storage.execute(
                 "DELETE FROM agent_memory WHERE agent_id = $1 AND user_id = $2",
                 agent_id,
                 user_id,
             )
+            await self._storage.execute(
+                "DELETE FROM memory_lineages WHERE agent_id = $1 AND user_id = $2",
+                agent_id,
+                user_id,
+            )
         else:
             result = await self._storage.execute(
                 "DELETE FROM agent_memory WHERE agent_id = $1",
+                agent_id,
+            )
+            await self._storage.execute(
+                "DELETE FROM memory_lineages WHERE agent_id = $1",
                 agent_id,
             )
 

@@ -711,6 +711,25 @@ class TestMemoryStorePurge:
         call_args = mock_storage.execute.call_args
         assert "user_id" in str(call_args) or len(call_args[0]) > 2
 
+    @pytest.mark.asyncio
+    async def test_purge_also_clears_lineages(
+        self, mock_storage: MagicMock, mock_embedding: MagicMock
+    ) -> None:
+        """Purge must delete memory_lineages too, or they orphan (no FK on
+        current_memory_id cascades from agent_memory)."""
+        from engram.memory.store import MemoryStore
+
+        mock_storage.execute = AsyncMock(return_value="DELETE 5")
+
+        store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
+        await store.purge("agent_1")
+
+        queries = " ".join(
+            call.args[0] for call in mock_storage.execute.call_args_list
+        )
+        assert "DELETE FROM agent_memory" in queries
+        assert "DELETE FROM memory_lineages" in queries
+
 
 class TestMemoryStoreUpdate:
     """Tests for MemoryStore.update() method."""

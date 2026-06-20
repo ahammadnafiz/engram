@@ -79,27 +79,19 @@ This script ingests a large block of text, chunks it using heading and token bou
 ## 3. `examples/chatbot.py`
 
 **Goal:** A fully functional, terminal-based AI assistant backed by Engram memory.  
-**Command:** `python examples/chatbot.py` *(Requires OpenAI setup)*
+**Command:** `python examples/chatbot.py` *(defaults to local `all-MiniLM-L6-v2` embeddings + Google `gemini-3.1-flash-lite`; set `GEMINI_API_KEY`)*
 
-This is a real chat loop. It builds prompt context before every LLM call, records every turn to the event ledger, and queues background memory jobs so that the agent dynamically "remembers" facts you told it earlier in the conversation.
+This is the exact pipeline proven in `benchmark/`, run live. Each turn does three things:
 
-### Chatbot Recall Modes
+1. **Ingest** — the turn is stored verbatim as a date-anchored episodic memory via `add_batch()`. On-device embeddings only: no LLM extraction at write time, no cost, no supersession.
+2. **Retrieve** — 4 surfaces over everything stored before the turn: hybrid `search()` (vector + full-text, cross-encoder reranked), `recall(compose_answer=False)` for structured current/previous evidence, `get_lineage()` for superseded predecessors, and `traverse_many()` for graph relations.
+3. **Generate** — one composer LLM call answers from the assembled evidence block.
 
-You can control how the chatbot pulls memory by exporting `ENGRAM_CHATBOT_RECALL_MODE`.
+> **Why not `add_conversation()` at ingest?** We evaluated the hybrid (`add_batch` + `add_conversation` per turn) and removed it. With the raw turns co-located in the same memory space, `add_conversation`'s extractor finds each fact already present verbatim in the floor row it came from, so the decision step judges it "semantically identical" and NOOPs it — the lineage layer barely fires while roughly doubling LLM cost per turn. The floor + composer answers temporal and overwrite questions correctly on its own. `add_conversation()` remains a first-class API; it just must be the **sole writer** to a memory space, never mixed with `add_batch()` (see its API note).
 
-| Mode | Behavior | Use Case |
-|------|----------|----------|
-| `operator` *(Default)* | Routes the turn through `engram.recall()`. The LLM classifies user intent (current vs history vs event) and maps temporal filters before retrieving evidence. | Production default. Balances intelligence and latency. |
-| `fast` | Single embedding-backed lookup + deterministic critical pin lookup. No pre-LLM routing. | Ultra-low latency requirements. |
-| `deep` | High-recall evaluation. Injects bounded recent-memory safety nets, hard constraints, and `deep_search()` RRF fusion. | Complex reasoning or open-ended aggregation questions. |
-| `debug` | Same as `deep`, but includes `trace_recall()` metadata directly in the terminal output. | Debugging why a specific memory was (or wasn't) injected. |
+### How memory changes are tracked
 
-### Memory Processing Modes
-
-| Mode | Behavior |
-|------|----------|
-| `inline` *(Default)* | Blocks the chat loop while background facts are derived. Slower, but facts are instantly available on the next turn. |
-| `deferred` | `fast` mode only. Queues the memory job, but requires you to run `run_memory_worker()` in a separate terminal process to actually extract the facts. |
+Because ingest never supersedes, evolving facts (e.g. a budget revised from $5k to $7k) are stored as separate date-anchored turns. The composer reconstructs the current value and its history by reasoning over those dated rows at read time. Structured lineage chains (`get_lineage()` / `recall("...before...")`) only form when you drive them explicitly with `/remember` + `/revise`.
 
 ### Built-in Chat Commands
 
@@ -107,13 +99,16 @@ Inside the terminal, you can type special commands to interact directly with the
 
 | Command | Action |
 |---------|--------|
-| `/remember <fact>` | Force-store a semantic fact bypassing background derivation. |
-| `/revise <id> <fact>` | Force-update a memory, creating a new lineage revision. |
-| `/history [limit]` | View the chronological timeline of your memory updates. |
-| `/memories` | List all recent stored facts for this session. |
-| `/trace <query>` | Run the observability trace to see what would be recalled. |
-| `/context <query>` | Render the exact prompt block the LLM would see. |
-| `/forget <id>` | Soft-delete a memory. |
+| `/remember <fact>` | Store a durable fact immediately (`add()`). |
+| `/revise <memory_id> <fact>` | Create a new active revision, superseding the old one. |
+| `/lineage <memory_id>` | Show the current head and full revision history. |
+| `/history [active\|limit\|memory_id]` | Show the memory add/update timeline. |
+| `/memories` | List recent stored memories. |
+| `/search <query>` | Hybrid search over stored memories. |
+| `/recall <question>` | Ask memory: current / historical / event / lineage answer. |
+| `/evidence <query>` | Show the 4-surface evidence block for a query. |
+| `/forget <memory_id>` | Delete one memory. |
+| `/clear` | Purge this chatbot user's memories. |
 
 ---
 

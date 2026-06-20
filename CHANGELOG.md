@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0b2] - 2026-06-20
+
+### Added
+- `Engram.warmup()` and `CrossEncoderReranker.warmup()` eagerly load the
+  cross-encoder reranker so the first reranked query does not stall while
+  loading model weights. `examples/chatbot.py` warms it at startup when
+  reranking is enabled.
+
+### Changed
+- Cross-encoder reranker loading is now quiet: the transformers "LOAD REPORT"
+  and the weight-loading progress bar are suppressed during the load, and the
+  previous logging state is restored afterward.
+- Docs: rewrote the `examples/chatbot.py` walkthrough to match the shipped
+  example — local `all-MiniLM-L6-v2` embeddings + Gemini, `add_batch()` ingest,
+  4-surface retrieval, and a single composer call — and removed stale recall /
+  memory-job mode tables. Documented that `add_conversation()` must be the sole
+  writer to a memory space.
+
+### Fixed
+- `add_conversation()` extraction is now grounded in the current turn (plus raw
+  recent history), not the rolling conversation summary. The summary is a lossy,
+  compounding rewrite; feeding it into extraction let a weak extractor re-derive
+  and hallucinate durable values (e.g. a $5k budget reappearing as $75k) that
+  then destructively superseded correct memories. The summary is still used to
+  seed the roll-forward.
+- `purge()` now also deletes `memory_lineages` rows for the purged agent/user.
+  Memory deletion alone orphaned lineage records, because
+  `memory_lineages.current_memory_id` has no cascading foreign key.
+- Refreshed `tests/unit/test_chatbot_example.py` to the current chatbot
+  pipeline; the suite had 11 stale failures referencing removed recall and
+  memory-job modes.
+- Prefixed unused unpacked variables in `test_recall` to satisfy RUF059.
+
 ## [0.3.0b1] - 2026-06-19
 
 ### Added

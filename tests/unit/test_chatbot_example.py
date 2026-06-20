@@ -1,4 +1,4 @@
-"""Unit tests for the OpenAI-backed chatbot example orchestration modes."""
+"""Unit tests for the Engram-backed chatbot example."""
 
 from __future__ import annotations
 
@@ -95,17 +95,6 @@ def fake_engram():
             )
         )
     )
-    engram.recall_critical = AsyncMock(return_value=[memory("Critical fact")])
-    engram.get_context_block = AsyncMock(return_value="## Relevant memories\n- Fact A")
-    engram.trace_recall = AsyncMock(
-        return_value=SimpleNamespace(
-            context="## Memory Recall\n- Trace fact",
-            kept_memory_ids=["mem_trace"],
-            missing_expected_terms=[],
-        )
-    )
-    engram.deep_search = AsyncMock(return_value=[search_result("Deep fact")])
-    engram.list_recent = AsyncMock(return_value=[memory("Recent fact")])
     engram.get_history = AsyncMock(
         return_value=[
             history_event(
@@ -143,9 +132,6 @@ def fake_engram():
             trace={"topic": "city"},
         )
     )
-    engram.build_context = AsyncMock(return_value=SimpleNamespace(text="Task context"))
-    engram.record_turn = AsyncMock()
-    engram.process_memory_jobs = AsyncMock(return_value=[])
     engram.add = AsyncMock(return_value=old_memory)
     engram.revise = AsyncMock(return_value=new_memory)
     engram.get_current = AsyncMock(return_value=new_memory)
@@ -159,11 +145,12 @@ def fake_engram():
             superseded_by=new_memory,
         )
     )
+    # Retrieval/ingest surfaces used by reply().
+    engram.search = AsyncMock(return_value=[])
+    engram.traverse_many = AsyncMock(return_value=[])
+    engram.render_graph_context = lambda *_a, **_k: ""
+    engram.add_batch = AsyncMock(return_value=[])
     return engram
-
-
-def memory_job(status: str):
-    return SimpleNamespace(status=status)
 
 
 def make_bot(module, engram):
@@ -172,20 +159,6 @@ def make_bot(module, engram):
     bot.task_id = "task_1"
     bot.session_id = "session_1"
     return bot
-
-
-def test_memory_jobs_default_is_inline(monkeypatch):
-    monkeypatch.delenv("ENGRAM_CHATBOT_MEMORY_JOBS", raising=False)
-    module = load_chatbot_module()
-
-    assert module.MEMORY_JOBS_MODE == "inline"
-
-
-def test_recall_mode_default_is_operator(monkeypatch):
-    monkeypatch.delenv("ENGRAM_CHATBOT_RECALL_MODE", raising=False)
-    module = load_chatbot_module()
-
-    assert module.RECALL_MODE == "operator"
 
 
 def test_standard_gemini_key_maps_to_engram_key(monkeypatch):
@@ -222,215 +195,30 @@ def test_default_stack_is_local_embeddings_and_gemini(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_operator_mode_uses_recall_evidence_then_chat_llm(monkeypatch):
+async def test_reply_composes_then_stores_via_add_batch(monkeypatch):
+    """Each turn ingests through the raw add_batch floor, never add_conversation.
+
+    The hybrid was removed: co-locating the two writers made the extractor read
+    every fact as already-present and NOOP it. This guards against re-wiring it.
+    """
     module = load_chatbot_module()
-    monkeypatch.setattr(module, "RECALL_MODE", "operator")
-    monkeypatch.setattr(module, "MEMORY_JOBS_MODE", "deferred")
     monkeypatch.setattr(module, "RERANK_MODE", "auto")
     engram = fake_engram()
+    engram.add_conversation = AsyncMock()  # must stay untouched by the floor path
     bot = make_bot(module, engram)
 
-    response = await bot.reply("What changed about my city?")
+    response = await bot.reply("What's my current city?")
 
-    engram.recall.assert_awaited_once_with(
-        "What changed about my city?",
-        module.AGENT_ID,
-        user_id=module.USER_ID,
-        compose_answer=False,
-    )
+    # Composed an answer over retrieved evidence...
     assert response == "remembered answer"
     engram.llm.complete_full.assert_awaited_once()
-    engram.get_context_block.assert_awaited_once()
-    engram.deep_search.assert_not_awaited()
-    engram.recall_critical.assert_awaited_once()
-    engram.get_history.assert_awaited_once()
 
-    messages = engram.llm.complete_full.call_args.args[0]
-    prompt = "\n".join(message["content"] for message in messages)
-    assert '<engram_recall_evidence intent="historical">' in prompt
-    assert "current: The user's live chatbot demo city is Singapore." in prompt
-    assert "previous until" in prompt
-    assert "<engram_memory_history>" in prompt
-
-    metadata = engram.record_turn.call_args.kwargs["metadata"]
-    assert metadata["llm_model"] == "fake-llm"
-    assert metadata["recall_intent"] == "historical"
-    assert metadata["recall_previous_count"] == 1
-    assert metadata["recall_event_count"] == 1
-    assert metadata["recall_source_count"] == 0
-    assert metadata["operator_route"] == "recall_chat"
-    assert metadata["memory_history_count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_operator_mode_uses_chat_path_for_user_authored_facts(monkeypatch):
-    module = load_chatbot_module()
-    monkeypatch.setattr(module, "RECALL_MODE", "operator")
-    monkeypatch.setattr(module, "MEMORY_JOBS_MODE", "inline")
-    monkeypatch.setattr(module, "RERANK_MODE", "auto")
-    engram = fake_engram()
-    engram.recall = AsyncMock(
-        return_value=SimpleNamespace(
-            answer_text="",
-            intent="chat",
-            current=None,
-            previous=[],
-            evidence=[],
-            events=[],
-            sources=[],
-            conflict_note=None,
-            trace={"topic": "meeting"},
-        )
-    )
-    bot = make_bot(module, engram)
-
-    response = await bot.reply("i have a meeting at 3pm in zoom")
-
-    assert response == "remembered answer"
-    engram.recall.assert_awaited_once_with(
-        "i have a meeting at 3pm in zoom",
-        module.AGENT_ID,
-        user_id=module.USER_ID,
-        compose_answer=False,
-    )
-    engram.llm.complete_full.assert_awaited_once()
-    engram.get_context_block.assert_awaited_once()
-    engram.process_memory_jobs.assert_awaited_once_with(limit=module.MEMORY_JOBS_LIMIT)
-
-    metadata = engram.record_turn.call_args.kwargs["metadata"]
-    assert metadata["llm_model"] == "fake-llm"
-    assert metadata["recall_intent"] == "chat"
-    assert metadata["operator_route"] == "chat"
-    assert metadata["memory_history_count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_fast_mode_uses_active_recall_and_timeline_context(monkeypatch):
-    module = load_chatbot_module()
-    monkeypatch.setattr(module, "RECALL_MODE", "fast")
-    monkeypatch.setattr(module, "MEMORY_JOBS_MODE", "deferred")
-    monkeypatch.setattr(module, "RERANK_MODE", "auto")
-    engram = fake_engram()
-    bot = make_bot(module, engram)
-
-    response = await bot.reply("What do you remember?")
-
-    assert response == "remembered answer"
-    engram.recall_critical.assert_awaited_once()
-    engram.get_context_block.assert_awaited_once()
-    assert engram.get_context_block.call_args.kwargs["rerank"] is False
-    engram.trace_recall.assert_not_awaited()
-    engram.deep_search.assert_not_awaited()
-    engram.list_recent.assert_not_awaited()
-    engram.build_context.assert_not_awaited()
-    engram.get_history.assert_awaited_once_with(
-        module.AGENT_ID,
-        user_id=module.USER_ID,
-        limit=module.MEMORY_HISTORY_LIMIT,
-        include_superseded=True,
-    )
-    engram.process_memory_jobs.assert_not_awaited()
-
-    messages = engram.llm.complete_full.call_args.args[0]
-    prompt = "\n".join(message["content"] for message in messages)
-    assert "Critical fact" in prompt
-    assert "Fact A" in prompt
-    assert "<engram_memory_history>" in prompt
-    assert "The user's live chatbot demo city is Dhaka." in prompt
-    assert "The user's live chatbot demo city is Singapore." in prompt
-
-    metadata = engram.record_turn.call_args.kwargs["metadata"]
-    assert metadata["recall_mode"] == "fast"
-    assert metadata["critical_memory_count"] == 1
-    assert metadata["memory_history_count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_fast_mode_history_does_not_depend_on_keyword_routing(monkeypatch):
-    module = load_chatbot_module()
-    monkeypatch.setattr(module, "RECALL_MODE", "fast")
-    monkeypatch.setattr(module, "MEMORY_JOBS_MODE", "deferred")
-    monkeypatch.setattr(module, "RERANK_MODE", "auto")
-    engram = fake_engram()
-    bot = make_bot(module, engram)
-
-    await bot.reply("Can you reconstruct that schedule change from my memory?")
-
-    engram.get_history.assert_awaited_once_with(
-        module.AGENT_ID,
-        user_id=module.USER_ID,
-        limit=module.MEMORY_HISTORY_LIMIT,
-        include_superseded=True,
-    )
-    messages = engram.llm.complete_full.call_args.args[0]
-    prompt = "\n".join(message["content"] for message in messages)
-    assert "<engram_memory_history>" in prompt
-    assert "Use this block only for questions about previous values" in prompt
-    assert "revised" in prompt
-    assert "superseded" in prompt
-    assert "The user's live chatbot demo city is Dhaka." in prompt
-    assert "The user's live chatbot demo city is Singapore." in prompt
-
-    metadata = engram.record_turn.call_args.kwargs["metadata"]
-    assert metadata["memory_history_count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_deep_mode_keeps_trace_recall_out_of_hot_path(monkeypatch):
-    module = load_chatbot_module()
-    monkeypatch.setattr(module, "RECALL_MODE", "deep")
-    monkeypatch.setattr(module, "MEMORY_JOBS_MODE", "deferred")
-    monkeypatch.setattr(module, "RERANK_MODE", "auto")
-    engram = fake_engram()
-    bot = make_bot(module, engram)
-
-    await bot.reply("Find broad memory")
-
-    engram.trace_recall.assert_not_awaited()
-    engram.deep_search.assert_awaited_once()
-    assert engram.get_context_block.call_args.kwargs["rerank"] is True
-    assert engram.deep_search.call_args.kwargs["rerank"] is True
-    engram.list_recent.assert_awaited_once()
-    engram.build_context.assert_awaited_once()
-
-    metadata = engram.record_turn.call_args.kwargs["metadata"]
-    assert metadata["recall_mode"] == "deep"
-    assert "trace_kept_memory_ids" not in metadata
-
-
-@pytest.mark.asyncio
-async def test_debug_mode_includes_trace_metadata_and_inline_jobs(monkeypatch):
-    module = load_chatbot_module()
-    monkeypatch.setattr(module, "RECALL_MODE", "debug")
-    monkeypatch.setattr(module, "MEMORY_JOBS_MODE", "inline")
-    monkeypatch.setattr(module, "RERANK_MODE", "auto")
-    engram = fake_engram()
-    bot = make_bot(module, engram)
-
-    await bot.reply("Debug recall")
-
-    engram.trace_recall.assert_awaited_once()
-    engram.deep_search.assert_awaited_once()
-    engram.process_memory_jobs.assert_awaited_once_with(limit=module.MEMORY_JOBS_LIMIT)
-
-    metadata = engram.record_turn.call_args.kwargs["metadata"]
-    assert metadata["recall_mode"] == "debug"
-    assert metadata["trace_kept_memory_ids"] == ["mem_trace"]
-    assert metadata["missing_expected_terms"] == []
-
-
-@pytest.mark.asyncio
-async def test_rerank_true_forces_fast_mode_reranking(monkeypatch):
-    module = load_chatbot_module()
-    monkeypatch.setattr(module, "RECALL_MODE", "fast")
-    monkeypatch.setattr(module, "MEMORY_JOBS_MODE", "deferred")
-    monkeypatch.setattr(module, "RERANK_MODE", "true")
-    engram = fake_engram()
-    bot = make_bot(module, engram)
-
-    await bot.reply("What do you remember?")
-
-    assert engram.get_context_block.call_args.kwargs["rerank"] is True
+    # ...and stored the turn via the add_batch floor, not add_conversation.
+    engram.add_batch.assert_awaited_once()
+    engram.add_conversation.assert_not_awaited()
+    rows = engram.add_batch.call_args.args[0]
+    assert rows[0]["metadata"]["source"] == "chatbot"
+    assert rows[0]["metadata"]["turn_role"] == "user"
 
 
 @pytest.mark.asyncio
@@ -497,37 +285,3 @@ async def test_history_command_with_memory_id_uses_lineage(monkeypatch):
     engram.get_history.assert_not_awaited()
     engram.get_lineage.assert_awaited_once_with("mem_old")
     engram.explain_memory.assert_awaited_once_with("mem_old")
-
-
-@pytest.mark.asyncio
-async def test_jobs_command_processes_queued_memory_jobs(monkeypatch):
-    module = load_chatbot_module()
-    engram = fake_engram()
-    engram.process_memory_jobs = AsyncMock(
-        return_value=[memory_job("completed"), memory_job("failed")]
-    )
-    bot = make_bot(module, engram)
-
-    keep_running = await module.run_command(bot, "/jobs")
-
-    assert keep_running is True
-    engram.process_memory_jobs.assert_awaited_once_with(limit=module.MEMORY_JOBS_LIMIT)
-
-
-@pytest.mark.asyncio
-async def test_demo_uses_lineage_api(monkeypatch):
-    module = load_chatbot_module()
-    monkeypatch.setattr(module, "RECALL_MODE", "fast")
-    monkeypatch.setattr(module, "MEMORY_JOBS_MODE", "deferred")
-    monkeypatch.setattr(module, "RERANK_MODE", "auto")
-    engram = fake_engram()
-    bot = make_bot(module, engram)
-
-    await module.run_demo(bot)
-
-    engram.add.assert_awaited_once()
-    engram.revise.assert_awaited_once()
-    engram.get_current.assert_awaited_once_with("mem_old")
-    engram.get_lineage.assert_awaited_once_with("mem_old")
-    engram.explain_memory.assert_awaited_once_with("mem_old")
-    engram.llm.complete_full.assert_awaited_once()

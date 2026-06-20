@@ -817,12 +817,18 @@ class Engram:
         assistant_response_for_memory = (
             assistant_response if extract_assistant_response else ""
         )
+        # Extraction is deliberately grounded in the current turn (plus raw
+        # recent history), NOT the conversation summary. The rolling summary is
+        # a lossy, compounding rewrite; feeding it here let a weak extractor
+        # re-derive and hallucinate durable values (a $5k budget reappearing as
+        # $75k), which then destructively superseded the correct memories. The
+        # summary stays a session-continuity artifact, used only to seed the
+        # roll-forward below.
         result = await self._llm.process_for_memory(
             user_message,
             assistant_response_for_memory,
             [],
             conversation_history=conversation_history,
-            conversation_summary=effective_summary,
             retrieve_for_fact=_retrieve,
             classify_types=True,
         )
@@ -1230,6 +1236,18 @@ class Engram:
                 backend=self._settings.reranker_backend,
             )
         return self._reranker
+
+    async def warmup(self) -> None:
+        """Eagerly load lazily-initialized models so the first request does not
+        stall mid-flow loading weights.
+
+        The embedding model is already loaded during ``connect()``; this warms
+        the cross-encoder reranker (otherwise loaded lazily on the first search
+        that reranks). Run it at startup, off the interactive path. Safe to call
+        repeatedly — it is a no-op once the model is resident.
+        """
+        self._ensure_connected()
+        await self._get_reranker().warmup()
 
     async def get_memories(
         self,

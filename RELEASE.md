@@ -37,11 +37,11 @@ Engram is currently suitable for alpha/developer-preview releases.
 
 ## Tagging
 
-Use alpha tags until the public API stabilizes:
+Use prerelease tags until the public API stabilizes:
 
 ```bash
-git tag v0.3.0a2
-git push origin v0.3.0a2
+git tag v0.3.0b2
+git push origin v0.3.0b2
 ```
 
 GitHub Actions publishes tagged builds through trusted publishing when PyPI is

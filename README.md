@@ -414,12 +414,13 @@ class CustomEmbeddingProvider(EmbeddingProvider):
 python examples/chatbot.py
 ```
 
-The chatbot defaults to `ENGRAM_CHATBOT_RECALL_MODE=fast` and
-`ENGRAM_CHATBOT_MEMORY_JOBS=deferred` for production-style latency. Use
-`ENGRAM_CHATBOT_RECALL_MODE=deep` for high-recall evaluation and `debug` when
-you need `trace_recall()` in the prompt and turn metadata. Reranking defaults to
-`ENGRAM_CHATBOT_RERANK=auto`, which enables rerank in `deep` and `debug` while
-keeping `fast` low-latency.
+The chatbot runs the benchmark pipeline live: each turn is stored verbatim via
+`add_batch()` (on-device embeddings, no LLM at ingest), retrieved over 4 surfaces
+(hybrid search + rerank, `recall()`, `get_lineage()`, graph traversal), and
+answered by a single composer call. Reranking defaults to
+`ENGRAM_CHATBOT_RERANK=auto`; set `ENGRAM_CHATBOT_RERANK=true` to force the
+cross-encoder or `false` to disable it. It does **not** use `add_conversation()`
+at ingest — see [Why not `add_conversation()`](docs/examples.md) for the reason.
 
 ### Programmatic Usage
 

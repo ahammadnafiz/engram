@@ -52,6 +52,10 @@ class CrossEncoderReranker:
                     self._model = await asyncio.to_thread(self._load_model)
         return self._model
 
+    async def warmup(self) -> None:
+        """Eagerly load the model so the first ``rerank`` call doesn't stall."""
+        await self._ensure_model()
+
     def _load_model(self) -> Any:
         try:
             from sentence_transformers import CrossEncoder
@@ -64,6 +68,22 @@ class CrossEncoderReranker:
             f"Loading cross-encoder reranker: {self._model_name} "
             f"(backend={self._backend})"
         )
+        # transformers prints a noisy "LOAD REPORT" (flagging the legacy
+        # embeddings.position_ids buffer as UNEXPECTED) and a weight-loading
+        # progress bar. Both are benign for this cross-encoder, so quiet them
+        # during the load and restore the previous state afterwards.
+        hf_logging: Any = None
+        prev_verbosity: int | None = None
+        try:
+            from transformers.utils import logging as _hf_logging
+
+            hf_logging = _hf_logging
+            prev_verbosity = hf_logging.get_verbosity()
+            hf_logging.set_verbosity_error()
+            hf_logging.disable_progress_bar()
+        except Exception:
+            hf_logging = None
+            prev_verbosity = None
         try:
             return CrossEncoder(self._model_name, backend=self._backend)
         except (ImportError, ModuleNotFoundError) as e:
@@ -71,6 +91,10 @@ class CrossEncoderReranker:
                 f"Reranker backend {self._backend!r} is missing dependencies. "
                 "For 'onnx', install: pip install 'engram[rerank-onnx]'"
             ) from e
+        finally:
+            if hf_logging is not None and prev_verbosity is not None:
+                hf_logging.set_verbosity(prev_verbosity)
+                hf_logging.enable_progress_bar()
 
     async def rerank(
         self,

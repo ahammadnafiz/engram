@@ -1,20 +1,36 @@
 #!/usr/bin/env python3
-"""Real Engram-backed chatbot: on-device embeddings + Gemini for responses.
+"""Real Engram-backed chatbot — the benchmark retrieval pipeline, live.
 
-This is the optimized reference stack — free, on-device sentence-transformers
-embeddings (`all-MiniLM-L6-v2`, 384-d) for retrieval and Google's
-`gemini-3.1-flash-lite` for answer generation, driven by the same composer rules
-used in the Engram LongMemEval benchmark.
+This chatbot runs the EXACT pipeline proven in `benchmark/` (LongMemEval,
+LoCoMo, BEAM), end to end:
+
+  1. INGEST  — every turn is stored verbatim as a date-anchored episodic
+     memory via `add_batch()`. On-device embeddings only: no LLM extraction,
+     no cost, no destructive supersession at write time. (We deliberately do
+     NOT use `add_conversation()` here: with the raw turns co-located, its
+     extractor reads every fact as already-present and NOOPs it, so it adds
+     ~2x LLM cost per turn for no lineage benefit — the floor + composer
+     answers temporal/overwrite questions correctly on its own.)
+
+  2. RETRIEVE — 4-surface evidence gathering, per turn:
+       a) search(mode="hybrid", rerank=True) — vector + full-text, RRF-fused,
+          cross-encoder reranked, session-diversified.
+       b) recall(compose_answer=False) — structured current/previous/conflict
+          lineage evidence.
+       c) get_lineage() — superseded predecessors of retrieved active facts.
+       d) traverse_many() — multi-hop graph relations from top search hits.
+
+  3. GENERATE — one composer LLM call answers from the assembled evidence
+     block, using a warm "second brain" prompt (conversational, grounded).
+
+Stack defaults: free on-device sentence-transformers embeddings
+(`all-MiniLM-L6-v2`, 384-d) + Google `gemini-3.1-flash-lite` for composition.
+Override with the standard ENGRAM_* environment variables.
 
 Run:
     export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
     export ENGRAM_GEMINI_API_KEY=...   # or GEMINI_API_KEY
     python examples/chatbot.py
-
-The embedding/LLM stack defaults are applied below and can be overridden with
-the standard ENGRAM_* environment variables (e.g. ENGRAM_LLM_MODEL). A bare
-GEMINI_API_KEY (the google-genai convention) is mapped to ENGRAM_GEMINI_API_KEY
-for convenience.
 
 Non-interactive checks:
     python examples/chatbot.py --once "What do you remember about me?"
@@ -30,7 +46,7 @@ import os
 import shutil
 import sys
 import textwrap
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -56,50 +72,60 @@ os.environ.setdefault("ENGRAM_LLM_MODEL", "gemini-3.1-flash-lite")
 
 AGENT_ID = os.environ.get("ENGRAM_CHATBOT_AGENT_ID", "engram-chatbot")
 USER_ID = os.environ.get("ENGRAM_CHATBOT_USER_ID", "default-user")
-HISTORY_LIMIT = 10
-RECALL_MODE = os.environ.get("ENGRAM_CHATBOT_RECALL_MODE", "operator").lower()
-MEMORY_JOBS_MODE = os.environ.get("ENGRAM_CHATBOT_MEMORY_JOBS", "inline").lower()
-MEMORY_JOBS_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_MEMORY_JOBS_LIMIT", "10"))
-RERANK_MODE = os.environ.get("ENGRAM_CHATBOT_RERANK", "auto").lower()
-BROAD_MEMORY_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_BROAD_MEMORY_LIMIT", "60"))
-BROAD_MEMORY_CHARS = int(os.environ.get("ENGRAM_CHATBOT_BROAD_MEMORY_CHARS", "3600"))
-MEMORY_HISTORY_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_HISTORY_LIMIT", "30"))
-VALID_RECALL_MODES = {"operator", "fast", "deep", "debug"}
-VALID_MEMORY_JOBS_MODES = {"inline", "deferred"}
-VALID_RERANK_MODES = {"auto", "true", "false"}
+
+# Conversational continuity: last N raw turns replayed to the composer so it
+# keeps the thread without re-retrieving. Separate from memory retrieval.
+HISTORY_LIMIT = 8
+
+# Retrieval knobs — mirror the benchmark defaults (search-limit 60, max 4
+# turns/session, graph depth 1, rerank on). All overridable via env.
+SEARCH_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_SEARCH_LIMIT", "60"))
+MAX_PER_SESSION = int(os.environ.get("ENGRAM_CHATBOT_MAX_PER_SESSION", "4"))
+GRAPH_DEPTH = int(os.environ.get("ENGRAM_CHATBOT_GRAPH_DEPTH", "1"))
+RERANK_MODE = os.environ.get("ENGRAM_CHATBOT_RERANK", "true").lower()
+VALID_RERANK_MODES = {"true", "false"}
+
+# Store the assistant's reply as a memory too (role-tagged). The composer prompt
+# treats user turns as authoritative; assistant turns help answer "what did you
+# tell me / suggest". Set to 0 to store only user turns.
+STORE_ASSISTANT_TURNS = os.environ.get("ENGRAM_CHATBOT_STORE_ASSISTANT", "1") != "0"
+
 COLOR_ENABLED = (
     sys.stdout.isatty()
     and os.environ.get("NO_COLOR") is None
     and os.environ.get("TERM") != "dumb"
 )
 
-SYSTEM_PROMPT = """You are a helpful assistant with persistent Engram memory. Today's date is {today}. Use the supplied memory and task context as the only source for remembered facts. If the context does not contain something, say that you do not have it in memory. When the user tells you a durable preference, profile fact, project detail, decision, or instruction, acknowledge it naturally; Engram will store it after the turn.
+# ---------------------------------------------------------------------------
+# Composer prompt — the "second brain": conversational, grounded in evidence.
+# ---------------------------------------------------------------------------
+COMPOSER_SYSTEM = """You are the user's "second brain" — a warm, personal assistant that remembers everything they have told you across past conversations. Today's date is {today}.
 
-Answering rules (ported from the Engram LongMemEval benchmark composer):
+You answer from the MEMORIES block provided below, which is retrieved from the user's own conversation history. Talk naturally, like a thoughtful friend with perfect recall — not like a database readout. Be concise and direct; skip preambles like "Based on your memories".
 
-- Compute when the data exists. If memory holds the numbers needed (ages, prices, dates to diff), do the arithmetic instead of refusing — even when the facts are scattered across different conversations. Compute every relative time expression relative to today's date above.
+How to use the memories:
 
-- Respect avoidances. If memory indicates the user wants to avoid something (allergy, dislike, hard constraint), your answer must NOT contain it — not as a primary, secondary, or fallback suggestion.
+- The MEMORIES block is your source of truth about the user. If something genuinely isn't there, say you don't have it yet — never invent names, numbers, dates, or details.
 
-- Match the exact entity. Pay close attention to the specific entity/variant/role in the question. If the question asks about one variant and memory only mentions a DIFFERENT one (e.g. "electric" vs "acoustic guitar", "Sales Manager" vs "Senior Sales Engineer"), do not treat them as the same — say you do not have that information.
+- Memories tagged [ACTIVE] are current. Memories tagged [SUPERSEDED] are OLD values that were later changed — use them only to answer "what was it before / originally" questions, never as the current answer. When a value changed, it's natural to mention both ("it's X now — it used to be Y").
 
-- Enumerate everything for list / aggregation / counting questions. List every relevant memory rather than the first few, and scan the full context twice because matching items are commonly scattered far apart. Count items in a single memory separately, and only count completed actions (past tense), not plans.
+- Most recent wins for conflicting values of the same fact. Memories about different people, places, or contexts are not in conflict.
 
-- Most recent wins. For conflicting values of the same fact, use the most recent memory; for "what was it before / originally" questions, use the older value. Memories about different people or contexts are not conflicting.
+- Do the math when the memories hold the numbers (ages, prices, durations, date differences) instead of refusing — even when the facts are scattered across different memories. Compute relative time expressions against today's date above.
 
-- ACTIVE vs SUPERSEDED. Memories tagged [ACTIVE] are the truth now; [SUPERSEDED] memories are old values that were overwritten. Never present a superseded value as the current answer — use it only for "before / originally" questions.
+- Respect what the user avoids — allergies, dislikes, hard constraints. Never suggest something they have said they want to avoid, not even as a fallback.
 
-- Match context. Before using a memory's value, verify it applies to the SAME context as the question (a "while traveling" routine is not a regular weekday routine); prefer the more specific memory that matches.
+- Match the exact thing asked about. If they ask about one specific entity/variant/role and memory only mentions a different one, don't treat them as the same — say you don't have that exact detail.
 
-When correcting an outdated or false value, name both the outdated value and the correct value. For "why" questions, include the supporting memory detail. Keep answers concise and directly useful. If <engram_query_specific_must_use> is non-empty, every line in it is mandatory for the current answer.
+- For "what do you remember about me" style questions, synthesize the durable picture (who they are, what they're working on, their preferences) in a few natural sentences rather than dumping raw lines.
 
-Reason step by step inside <mem_thinking>...</mem_thinking> tags first: list every relevant memory, do any counting / temporal / cross-topic computation, check avoidances and context, then state your conclusion. The user only sees text OUTSIDE the <mem_thinking> tags, so put your final answer there."""
+Think privately inside <mem_thinking>...</mem_thinking> tags first: list the relevant memories, do any counting / temporal / cross-topic reasoning, check avoidances and context, then decide. The user only sees text OUTSIDE the tags — put your natural, conversational reply there."""
 
 _THINKING_CLOSE = "</mem_thinking>"
 
 
 def build_system_prompt() -> str:
-    return SYSTEM_PROMPT.format(today=date.today().isoformat())
+    return COMPOSER_SYSTEM.format(today=date.today().isoformat())
 
 
 def strip_thinking(text: str) -> str:
@@ -108,6 +134,11 @@ def strip_thinking(text: str) -> str:
     if _THINKING_CLOSE in lowered:
         return text[lowered.rfind(_THINKING_CLOSE) + len(_THINKING_CLOSE) :].strip()
     return text.strip()
+
+
+# ===========================================================================
+# Rendering helpers
+# ===========================================================================
 
 
 def preview(text: str, limit: int = 180) -> str:
@@ -169,7 +200,7 @@ def rule(label: str = "") -> str:
 def print_header() -> None:
     print()
     print(rule("engram"))
-    print(f"{bold('Engram Memory Chat')} | {dim('persistent Gemini-backed recall')}")
+    print(f"{bold('Engram Memory Chat')} | {dim('benchmark pipeline · second brain')}")
     print(dim("Type a message to chat, or /help for commands."))
 
 
@@ -223,26 +254,152 @@ def prompt_text() -> str:
 
 
 def require_real_config() -> None:
-    if RECALL_MODE not in VALID_RECALL_MODES:
-        raise SystemExit(
-            "Invalid ENGRAM_CHATBOT_RECALL_MODE. Use 'operator', 'fast', "
-            "'deep', or 'debug'."
-        )
-    if MEMORY_JOBS_MODE not in VALID_MEMORY_JOBS_MODES:
-        raise SystemExit(
-            "Invalid ENGRAM_CHATBOT_MEMORY_JOBS. Use 'inline' or 'deferred'."
-        )
     if RERANK_MODE not in VALID_RERANK_MODES:
-        raise SystemExit(
-            "Invalid ENGRAM_CHATBOT_RERANK. Use 'auto', 'true', or 'false'."
-        )
-
+        raise SystemExit("Invalid ENGRAM_CHATBOT_RERANK. Use 'true' or 'false'.")
     if not os.environ.get("ENGRAM_GEMINI_API_KEY"):
         raise SystemExit(
             "Missing required environment variable: ENGRAM_GEMINI_API_KEY "
             "(or GEMINI_API_KEY).\nGet a key at https://aistudio.google.com/apikey "
             "and set it before running the chatbot."
         )
+
+
+# ===========================================================================
+# Retrieval — ported verbatim from the benchmark scripts (proven pipeline).
+# ===========================================================================
+
+
+def _to_human_date(date_str: str) -> str:
+    """Render an ISO 'YYYY-MM-DD' chat date as 'Month D, YYYY'."""
+    if not date_str:
+        return "Unknown Date"
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(date_str[:19], fmt).strftime("%B %d, %Y")
+        except ValueError:
+            continue
+    return date_str
+
+
+def diversify_by_session(
+    results: list[Any],
+    *,
+    limit: int,
+    max_per_session: int,
+    rerank: bool = False,
+) -> list[Any]:
+    """Round-robin a candidate pool across sessions, user turns first.
+
+    Ported from the benchmark scripts. Prevents the evidence budget from
+    collapsing onto one session's near-duplicate turns. When reranking, the
+    candidate order is already a relevance ranking, so the user-first nudge is
+    dropped (it would bury an assistant turn that IS the answer).
+    """
+    if not results:
+        return results
+
+    def role_bias(r: Any) -> float:
+        if rerank:
+            return 0.0
+        role = str(r.memory.metadata.get("turn_role", "")).lower()
+        if role == "user":
+            return -1.0
+        if role in ("assistant", "system", "tool"):
+            return 1.0
+        return 0.0
+
+    def group_key(r: Any) -> str:
+        sid = r.memory.metadata.get("original_session_id")
+        return str(sid) if sid is not None else r.memory.memory_id
+
+    ranked = [
+        r
+        for _, r in sorted(
+            enumerate(results),
+            key=lambda it: (it[0] + role_bias(it[1]), it[0]),
+        )
+    ]
+    groups: dict[str, list[Any]] = {}
+    for r in ranked:
+        groups.setdefault(group_key(r), []).append(r)
+
+    selected: list[Any] = []
+    seen: set[str] = set()
+    for depth in range(max_per_session):
+        for group in groups.values():
+            if depth < len(group):
+                r = group[depth]
+                selected.append(r)
+                seen.add(r.memory.memory_id)
+                if len(selected) >= limit:
+                    return selected
+    for r in ranked:
+        if r.memory.memory_id in seen:
+            continue
+        selected.append(r)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _build_evidence_block(
+    search_results: list[Any],
+    recall_answer: Any | None,
+    graph_context: str,
+    lineage_superseded: list[Any] | None = None,
+) -> str:
+    """Assemble the evidence block from Engram's retrieval surfaces.
+
+    Identical structure to the benchmark `_build_evidence_block`: recall's
+    structured lineage first, then superseded predecessors, then the hybrid
+    search hits grouped by date and tagged [ACTIVE]/[SUPERSEDED], then graph
+    relations.
+    """
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    if recall_answer is not None:
+        cur = getattr(recall_answer, "current", None)
+        if cur is not None:
+            seen.add(cur.memory_id)
+            lines.append(f"CURRENT: {cur.fact or cur.content}")
+        for mem in getattr(recall_answer, "previous", []) or []:
+            when = mem.superseded_at or mem.valid_to or mem.created_at
+            stamp = when.date().isoformat() if when else "unknown"
+            seen.add(mem.memory_id)
+            lines.append(f"SUPERSEDED (until {stamp}): {mem.fact or mem.content}")
+        if getattr(recall_answer, "conflict_note", None):
+            lines.append(f"CONFLICT: {recall_answer.conflict_note}")
+        if getattr(recall_answer, "answer_text", "").strip():
+            lines.append(f"RECALL NOTE: {recall_answer.answer_text.strip()}")
+
+    for mem in lineage_superseded or []:
+        if mem.memory_id in seen:
+            continue
+        seen.add(mem.memory_id)
+        when = mem.superseded_at or mem.valid_to or mem.created_at
+        stamp = when.date().isoformat() if when else "unknown"
+        lines.append(f"SUPERSEDED (until {stamp}): {mem.fact or mem.content}")
+
+    lines.append("\n## RETRIEVED MEMORIES (hybrid search)")
+    current_date = None
+    for result in search_results:
+        mem = result.memory
+        if mem.memory_id in seen:
+            continue
+        seen.add(mem.memory_id)
+        mem_date = mem.metadata.get("chat_date", "Unknown Date")
+        if mem_date != current_date:
+            lines.append(f"\n--- {_to_human_date(mem_date)} ---")
+            current_date = mem_date
+        status = getattr(mem, "status", None) or mem.metadata.get("status", "active")
+        tag = "[SUPERSEDED]" if status == "superseded" else "[ACTIVE]"
+        lines.append(f"- {tag} {mem.content}")
+
+    if graph_context:
+        lines.append(f"\n{graph_context}")
+
+    return "\n".join(lines) if lines else "(no matching memory)"
 
 
 class MemoryChatbot:
@@ -252,19 +409,39 @@ class MemoryChatbot:
         self.session_id: str | None = None
         self._session_context: Any | None = None
         self.history: list[dict[str, str]] = []
+        self._turn_index = 0
+        self._last_evidence = ""
+
+    # -- lifecycle ---------------------------------------------------------
 
     async def connect(self) -> None:
         require_real_config()
 
         from engram import Engram
+        from engram.core.config import get_settings
 
-        self.engram = Engram(memory_policy="default")
+        # Match the benchmark settings: keep every turn verbatim (no near-dup
+        # collapse), allow the on-device embedding dimension.
+        settings = get_settings()
+        settings = settings.model_copy(
+            update={
+                "near_duplicate_threshold": 1.0,
+                "allow_embedding_dimension_change": True,
+            }
+        )
+
+        self.engram = Engram(settings=settings, memory_policy="default")
         await self.engram.connect()
         if self.engram.llm is None:
             raise RuntimeError(
                 "LLM provider is disabled. Set ENGRAM_LLM_PROVIDER=gemini and "
                 "ENGRAM_GEMINI_API_KEY before running examples/chatbot.py."
             )
+
+        # Warm the reranker now (off the event loop) so the first turn's search
+        # doesn't stall mid-conversation loading model weights.
+        if self._rerank_enabled():
+            await self.engram.warmup()
 
         await self._resume_or_start_task()
         health = await self.engram.health_check()
@@ -279,29 +456,23 @@ class MemoryChatbot:
                 ),
                 ("agent", AGENT_ID),
                 ("user", USER_ID),
-                ("task", self.task_id),
                 ("session", self.session_id),
                 (
-                    "embedding_provider",
-                    os.environ.get(
-                        "ENGRAM_EMBEDDING_PROVIDER", "sentence-transformers"
-                    ),
+                    "embedding",
+                    f"{os.environ.get('ENGRAM_EMBEDDING_PROVIDER')} / "
+                    f"{os.environ.get('ENGRAM_EMBEDDING_MODEL')} "
+                    f"({os.environ.get('ENGRAM_EMBEDDING_DIMENSION')}d)",
                 ),
                 (
-                    "embedding_model",
-                    os.environ.get("ENGRAM_EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
+                    "llm",
+                    f"{os.environ.get('ENGRAM_LLM_PROVIDER')} / "
+                    f"{os.environ.get('ENGRAM_LLM_MODEL')}",
                 ),
-                ("embedding_dim", os.environ.get("ENGRAM_EMBEDDING_DIMENSION", "384")),
-                ("llm_provider", os.environ.get("ENGRAM_LLM_PROVIDER", "gemini")),
-                ("llm_model", os.environ.get("ENGRAM_LLM_MODEL", "gemini-3.5-flash")),
-                ("recall_mode", RECALL_MODE),
-                ("memory_jobs", MEMORY_JOBS_MODE),
+                ("pipeline", "add_batch -> search+recall+lineage+graph -> composer"),
                 ("rerank", self._rerank_enabled()),
-                ("broad_memory_limit", BROAD_MEMORY_LIMIT),
+                ("search_limit", SEARCH_LIMIT),
             ]
         )
-        if MEMORY_JOBS_MODE == "inline":
-            await self.process_jobs(show_empty=False, reason="from earlier runs")
 
     async def _resume_or_start_task(self) -> None:
         assert self.engram is not None
@@ -348,542 +519,191 @@ class MemoryChatbot:
                 await self._session_context.__aexit__(None, None, None)
         await self.engram.close()
 
+    def _rerank_enabled(self) -> bool:
+        return RERANK_MODE == "true"
+
+    # -- the pipeline ------------------------------------------------------
+
     async def reply(self, message: str) -> str:
-        assert self.engram is not None
-        assert self.task_id is not None
-
-        if RECALL_MODE == "operator":
-            response, recall_metadata, llm_model = await self._operator_reply(message)
-        else:
-            messages, recall_metadata = await self._build_prompt_messages(message)
-            llm_response = await self.engram.llm.complete_full(
-                messages,
-                max_tokens=1200,
-                temperature=0.4,
-            )
-            response = llm_response.content.strip()
-            llm_model = llm_response.model
-
-        # Drop the hidden <mem_thinking> scratchpad before storing/printing.
-        response = strip_thinking(response)
-
-        metadata = {
-            "application": "examples/chatbot.py",
-            "llm_model": llm_model,
-            "recall_mode": RECALL_MODE,
-        }
-        metadata.update(recall_metadata)
-
-        await self.engram.record_turn(
-            self.task_id,
-            message,
-            response,
-            agent_id=AGENT_ID,
-            user_id=USER_ID,
-            session_id=self.session_id,
-            metadata=metadata,
-        )
-        jobs = await self._process_memory_jobs()
-        self._print_memory_job_summary(jobs)
-
-        self.history.append({"role": "user", "content": message})
-        self.history.append({"role": "assistant", "content": response})
-        self.history = self.history[-HISTORY_LIMIT:]
-
-        return response
-
-    async def _build_prompt_messages(
-        self,
-        message: str,
-    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        if RECALL_MODE == "fast":
-            return await self._build_fast_prompt_messages(message)
-        return await self._build_deep_prompt_messages(
-            message,
-            include_trace=RECALL_MODE == "debug",
-        )
-
-    async def _operator_reply(
-        self,
-        message: str,
-    ) -> tuple[str, dict[str, Any], str]:
-        """Route with recall, then answer with the chatbot LLM prompt.
-
-        recall() classifies the message's intent (current / historical / event
-        / lineage / chat) and retrieves from the matching surface(s), but the
-        chatbot owns final answer generation. That lets broad history/update
-        questions use the timeline block instead of returning recall's narrow
-        "no matching memory" prose.
-        """
+        """One turn: retrieve over past memory, compose, then store this turn."""
         assert self.engram is not None
 
-        answer = await self.engram.recall(
-            message,
-            AGENT_ID,
-            user_id=USER_ID,
-            compose_answer=False,
-        )
-        metadata = {
-            "recall_intent": answer.intent,
-            "recall_previous_count": len(answer.previous),
-            "recall_event_count": len(answer.events),
-            "recall_source_count": len(answer.sources),
-            "operator_route": "chat" if answer.intent == "chat" else "recall_chat",
-        }
+        # 1. RETRIEVE — 4 surfaces over everything stored BEFORE this turn.
+        evidence, _trace = await self._retrieve_evidence(message)
+        self._last_evidence = evidence
 
-        messages, chat_metadata = await self._build_operator_prompt_messages(
-            message,
-            answer,
-        )
+        # 2. GENERATE — second-brain composer over the evidence block.
+        messages = [
+            {"role": "system", "content": build_system_prompt()},
+            {
+                "role": "system",
+                "content": (f"<engram_memories>\n{evidence}\n</engram_memories>"),
+            },
+            *self.history[-HISTORY_LIMIT:],
+            {"role": "user", "content": message},
+        ]
         llm_response = await self.engram.llm.complete_full(
             messages,
             max_tokens=1200,
             temperature=0.4,
         )
-        metadata.update(chat_metadata)
-        return llm_response.content.strip(), metadata, llm_response.model
+        response = strip_thinking(llm_response.content.strip())
 
-    async def _build_operator_prompt_messages(
-        self,
-        message: str,
-        answer: Any,
-    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        # 3. INGEST — store this turn verbatim (add_batch, no LLM extraction).
+        await self._ingest_turn(message, response)
+
+        self.history.append({"role": "user", "content": message})
+        self.history.append({"role": "assistant", "content": response})
+        self.history = self.history[-HISTORY_LIMIT * 2 :]
+
+        return response
+
+    async def _retrieve_evidence(self, question: str) -> tuple[str, dict[str, Any]]:
+        """4-surface retrieval, identical to the benchmark `retrieve_evidence`."""
         assert self.engram is not None
+        rerank = self._rerank_enabled()
+        n_search = n_graph = n_lineage = 0
+        recall_intent = ""
+        evidence = ""
 
-        messages, metadata = await self._build_fast_prompt_messages(message)
-        recall_block = self._render_recall_evidence_block(answer)
-        messages.insert(
-            1,
-            {
-                "role": "system",
-                "content": (
-                    f'<engram_recall_evidence intent="{answer.intent}">\n'
-                    f"{recall_block}\n"
-                    "</engram_recall_evidence>"
-                ),
-            },
-        )
-        messages.insert(
-            1,
-            {
-                "role": "system",
-                "content": (
-                    "Use the Engram recall evidence, memory context, and memory "
-                    "history as source material. For before/after, changed, "
-                    "updated, revised, added, deleted, or conversation-history "
-                    "questions, prefer the memory history timeline. If recall "
-                    "evidence is empty but the history timeline has matching "
-                    "entries, answer from the history timeline instead of saying "
-                    "there is no memory."
-                ),
-            },
-        )
-        return messages, metadata
-
-    def _render_recall_evidence_block(self, answer: Any) -> str:
-        lines = []
-        trace = getattr(answer, "trace", {}) or {}
-        topic = trace.get("topic")
-        if topic:
-            lines.append(f"topic: {topic}")
-        if answer.current is not None:
-            lines.append(f"current: {answer.current.fact or answer.current.content}")
-        for mem in answer.previous:
-            when = mem.superseded_at or mem.valid_to or mem.created_at
-            stamp = when.date().isoformat() if when else "unknown"
-            lines.append(f"previous until {stamp}: {mem.fact or mem.content}")
-        for mem in answer.evidence:
-            lines.append(f"memory [{mem.status}]: {mem.fact or mem.content}")
-        for event in answer.events[:8]:
-            stamp = (
-                format_timestamp(event.created_at) if event.created_at else "unknown"
+        try:
+            # a) Hybrid search, wide candidate pool, diversified to the budget.
+            candidate_limit = (
+                100 if rerank else min(max(SEARCH_LIMIT * 3, SEARCH_LIMIT), 100)
             )
-            lines.append(f"event [{event.role} {stamp}]: {event.content}")
-        if answer.conflict_note:
-            lines.append(f"conflict: {answer.conflict_note}")
-        return "\n".join(lines) if lines else "No direct recall evidence."
+            candidates = await self.engram.search(
+                query=question,
+                agent_id=AGENT_ID,
+                user_id=USER_ID,
+                limit=candidate_limit,
+                mode="hybrid",
+                rerank=rerank,
+                include_superseded=True,
+            )
+            search_results = diversify_by_session(
+                candidates,
+                limit=SEARCH_LIMIT,
+                max_per_session=MAX_PER_SESSION,
+                rerank=rerank,
+            )
+            n_search = len(search_results)
+            search_results.sort(key=lambda r: r.memory.metadata.get("chat_date", ""))
 
-    async def _build_fast_prompt_messages(
-        self,
-        message: str,
-    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        assert self.engram is not None
+            # b) Recall as a structured lineage aid (not the answer).
+            recall_answer = None
+            try:
+                recall_answer = await self.engram.recall(
+                    question,
+                    AGENT_ID,
+                    user_id=USER_ID,
+                    limit=max(SEARCH_LIMIT // 2, 10),
+                    compose_answer=False,
+                )
+                recall_intent = getattr(recall_answer, "intent", "")
+            except Exception as exc:
+                recall_intent = f"error:{type(exc).__name__}"
 
-        critical_memories = await self.engram.recall_critical(
-            AGENT_ID,
-            user_id=USER_ID,
-            limit=12,
-        )
-        critical_block = self._render_memories_block(critical_memories, max_chars=1200)
-        memory_block = await self.engram.get_context_block(
-            message,
-            AGENT_ID,
-            user_id=USER_ID,
-            session_id=self.session_id,
-            limit=8,
-            max_tokens=900,
-            group_by_type=True,
-            rerank=self._rerank_enabled(),
-        )
-        history_block, history_count = await self._build_history_block()
-        messages = [
-            {"role": "system", "content": build_system_prompt()},
-            {
-                "role": "system",
-                "content": (
-                    "<engram_critical_memory>\n"
-                    f"{critical_block}\n"
-                    "</engram_critical_memory>"
-                ),
-            },
-            {
-                "role": "system",
-                "content": (
-                    f"<engram_memory_context>\n{memory_block}\n</engram_memory_context>"
-                ),
-            },
-            {
-                "role": "system",
-                "content": (
-                    f"<engram_memory_history>\n{history_block}\n"
-                    "</engram_memory_history>"
-                ),
-            },
-            *self.history[-HISTORY_LIMIT:],
-            {"role": "user", "content": message},
-        ]
-        return messages, {
-            "critical_memory_count": len(critical_memories),
-            "memory_history_count": history_count,
+            # c) Lineage preservation for retrieved active facts.
+            lineage_superseded: list[Any] = []
+            seen_lineages: set[str] = set()
+            for r in search_results:
+                mem = r.memory
+                lid = getattr(mem, "lineage_id", None)
+                status = getattr(mem, "status", None) or mem.metadata.get(
+                    "status", "active"
+                )
+                if (
+                    status != "superseded"
+                    and lid
+                    and lid != mem.memory_id
+                    and lid not in seen_lineages
+                ):
+                    seen_lineages.add(lid)
+                    try:
+                        lineage = await self.engram.get_lineage(mem.memory_id)
+                        lineage_superseded.extend(
+                            m
+                            for m in lineage.memories
+                            if getattr(m, "status", None) == "superseded"
+                        )
+                    except Exception:
+                        pass
+            n_lineage = len(lineage_superseded)
+
+            # d) Graph traversal from the top active search hits.
+            graph_context = ""
+            seed_ids = [
+                r.memory.memory_id
+                for r in search_results
+                if r.memory.metadata.get("status") != "superseded"
+            ][:5]
+            if seed_ids and GRAPH_DEPTH > 0:
+                try:
+                    graph_results = await self.engram.traverse_many(
+                        start_memory_ids=seed_ids,
+                        max_depth=GRAPH_DEPTH,
+                        direction="any",
+                        skip_missing=True,
+                    )
+                    if graph_results:
+                        graph_context = self.engram.render_graph_context(graph_results)
+                        n_graph = len(graph_results)
+                except Exception:
+                    pass
+
+            evidence = _build_evidence_block(
+                search_results, recall_answer, graph_context, lineage_superseded
+            )
+        except Exception as exc:
+            evidence = f"(retrieval error: {type(exc).__name__}: {exc})"
+
+        return evidence, {
+            "search_hits": n_search,
+            "graph_hits": n_graph,
+            "lineage_superseded": n_lineage,
+            "recall_intent": recall_intent,
         }
 
-    async def _build_deep_prompt_messages(
-        self,
-        message: str,
-        *,
-        include_trace: bool,
-    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    async def _ingest_turn(self, user_message: str, assistant_response: str) -> None:
+        """Store the turn verbatim as date-anchored episodic rows (add_batch).
+
+        No LLM extraction, no supersession decisioning — the benchmark floor
+        behaviour. The user turn is authoritative; the assistant turn is stored
+        role-tagged so 'what did you tell me' is answerable.
+        """
         assert self.engram is not None
-        assert self.task_id is not None
+        chat_date = date.today().isoformat()
+        human_date = _to_human_date(chat_date)
+        turn = self._turn_index
+        self._turn_index += 1
 
-        trace = None
-        if include_trace:
-            trace = await self.engram.trace_recall(
-                message,
-                AGENT_ID,
-                user_id=USER_ID,
-                limit=12,
-                max_tokens=1400,
-                expected_terms=self._expected_terms(message),
-            )
-        memory_block = await self.engram.get_context_block(
-            message,
-            AGENT_ID,
-            user_id=USER_ID,
-            session_id=self.session_id,
-            limit=10,
-            max_tokens=1000,
-            group_by_type=True,
-            rerank=self._rerank_enabled(),
-        )
-        deep_hits = await self.engram.deep_search(
-            message,
-            AGENT_ID,
-            user_id=USER_ID,
-            limit=16,
-            n_queries=4,
-            rerank=self._rerank_enabled(),
-        )
-        deep_memory_block = self._render_deep_memory_block(deep_hits)
-        broad_memories = await self.engram.list_recent(
-            AGENT_ID,
-            user_id=USER_ID,
-            limit=BROAD_MEMORY_LIMIT,
-        )
-        broad_memory_block = self._render_memories_block(
-            broad_memories,
-            max_chars=BROAD_MEMORY_CHARS,
-        )
-        attention_memory_block = self._render_attention_memory_block(broad_memories)
-        query_attention_block = self._render_query_attention_memory_block(
-            message,
-            broad_memories,
-        )
-        history_block, history_count = await self._build_history_block()
-        task_context = await self.engram.build_context(
-            self.task_id,
-            query=message,
-            max_tokens=1600,
-            recent_event_limit=10,
-            memory_limit=10,
-            checkpoint_limit=2,
-            include_graph=True,
-        )
-
-        metadata: dict[str, Any] = {"memory_history_count": history_count}
-        trace_context = ""
-        if trace is not None:
-            trace_context = trace.context
-            metadata.update(
-                {
-                    "trace_kept_memory_ids": trace.kept_memory_ids,
-                    "missing_expected_terms": trace.missing_expected_terms,
-                }
-            )
-
-        user_content = message
-        if query_attention_block:
-            user_content = (
-                "Mandatory Engram memories for this question. "
-                "Every line below matches the current question; include every "
-                "line in your answer:\n"
-                f"{query_attention_block}\n\n"
-                f"User question: {message}"
-            )
-
-        messages = [
-            {"role": "system", "content": build_system_prompt()},
-            {
-                "role": "system",
-                "content": (
-                    '<engram_query_specific_must_use priority="highest">\n'
-                    f"{query_attention_block}\n"
-                    "</engram_query_specific_must_use>"
-                ),
-            },
-            {
-                "role": "system",
-                "content": f"<engram_memory_context>\n{memory_block}\n</engram_memory_context>",
-            },
-        ]
-        if trace_context:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "<engram_recall_trace>\n"
-                        f"{trace_context}\n"
-                        "</engram_recall_trace>"
-                    ),
-                }
-            )
-        messages.extend(
-            [
-                {
-                    "role": "system",
-                    "content": f"<engram_deep_memory>\n{deep_memory_block}\n</engram_deep_memory>",
+        def _row(role_label: str, role: str, text: str) -> dict[str, Any]:
+            content = f"[{human_date}] {role_label}: {text}"
+            return {
+                "content": content,
+                "main_content": content,
+                "agent_id": AGENT_ID,
+                "user_id": USER_ID,
+                "memory_type": "episodic",
+                "metadata": {
+                    "source": "chatbot",
+                    "original_session_id": str(self.session_id),
+                    "chat_date": chat_date,
+                    "turn_index": turn,
+                    "turn_role": role,
                 },
-                {
-                    "role": "system",
-                    "content": f"<engram_recent_memory_safety_net>\n{broad_memory_block}\n</engram_recent_memory_safety_net>",
-                },
-                {
-                    "role": "system",
-                    "content": f"<engram_attention_memory>\n{attention_memory_block}\n</engram_attention_memory>",
-                },
-                {
-                    "role": "system",
-                    "content": (
-                        f"<engram_memory_history>\n{history_block}\n"
-                        "</engram_memory_history>"
-                    ),
-                },
-                {
-                    "role": "system",
-                    "content": f"<engram_task_context>\n{task_context.text}\n</engram_task_context>",
-                },
-                *self.history[-HISTORY_LIMIT:],
-                {"role": "user", "content": user_content},
-            ]
-        )
-        return messages, metadata
+            }
 
-    async def _process_memory_jobs(self) -> list[Any]:
-        assert self.engram is not None
+        rows = [_row("USER", "user", user_message)]
+        if STORE_ASSISTANT_TURNS and assistant_response.strip():
+            rows.append(_row("ASSISTANT", "assistant", assistant_response))
 
-        if MEMORY_JOBS_MODE == "inline":
-            return await self.engram.process_memory_jobs(limit=MEMORY_JOBS_LIMIT)
-        print_notice(
-            "memory job queued; run /jobs, process_memory_jobs(), or "
-            "ENGRAM_CHATBOT_MEMORY_JOBS=inline"
-        )
-        return []
+        try:
+            await self.engram.add_batch(rows)
+        except Exception as exc:
+            print_notice(f"failed to store turn: {exc}", level="warn")
 
-    def _print_memory_job_summary(self, jobs: list[Any], *, reason: str = "") -> None:
-        completed = len([job for job in jobs if job.status == "completed"])
-        failed = len([job for job in jobs if job.status == "failed"])
-        suffix = f" {reason}" if reason else ""
-        if completed:
-            print_notice(f"processed {completed} memory job(s){suffix}", level="ok")
-        if failed:
-            print_notice(f"{failed} memory job(s) failed{suffix}", level="error")
-
-    def _rerank_enabled(self) -> bool:
-        if RERANK_MODE == "true":
-            return True
-        if RERANK_MODE == "false":
-            return False
-        return RECALL_MODE in {"deep", "debug"}
-
-    def _render_deep_memory_block(
-        self, results: list[Any], max_chars: int = 2400
-    ) -> str:
-        lines = []
-        used = 0
-        seen = set()
-        for result in results:
-            memory = result.memory
-            if memory.memory_id in seen:
-                continue
-            seen.add(memory.memory_id)
-            line = f"- [{memory.memory_type}] {memory.content}"
-            if used + len(line) > max_chars:
-                break
-            lines.append(line)
-            used += len(line)
-        return "\n".join(lines)
-
-    def _render_memories_block(self, memories: list[Any], max_chars: int) -> str:
-        lines = []
-        used = 0
-        for memory in memories:
-            line = f"- [{memory.memory_type}] {memory.content}"
-            if used + len(line) > max_chars:
-                break
-            lines.append(line)
-            used += len(line)
-        return "\n".join(lines)
-
-    async def _build_history_block(self) -> tuple[str, int]:
-        assert self.engram is not None
-
-        events = await self.engram.get_history(
-            AGENT_ID,
-            user_id=USER_ID,
-            limit=MEMORY_HISTORY_LIMIT,
-            include_superseded=True,
-        )
-        if not events:
-            return "No memory history is available.", 0
-
-        return self._render_history_block(events), len(events)
-
-    def _render_history_block(self, events: list[Any], max_chars: int = 3200) -> str:
-        header = (
-            "Use this block only for questions about previous values, updates, "
-            "adds, changes, revisions, or history. Active memories are current. "
-            "Superseded memories are old values; do not treat them as current."
-        )
-        lines = [header]
-        used = len(header)
-        for event in events:
-            memory = event.memory
-            relation = ""
-            if event.event_type == "revised" and event.previous_memory_id:
-                relation = f" previous={event.previous_memory_id[:12]}"
-            elif event.event_type == "superseded" and event.superseded_by_memory_id:
-                relation = f" superseded_by={event.superseded_by_memory_id[:12]}"
-            reason = f" reason={event.reason}" if event.reason else ""
-            line = (
-                f"- {event.event_type} at {format_timestamp(event.occurred_at)} "
-                f"[{memory.memory_type} r{memory.revision} {memory.status}] "
-                f"{memory.content}{relation}{reason}"
-            )
-            if used + len(line) > max_chars:
-                break
-            lines.append(line)
-            used += len(line)
-        return "\n".join(lines)
-
-    def _render_attention_memory_block(
-        self,
-        memories: list[Any],
-        max_chars: int = 1800,
-    ) -> str:
-        keywords = (
-            "avoid",
-            "allerg",
-            "no longer",
-            "superseded",
-            "cancel",
-            "instead",
-            "not ",
-            "must",
-            "before",
-            "owner",
-            "threshold",
-        )
-        lines = []
-        used = 0
-        for memory in memories:
-            content_lower = memory.content.lower()
-            if not any(keyword in content_lower for keyword in keywords):
-                continue
-            line = f"- [{memory.memory_type}] {memory.content}"
-            if used + len(line) > max_chars:
-                break
-            lines.append(line)
-            used += len(line)
-        return "\n".join(lines)
-
-    def _render_query_attention_memory_block(
-        self,
-        message: str,
-        memories: list[Any],
-        max_chars: int = 1600,
-    ) -> str:
-        lowered = message.lower()
-        keyword_groups: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
-            (
-                ("dinner", "restaurant", "food", "meal", "thai", "coffee"),
-                ("shellfish", "allerg", "vegetarian", "quiet", "live music", "avoid"),
-            ),
-            (
-                (
-                    "older",
-                    "old plan",
-                    "superseded",
-                    "cancelled",
-                    "canceled",
-                    "replaced",
-                ),
-                ("superseded", "cancel", "no longer"),
-            ),
-            (
-                ("owner", "approval", "threshold", "safety rule", "launch"),
-                ("owner", "must", "before", "threshold", "latency", "p95"),
-            ),
-        ]
-        needles: set[str] = set()
-        for triggers, terms in keyword_groups:
-            if any(trigger in lowered for trigger in triggers):
-                needles.update(terms)
-        if not needles:
-            return ""
-
-        lines = []
-        used = 0
-        for memory in memories:
-            content_lower = memory.content.lower()
-            if not any(term in content_lower for term in needles):
-                continue
-            line = f"- [{memory.memory_type}] {memory.content}"
-            if used + len(line) > max_chars:
-                break
-            lines.append(line)
-            used += len(line)
-        return "\n".join(lines)
-
-    def _expected_terms(self, message: str) -> list[str]:
-        terms = []
-        lowered = message.lower()
-        for raw in lowered.replace("\n", " ").split():
-            word = raw.strip(".,!?;:()[]{}\"'")
-            if len(word) >= 5 and word not in {"about", "there", "would", "could"}:
-                terms.append(word)
-            if len(terms) == 6:
-                break
-        return terms
+    # -- commands ----------------------------------------------------------
 
     async def remember(self, text: str) -> None:
         assert self.engram is not None
@@ -920,13 +740,18 @@ class MemoryChatbot:
                 f"{preview(memory.content, 120)}"
             )
 
-    async def process_jobs(self, *, show_empty: bool = True, reason: str = "") -> None:
-        assert self.engram is not None
-        jobs = await self.engram.process_memory_jobs(limit=MEMORY_JOBS_LIMIT)
-        if jobs:
-            self._print_memory_job_summary(jobs, reason=reason)
-        elif show_empty:
-            print_notice("no queued memory jobs", level="ok")
+    async def evidence(self, query: str) -> None:
+        """Show the 4-surface evidence block the composer would see."""
+        block, trace = await self._retrieve_evidence(query)
+        print(
+            rule(
+                f"evidence [search={trace['search_hits']} "
+                f"lineage={trace['lineage_superseded']} "
+                f"graph={trace['graph_hits']} "
+                f"recall={trace['recall_intent']}]"
+            )
+        )
+        print(block or "(no matching memory)")
 
     async def show_history(self, rest: str = "") -> None:
         assert self.engram is not None
@@ -957,11 +782,9 @@ class MemoryChatbot:
 
         print(rule("history"))
         for event in events:
-            marker = {
-                "added": "+",
-                "revised": "~",
-                "superseded": "x",
-            }.get(event.event_type, "?")
+            marker = {"added": "+", "revised": "~", "superseded": "x"}.get(
+                event.event_type, "?"
+            )
             relation = ""
             if event.event_type == "revised" and event.previous_memory_id:
                 relation = f" prev={event.previous_memory_id[:12]}"
@@ -974,8 +797,6 @@ class MemoryChatbot:
                 f"{dim(f'[{event.memory.memory_type} r{event.memory.revision} {event.memory.status}]')} "
                 f"{preview(event.memory.content, 110)}{dim(relation)}"
             )
-            if event.reason:
-                print(f"    {dim('reason')} {event.reason}")
 
     async def revise(self, memory_id: str, content: str) -> None:
         assert self.engram is not None
@@ -1036,6 +857,7 @@ class MemoryChatbot:
             user_id=USER_ID,
             limit=8,
             mode="hybrid",
+            rerank=self._rerank_enabled(),
             include_superseded=True,
         )
         if not results:
@@ -1043,7 +865,6 @@ class MemoryChatbot:
             return
         print(rule("search"))
         for result in results:
-            await self.engram.reinforce(result.memory.memory_id, 0.02)
             print(
                 f"  {accent(f'{result.score:.3f}')} "
                 f"{dim(result.memory.memory_type)} "
@@ -1063,69 +884,6 @@ class MemoryChatbot:
         if answer.conflict_note:
             print(f"  {warn('conflict:')} {answer.conflict_note}")
 
-    async def context(self, query: str) -> None:
-        assert self.engram is not None
-        assert self.task_id is not None
-        block = await self.engram.get_context_block(
-            query,
-            AGENT_ID,
-            user_id=USER_ID,
-            session_id=self.session_id,
-            group_by_type=True,
-            max_tokens=1200,
-        )
-        task_context = await self.engram.build_context(
-            self.task_id,
-            query=query,
-            max_tokens=1400,
-            include_graph=True,
-        )
-        print(rule("memory context"))
-        print(block or "No memory context.")
-        print()
-        print(rule("task context"))
-        print(task_context.text or "No task context.")
-
-    async def trace(self, query: str) -> None:
-        assert self.engram is not None
-        trace = await self.engram.trace_recall(
-            query,
-            AGENT_ID,
-            user_id=USER_ID,
-            expected_terms=self._expected_terms(query),
-            max_tokens=1200,
-        )
-        print(rule("trace"))
-        print(trace.context or "No recall context.")
-        print_table(
-            [
-                ("critical", len(trace.critical_memory_ids)),
-                ("search", len(trace.search_memory_ids)),
-                ("kept", len(trace.kept_memory_ids)),
-                ("trimmed", len(trace.trimmed_memory_ids)),
-                ("missing_terms", trace.missing_expected_terms),
-            ]
-        )
-
-    async def task(self) -> None:
-        assert self.engram is not None
-        assert self.task_id is not None
-        current = await self.engram.get_task(self.task_id)
-        tasks = await self.engram.list_tasks(
-            agent_id=AGENT_ID,
-            user_id=USER_ID,
-            status=["active", "paused"],
-            limit=5,
-        )
-        print(rule("task"))
-        print_table(
-            [
-                ("current", f"{current.task_run_id} ({current.status})"),
-                ("session", current.session_id),
-                ("resumable", [task.task_run_id for task in tasks]),
-            ]
-        )
-
     async def forget(self, memory_id: str) -> None:
         assert self.engram is not None
         deleted = await self.engram.forget(memory_id)
@@ -1136,6 +894,7 @@ class MemoryChatbot:
         assert self.engram is not None
         count = await self.engram.purge(AGENT_ID, user_id=USER_ID)
         self.history.clear()
+        self._turn_index = 0
         print(rule("clear"))
         print_table([("purged", count)])
 
@@ -1146,12 +905,9 @@ COMMANDS = [
     ("/lineage <memory_id>", "show current head and revision history"),
     ("/history [active|limit|memory_id]", "show memory add/update timeline"),
     ("/memories", "list recent Engram memories"),
-    ("/jobs", "process queued memory extraction jobs now"),
-    ("/search <query>", "search memories and reinforce hits"),
+    ("/search <query>", "hybrid search over stored memories"),
     ("/recall <question>", "ask memory: current/historical/event/lineage answer"),
-    ("/context <query>", "show memory and task prompt context"),
-    ("/trace <query>", "inspect trace_recall decisions"),
-    ("/task", "show the resumable task and session"),
+    ("/evidence <query>", "show the 4-surface evidence block for a query"),
     ("/forget <memory_id>", "delete one memory"),
     ("/clear", "purge this chatbot user's memories"),
     ("/help", "show this command palette"),
@@ -1168,8 +924,9 @@ def print_help() -> None:
     print()
     print(
         dim(
-            "Plain text runs: recall router -> Gemini chat when needed -> "
-            "record_turn -> memory jobs."
+            "Plain text runs the benchmark pipeline: "
+            "retrieve (search + recall + lineage + graph) -> compose -> "
+            "store the turn via add_batch."
         )
     )
     print(rule())
@@ -1215,28 +972,19 @@ async def run_command(bot: MemoryChatbot, line: str) -> bool:
         await bot.show_history(rest)
     elif command == "/memories":
         await bot.memories()
-    elif command == "/jobs":
-        await bot.process_jobs()
     elif command == "/search" and rest:
         await bot.search(rest)
     elif command == "/recall" and rest:
         await bot.recall(rest)
-    elif command == "/context" and rest:
-        await bot.context(rest)
-    elif command == "/trace" and rest:
-        await bot.trace(rest)
-    elif command == "/task":
-        await bot.task()
+    elif command == "/evidence" and rest:
+        await bot.evidence(rest)
     elif command == "/forget" and rest:
         await bot.forget(rest)
     elif command == "/clear":
         clear_prompt = (
             warn("clear") + " " + dim("Delete this user's chatbot memories? y/N: ")
         )
-        confirm = await asyncio.to_thread(
-            input,
-            clear_prompt,
-        )
+        confirm = await asyncio.to_thread(input, clear_prompt)
         if confirm.lower() == "y":
             await bot.clear()
     else:
@@ -1336,7 +1084,7 @@ async def main(argv: list[str] | None = None) -> None:
                     break
             else:
                 if COLOR_ENABLED:
-                    print_notice("recalling memory and calling Gemini")
+                    print_notice("retrieving memory and calling the composer")
                 response = await bot.reply(line)
                 print_response(response)
     finally:

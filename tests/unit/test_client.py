@@ -254,10 +254,9 @@ class TestAddConversationSummary:
         await eg.add_conversation("hi", "hello", "agent", session_id="s1")
 
         assert eg._llm.process_for_memory.call_args.args[:2] == ("hi", "")
-        assert (
-            eg._llm.process_for_memory.call_args.kwargs["conversation_summary"]
-            == "prev"
-        )
+        # The rolling summary must NOT feed extraction (contamination guard);
+        # it is loaded only to seed the roll-forward below.
+        assert "conversation_summary" not in eg._llm.process_for_memory.call_args.kwargs
         eg._llm.update_conversation_summary.assert_awaited_once_with(
             "prev", "hi", "hello", max_length=250, style="structured"
         )
@@ -326,9 +325,11 @@ class TestAddConversationSummary:
         await eg.add_conversation(
             "hi", "hello", "agent", session_id="s1", conversation_summary="explicit"
         )
-        assert (
-            eg._llm.process_for_memory.call_args.kwargs["conversation_summary"]
-            == "explicit"
+        # An explicit summary is not fed to extraction either; it overrides the
+        # stored summary only as the roll-forward base.
+        assert "conversation_summary" not in eg._llm.process_for_memory.call_args.kwargs
+        eg._llm.update_conversation_summary.assert_awaited_once_with(
+            "explicit", "hi", "hello", max_length=250, style="structured"
         )
         eg._sessions.get.assert_not_awaited()  # explicit provided, no load
 
