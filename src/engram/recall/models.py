@@ -12,7 +12,9 @@ from engram.core._types import MemoryId
 from engram.memory.models import Memory
 from engram.task.models import AgentEvent
 
-RecallIntent = Literal["current", "historical", "event", "lineage", "temporal_chain", "chat"]
+RecallIntent = Literal[
+    "current", "historical", "event", "lineage", "temporal_chain", "chat"
+]
 
 
 class RecallSource(BaseModel):

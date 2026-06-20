@@ -724,9 +724,7 @@ class TestMemoryStorePurge:
         store = MemoryStore(storage=mock_storage, embedding_service=mock_embedding)
         await store.purge("agent_1")
 
-        queries = " ".join(
-            call.args[0] for call in mock_storage.execute.call_args_list
-        )
+        queries = " ".join(call.args[0] for call in mock_storage.execute.call_args_list)
         assert "DELETE FROM agent_memory" in queries
         assert "DELETE FROM memory_lineages" in queries
 

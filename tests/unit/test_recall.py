@@ -66,7 +66,9 @@ class TestParseClassification:
         assert _parse_classification("not json at all") == ("current", "", "", [])
 
     def test_invalid_intent_coerced_to_current(self) -> None:
-        intent, _, _, _anchors = _parse_classification('{"intent": "banana", "topic": "x"}')
+        intent, _, _, _anchors = _parse_classification(
+            '{"intent": "banana", "topic": "x"}'
+        )
         assert intent == "current"
 
     def test_chat_intent_is_supported(self) -> None:
