@@ -1,0 +1,108 @@
+{
+  "benchmark": "LongMemEval (longmemeval_s_cleaned)",
+  "pipeline": "add_batch(rendered turns/sessions) -> search(include_superseded) + recall(compose=False) + traverse_many -> composer LLM",
+  "judge_model": "claude-sonnet-4-6",
+  "answer_model": "claude-sonnet-4-6",
+  "memory_policy": "default",
+  "memory_unit": "turn",
+  "max_memory_chars": 16000,
+  "ingest_batch_size": 64,
+  "search_limit": 60,
+  "rerank": true,
+  "graph_depth": 0,
+  "answer_max_tokens": 4000,
+  "total": 500,
+  "correct": 449,
+  "accuracy": 0.898,
+  "errored": 0,
+  "by_question_type": {
+    "knowledge-update": {
+      "correct": 76,
+      "total": 78,
+      "accuracy": 0.9744
+    },
+    "multi-session": {
+      "correct": 107,
+      "total": 133,
+      "accuracy": 0.8045
+    },
+    "single-session-assistant": {
+      "correct": 53,
+      "total": 56,
+      "accuracy": 0.9464
+    },
+    "single-session-preference": {
+      "correct": 25,
+      "total": 30,
+      "accuracy": 0.8333
+    },
+    "single-session-user": {
+      "correct": 69,
+      "total": 70,
+      "accuracy": 0.9857
+    },
+    "temporal-reasoning": {
+      "correct": 119,
+      "total": 133,
+      "accuracy": 0.8947
+    }
+  },
+  "abstention": {
+    "total": 30,
+    "correct": 29,
+    "accuracy": 0.9667
+  },
+  "failed_ids": [
+    "01493427",
+    "0a995998",
+    "10d9b85a",
+    "195a1a1b",
+    "1a8a66a6",
+    "2133c1b5",
+    "2ce6a0f2",
+    "370a8ff4",
+    "37f165cf",
+    "51c32626",
+    "5d3d2817",
+    "6b7dfb22",
+    "6e984302",
+    "7024f17c",
+    "70b3e69b",
+    "71017277",
+    "7405e8b1",
+    "75832dbd",
+    "75f70248",
+    "81507db6",
+    "8cf4d046",
+    "92a0aa75",
+    "9aaed6a3",
+    "9ee3ecd6",
+    "a96c20ee_abs",
+    "ba358f49",
+    "c4a1ceb8",
+    "c4f10528",
+    "cc539528",
+    "d23cf73b",
+    "d6233ab6",
+    "d682f1a2",
+    "d851d5ba",
+    "dd2973ad",
+    "e3038f8c",
+    "eac54add",
+    "gpt4_2f8be40d",
+    "gpt4_372c3eed",
+    "gpt4_45189cb4",
+    "gpt4_468eb063",
+    "gpt4_468eb064",
+    "gpt4_65aabe59",
+    "gpt4_731e37d7",
+    "gpt4_7abb270c",
+    "gpt4_9a159967",
+    "gpt4_a56e767c",
+    "gpt4_d6585ce8",
+    "gpt4_d6585ce9",
+    "gpt4_d84a3211",
+    "gpt4_f420262c",
+    "gpt4_f420262d"
+  ]
+}

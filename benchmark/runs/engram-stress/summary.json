@@ -1,0 +1,177 @@
+{
+  "benchmark": "Engram Memory Stress Test Suite",
+  "version": "1.2.0",
+  "pipeline": "add_batch(rendered sessions) -> search(hybrid, include_superseded) + recall(compose=False) + get_lineage + traverse_many -> composer LLM",
+  "judge_model": "claude-haiku-4-5-20251001",
+  "answer_model": "claude-haiku-4-5-20251001",
+  "memory_policy": "default",
+  "ingest_batch_size": 64,
+  "search_limit": 40,
+  "max_per_session": 4,
+  "rerank": false,
+  "graph_depth": 1,
+  "answer_max_tokens": 4000,
+  "sessions_ingested": 30,
+  "total": 30,
+  "correct": 30,
+  "accuracy": 1.0,
+  "errored": 0,
+  "by_category": {
+    "Academic Entity Retrieval": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Asset Migration & Trailing Context": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Cancellation vs. Active Target Tracking": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Categorical Temporal Clustering": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Complex Multi-Rule Intersection": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Context Isolation & Implicit Union": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Cross-Project Cross-Pollination": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Deep History Retrieval / Needle Lookup": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Entity Consolidation / Aggregation": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Entity Separation (Same Name Trap)": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Fabrication / Hallucination Check": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Financial Schema Evolution": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Fine-Grained Context Mutation": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Global List Accumulation": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Global State Compaction": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Institutional Context Anchoring": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Inter-Entity Dependency Mapping": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Late-Stage Erasure / Overwrite": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Lineage & History Aggregation": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Matrix Membership Filtering": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Multiple Sequential Overwrites": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Negative Constraint Validation": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Niche Detail Retention": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Numerical Bound Mutation": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Over-Inference Verification": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Physical Attribute Pairing": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Primal State Recall": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Reasoning Provenance Retention": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Subtle Domain Clustering": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    },
+    "Temporal Sequence Reasoning": {
+      "correct": 1,
+      "total": 1,
+      "accuracy": 1.0
+    }
+  },
+  "abstention": {
+    "total": 1,
+    "correct": 1,
+    "accuracy": 1.0
+  },
+  "failed_ids": []
+}
