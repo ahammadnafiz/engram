@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -10,20 +10,29 @@ repos:
       - id: check-toml
       - id: debug-statements
 
+  # Lint/format scope matches pyproject's `tool.ruff.src = ["src", "tests"]`.
+  # benchmark/ and Research/ are research artifacts the project doesn't lint,
+  # so they don't gate commits on rules they were never held to.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.1.9
+    rev: v0.15.18
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
+        files: ^(src|tests)/
       - id: ruff-format
+        files: ^(src|tests)/
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.8.0
+  # mypy runs against the project environment (not an isolated, pinned copy) so
+  # it honors pyproject's strict config and the curated `ignore_missing_imports`
+  # overrides. An isolated hook can't see installed deps, so it diverges from
+  # local `mypy src` and forces phantom `# type: ignore`s.
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - pydantic>=2.0.0
-          - pydantic-settings>=2.0.0
-          - asyncpg-stubs
-        args: [--ignore-missing-imports]
+        name: mypy
+        entry: mypy
+        language: system
+        types: [python]
         files: ^src/
+        pass_filenames: false
+        args: ["src"]

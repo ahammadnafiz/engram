@@ -239,14 +239,14 @@ async def recall(
         results_per_anchor = await asyncio.gather(*tasks, return_exceptions=True)
         seen_ids: set[str] = set()
         for result in results_per_anchor:
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 continue
             for r in result:
                 if r.memory.memory_id not in seen_ids:
                     seen_ids.add(r.memory.memory_id)
                     evidence.append(r.memory)
         # Sort chronologically so the composer can compute the interval directly.
-        evidence.sort(key=lambda m: m.created_at or m.valid_from or m.updated_at)  # type: ignore[arg-type]
+        evidence.sort(key=lambda m: m.created_at)
         current = evidence[0] if evidence else None
         sources = [_source(m) for m in evidence]
 
