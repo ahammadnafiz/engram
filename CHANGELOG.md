@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Write-path correctness benchmarks** for the `add_conversation()` lineage
+  pipeline, the part prior benchmarks never exercised (they ingest via
+  `add_batch()`, so every row is a revision-1 lineage-of-one):
+  - `benchmark/lineage_invariants.py` (Layer 1) — a deterministic, no-LLM,
+    no-cost suite that drives the store directly and asserts the supersession
+    state machine: one active head per lineage, head-pointer agreement, valid
+    supersede links, oscillation without resurrection, no false collision,
+    history reconstruction, and a single active head under concurrent revises.
+    Currently 87/87 green; exits non-zero on violation so it can gate CI.
+  - `benchmark/lineage_writepath.py` (Layer 2) — scripted multi-turn update
+    scenarios run through `add_conversation()` across one or more models,
+    scoring current-state accuracy and the **update-capture rate** (the
+    fraction of intended updates that were not silently dropped).
+- **Prompt-vs-retrieval ablation tooling** in `benchmark/longmemeval_benchmark.py`:
+  `--dumb-reader` swaps the tuned composer for a neutral one-paragraph reader
+  (holding ingest/retrieval/judge identical), and `--score-retrieval` computes
+  a prompt-free retrieval hit-rate from an existing `traces.jsonl`. Measured
+  result on the existing 500-question run: retrieval surfaces the gold answer
+  session ~100% of the time, so answer-accuracy shortfalls are a reader problem,
+  not a retrieval one; the tuned composer prompt is a model-specific ~5-point
+  top-up on sonnet (and net-negative on a weaker model), not the source of
+  accuracy.
+- `ConversationResult` and `FactDecision` are now exported from `engram`.
+
+### Fixed
+- **`add_conversation()` no longer silently drops updates.** It previously
+  returned only the written memories (`list[Memory]`), so a fact that the
+  extractor/decider resolved to `NOOP` — including a real update mistaken for a
+  duplicate — vanished from the return with no error. It now returns a
+  list-compatible `ConversationResult` whose `.decisions` records the
+  operation + reason for *every* extracted fact. Backward compatible: iterating,
+  `len()`, indexing, and truth-testing still yield the written memories.
+- **Numeric/date updates are no longer NOOPed by the duplicate guard.** The raw
+  cosine ≥ 0.92 short-circuit treated number-only changes (`salary 90000` →
+  `110000`, `June 10` → `June 14`) as duplicates because the embedding barely
+  encodes the changed value, silently dropping the update before the decision
+  LLM ran. The guard now exempts candidates whose only difference is a
+  number/date and routes them to the decision LLM; the decision prompt also
+  treats a value that an existing memory mentions only in a past/origin clause
+  ("relocated from Berlin", "raised from 90k") as the *old* value, so a fresh
+  assertion of it is an update, not a NOOP.
+
+  Known limitation: a value *reversal* where both facts mention both values
+  (e.g. city A→B→A) can still be NOOPed by the cosine guard before the decision
+  prompt runs, and currency-/unit-only changes ("90000 euros" → "90000 dollars")
+  still pass the guard. These are now *visible* via `.decisions` rather than
+  silent, and closing them is tracked as follow-up.
+
 ## [0.3.0b2] - 2026-06-20
 
 ### Added

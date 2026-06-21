@@ -27,6 +27,8 @@ from engram.graph.traversal import GraphTraversal
 from engram.health.checker import HealthChecker
 from engram.llm.service import LLMService, MemoryOperationType
 from engram.memory.models import (
+    ConversationResult,
+    FactDecision,
     Memory,
     MemoryCreate,
     MemoryExplanation,
@@ -743,7 +745,7 @@ class Engram:
         search_limit: int = 10,
         update_summary: bool = True,
         extract_assistant_response: bool = False,
-    ) -> list[Memory]:
+    ) -> ConversationResult:
         """Intelligently store memories from a conversation exchange.
 
         Runs the full LLM pipeline: extracts atomic facts from the exchange,
@@ -773,7 +775,11 @@ class Engram:
                 rewrite user-authored memories.
 
         Returns:
-            Memories that were created or updated (NOOP/skipped facts excluded).
+            A ConversationResult. Iterating/len()-ing it yields the memories
+            that were created or updated (same as the old list[Memory] return);
+            its ``decisions`` field lists the per-fact operation + reason for
+            EVERY extracted fact, so a fact that resolved to NOOP or could not be
+            applied is visible there instead of silently missing.
 
         Raises:
             EngramError: If no LLM provider is configured.
@@ -835,20 +841,25 @@ class Engram:
 
         main_content = f"[USER]: {user_message}\n[AI]: {assistant_response}"
         affected: list[Memory] = []
+        decisions: list[FactDecision] = []
 
         for op in result.operations:
+            applied = False
+            written_id: str | None = None
+            reason = op.reason
+
             if op.operation == MemoryOperationType.ADD:
-                affected.append(
-                    await self.add(
-                        content=op.content,
-                        main_content=main_content,
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        session_id=session_id,
-                        memory_type=op.memory_type,  # type: ignore[arg-type]
-                        metadata=metadata,
-                    )
+                mem = await self.add(
+                    content=op.content,
+                    main_content=main_content,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    memory_type=op.memory_type,  # type: ignore[arg-type]
+                    metadata=metadata,
                 )
+                affected.append(mem)
+                applied, written_id = True, mem.memory_id
             elif (
                 op.operation
                 in (
@@ -869,21 +880,41 @@ class Engram:
                 op_metadata["memory_type"] = op_type
                 op_metadata["correction_operation"] = op.operation.value
                 try:
-                    affected.append(
-                        await self.revise(
-                            op.target_id,
-                            content=op.content,
-                            metadata=op_metadata,
-                            reason=op.operation.value,
-                        )
+                    mem = await self.revise(
+                        op.target_id,
+                        content=op.content,
+                        metadata=op_metadata,
+                        reason=op.operation.value,
                     )
+                    affected.append(mem)
+                    applied, written_id = True, mem.memory_id
                 except DuplicateMemoryError:
                     # The merged content already exists as another memory's
-                    # fact; nothing new to store.
+                    # fact; nothing new to store -- recorded as an unapplied
+                    # decision rather than dropped silently.
                     logger.debug(
                         f"Merged content for {op.target_id} already stored; skipping"
                     )
-            # NOOP: nothing to store
+                    reason = f"{reason} (merged content already stored)".strip()
+            elif op.operation in (
+                MemoryOperationType.UPDATE,
+                MemoryOperationType.DELETE,
+            ):
+                # A correction with no target row to revise: surface it as an
+                # unapplied decision instead of silently doing nothing.
+                reason = f"{reason} (no target memory to revise)".strip()
+            # NOOP: nothing to store; the decision + reason are still recorded.
+
+            decisions.append(
+                FactDecision(
+                    fact=op.original_fact or op.content,
+                    operation=op.operation.value,
+                    applied=applied,
+                    reason=reason,
+                    memory_id=written_id,
+                    target_id=op.target_id,
+                )
+            )
 
         # Roll the session's summary forward with this exchange. Memories are
         # already written at this point, so summary maintenance is strictly
@@ -929,7 +960,7 @@ class Engram:
                     f"memories were stored. Error: {e}"
                 )
 
-        return affected
+        return ConversationResult(memories=affected, decisions=decisions)
 
     async def get(self, memory_id: MemoryId, *, track_access: bool = True) -> Memory:
         """Get a memory by ID.

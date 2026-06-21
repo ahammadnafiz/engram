@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -109,6 +110,34 @@ class ExtractionResult:
     facts: list[str] = field(default_factory=list)
     operations: list[MemoryOperation] = field(default_factory=list)
     summary: str | None = None
+
+
+_MONTHS_RE = re.compile(
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b"
+)
+
+
+def _value_tokens(text: str) -> set[str]:
+    """Numbers and month names in a fact -- the tokens a value lives in.
+
+    Commas are stripped so '110,000' is one token. Used to detect a number/date
+    CHANGE between a new fact and a near-identical existing one.
+    """
+    low = text.lower().replace(",", "")
+    return set(re.findall(r"\d+(?:\.\d+)?", low)) | set(_MONTHS_RE.findall(low))
+
+
+def _values_differ(a: str, b: str) -> bool:
+    """True when two near-duplicate facts carry DIFFERENT numbers/dates.
+
+    Weak embeddings rate '...salary is 90000' and '...salary is 110000' as
+    near-identical, so a raw-cosine duplicate guard would NOOP a real update.
+    This lets such a pair skip the guard and go to the decision LLM. Only fires
+    when BOTH facts contain value tokens and those token sets differ, so a mere
+    count made explicit ('2 cats' vs 'cats') is not treated as a change.
+    """
+    ta, tb = _value_tokens(a), _value_tokens(b)
+    return bool(ta and tb and ta != tb)
 
 
 class LLMService:
@@ -846,6 +875,8 @@ Use when new fact ADDS DETAIL to existing memory (merge them).
 <mistake type="avoid">NOOP for job changes - if someone changed jobs, DELETE the old job fact!</mistake>
 <mistake type="avoid">NOOP for corrections - if a fact is being corrected, DELETE the wrong one!</mistake>
 <mistake type="avoid">NOOP for loosely related facts (job vs project) - these should be ADD</mistake>
+<mistake type="avoid">NOOP for a value that an existing memory mentions ONLY inside a past/origin clause ("changed from X", "previously X", "relocated from X", "raised from X", "was X"). That X is the OLD value, not the current one - a fresh statement asserting X is a CURRENT claim, so DELETE the existing memory (NOOP would lose the correct current value). Example: existing "User now lives in Amsterdam (relocated from Berlin)"; new "User lives in Berlin" = DELETE (Berlin is current again).</mistake>
+<mistake type="avoid">NOOP for a changed number/date on the same attribute ("salary is 110000" vs existing "salary is 90000"; "flight on June 14" vs "June 10") - the value changed, so DELETE the old value.</mistake>
 <mistake type="correct">DELETE when same attribute (job, location, status) changes for same person</mistake>
 </common_mistakes>
 
@@ -1263,11 +1294,15 @@ No prose, no code fences.
             zip(facts, candidate_lists, strict=True)
         ):
             # Quick duplicate guard (no LLM): raw cosine >= duplicate_threshold.
+            # Exemption: if the near-identical candidate carries a DIFFERENT
+            # number/date, it is a likely value update, not a duplicate -- skip
+            # the guard and let the decision LLM resolve it (else a raise
+            # 90k->110k or a date change gets silently NOOPed).
             dup = next(
                 (c for c in candidates if _similarity(c) >= duplicate_threshold),
                 None,
             )
-            if dup is not None:
+            if dup is not None and not _values_differ(fact, dup[1]):
                 operations[i] = MemoryOperation(
                     operation=MemoryOperationType.NOOP,
                     content=fact,
@@ -1279,6 +1314,12 @@ No prose, no code fences.
             relevant = [
                 (c[0], c[1]) for c in candidates if c[2] >= similarity_threshold
             ]
+            # Ensure a value-changed near-duplicate is always offered to the
+            # decision LLM, even if time-decay pushed its combined score below
+            # similarity_threshold -- otherwise it would fall through to ADD and
+            # leave two conflicting active facts instead of a supersede.
+            if dup is not None and (dup[0], dup[1]) not in relevant:
+                relevant.append((dup[0], dup[1]))
             if not relevant:
                 # Nothing to compare against -> a new fact, no LLM needed.
                 operations[i] = MemoryOperation(

@@ -2,10 +2,12 @@
 
 This module defines the Pydantic models for memories and search results.
 """
-# ruff: noqa: TC001
+# ruff: noqa: TC001, TC003
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
@@ -225,6 +227,52 @@ class MemoryHistoryEvent(BaseModel):
     metadata: Metadata = Field(default_factory=dict)
 
     model_config = {"frozen": True}
+
+
+@dataclass(frozen=True)
+class FactDecision:
+    """The outcome of one extracted fact in add_conversation().
+
+    Makes every decision visible -- including NOOPs and unapplied corrections --
+    so a caller can tell "correctly skipped a duplicate" apart from "silently
+    dropped a real update". ``applied`` is True only when a memory row was
+    actually written or revised.
+    """
+
+    fact: str
+    operation: str  # "ADD" | "UPDATE" | "DELETE" | "NOOP"
+    applied: bool
+    reason: str = ""
+    memory_id: MemoryId | None = None  # written/affected row, when applied
+    target_id: MemoryId | None = None  # superseded row, for UPDATE/DELETE
+
+
+@dataclass
+class ConversationResult:
+    """Return value of add_conversation().
+
+    Backward-compatible: iterating, ``len()``-ing, or truth-testing this yields
+    the WRITTEN memories (ADD + UPDATE/DELETE), exactly like the old
+    ``list[Memory]`` return. The new ``decisions`` field exposes the per-fact
+    operation + reason for EVERY extracted fact, so an intended update that
+    resolved to NOOP is visible here instead of being silently absent from the
+    returned list.
+    """
+
+    memories: list[Memory] = field(default_factory=list)
+    decisions: list[FactDecision] = field(default_factory=list)
+
+    def __iter__(self) -> Iterator[Memory]:
+        return iter(self.memories)
+
+    def __len__(self) -> int:
+        return len(self.memories)
+
+    def __bool__(self) -> bool:
+        return bool(self.memories)
+
+    def __getitem__(self, index: int) -> Memory:
+        return self.memories[index]
 
 
 class SearchResult(BaseModel):

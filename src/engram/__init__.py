@@ -79,6 +79,8 @@ from engram.embedding import EmbeddingService
 from engram.graph import MemoryRelation, TraversalResult
 from engram.llm import LLMService
 from engram.memory import (
+    ConversationResult,
+    FactDecision,
     Memory,
     MemoryCreate,
     MemoryExplanation,
@@ -142,6 +144,8 @@ __all__ = [
     "ConnectionPoolExhaustedError",
     "ContextBuildOptions",
     "ContextBuildResult",
+    # Models
+    "ConversationResult",
     # Provider System
     "EmbeddingProvider",
     # Embedding & LLM Services
@@ -152,6 +156,7 @@ __all__ = [
     # Configuration
     "EngramSettings",
     "EventCreate",
+    "FactDecision",
     "LLMMessage",
     "LLMProvider",
     "LLMResponse",
@@ -159,7 +164,6 @@ __all__ = [
     "LongInputChunk",
     "LongInputContextResult",
     "LongInputIngestionReport",
-    # Models
     "Memory",
     "MemoryCreate",
     "MemoryExplanation",

@@ -4,6 +4,8 @@ This module provides memory models and storage operations.
 """
 
 from engram.memory.models import (
+    ConversationResult,
+    FactDecision,
     Memory,
     MemoryCreate,
     MemoryExplanation,
@@ -17,6 +19,8 @@ from engram.memory.models import (
 from engram.memory.store import MemoryStore
 
 __all__ = [
+    "ConversationResult",
+    "FactDecision",
     "Memory",
     "MemoryCreate",
     "MemoryExplanation",

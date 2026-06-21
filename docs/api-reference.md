@@ -79,9 +79,11 @@ await engram.add_conversation(
     search_limit: int = 10,
     update_summary: bool = True,
     extract_assistant_response: bool = False,
-) -> list[Memory]
+) -> ConversationResult
 ```
 Processes a conversation turn to intelligently extract, compare, and store new memories using the configured LLM provider. Set `extract_assistant_response=True` only if you want the assistant's own statements converted into stored memories.
+
+`ConversationResult` is **list-compatible** — iterating, `len()`-ing, indexing, or truth-testing it yields the written memories, exactly like the previous `list[Memory]` return, so existing callers need no change. Its `.decisions` field additionally exposes a `FactDecision(fact, operation, applied, reason, memory_id, target_id)` for **every** extracted fact, including those that resolved to `NOOP` or could not be applied. This makes a skipped update *visible and debuggable* (e.g. `operation="NOOP", applied=False, reason="Duplicate of …"`) instead of silently absent from the returned list. If you write on this path, inspect `.decisions` to detect a fact that was extracted but not stored.
 
 > **Use as the sole writer to a memory space.** `add_conversation()` searches the agent's existing memories to decide ADD/UPDATE/DELETE. If you also store raw turns in the same space with `add_batch()`, the freshly-extracted fact is found already present verbatim in its own raw row, so the decision step judges it identical and NOOPs it — supersession never fires. Either let `add_conversation()` own a memory space, or keep the two writers in separate namespaces. (The `examples/chatbot.py` example deliberately uses `add_batch()` only for this reason.)
 
