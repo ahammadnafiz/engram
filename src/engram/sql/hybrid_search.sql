@@ -27,7 +27,7 @@
 -- $16: include_superseded (BOOLEAN) - When true, historical (superseded)
 --      revisions are included; default false restricts to active facts only.
 
-WITH 
+WITH
 -- Semantic search on fact embeddings (overfetch for RRF, minimum 20)
 semantic_search AS (
     SELECT
@@ -73,7 +73,7 @@ semantic_search AS (
 -- Keyword search on fact_tsv (overfetch for RRF)
 -- ts_rank with normalization flag 32 is faster than ts_rank_cd
 keyword_search AS (
-    SELECT 
+    SELECT
         memory_id,
         agent_id,
         ts_rank(fact_tsv, query, 32) AS keyword_score_raw,
@@ -124,15 +124,15 @@ combined AS (
         COALESCE(k.keyword_rank, 999999) AS keyword_rank,
         -- Pre-calculate RRF scores (k=60 standard)
         (1.0 / (60.0 + s.semantic_rank)) AS rrf_semantic,
-        CASE WHEN k.keyword_rank IS NOT NULL 
+        CASE WHEN k.keyword_rank IS NOT NULL
             THEN (1.0 / (60.0 + k.keyword_rank))
-            ELSE 0.0 
+            ELSE 0.0
         END AS rrf_keyword
     FROM semantic_search s
     LEFT JOIN keyword_search k USING (memory_id)
-    
+
     UNION ALL
-    
+
     -- Keyword-only results (not in semantic search)
     SELECT
         k.memory_id,
@@ -165,50 +165,66 @@ combined AS (
     WHERE s.memory_id IS NULL
 ),
 
--- Single-pass final scoring
+-- Two-pass final scoring: pre_score computes decay and keyword once each so the
+-- combined_score formula can reference them without re-evaluation. Memory-type-
+-- aware weights shift the non-semantic budget (1 - $6 - $7 = 0.40 at defaults)
+-- between decay and importance per type. Durable types (constraint, preference,
+-- profile, decision) weight importance over decay. Ephemeral types (episodic,
+-- tool_result) weight decay over importance. Fractions always sum to 1.0
+-- relative to (1 - $6 - $7), so the total score stays bounded [0, 1].
 final_scored AS (
     SELECT
-        memory_id,
-        agent_id,
-        user_id,
-        session_id,
-        memory_type,
-        fact AS content,  -- API compatibility
-        fact,
-        main_content,
-        importance,
-        metadata,
-        created_at,
-        last_accessed_at,
-        access_count,
-        lineage_id,
-        revision,
-        status,
-        valid_from,
-        valid_to,
-        superseded_by_memory_id,
-        superseded_at,
-        semantic_score,
-        -- Rescale RRF into the same 0-1 range as semantic_score so the
-        -- configured weights ($6..$9) combine on a common scale.
-        -- RRF per branch peaks at 1/(60+1) ≈ 0.0164 (k=60, rank 1); both
-        -- branches together ≈ 0.0328. Multiplying by 30 maps that to ≈ 0.98,
-        -- i.e. a rank-1-in-both match scores ~1.0 on the keyword term, matching
-        -- a perfect 1.0 cosine on the semantic term. The factor is the inverse
-        -- of the peak two-branch RRF (≈ 1/0.0328); it is not arbitrary tuning.
-        (rrf_semantic + rrf_keyword) * 30.0 AS keyword_score,
-        calculate_decay(last_accessed_at, $10) AS decay_score,
-        -- Final score: weighted combination
+        *,
         (
-            $6 * semantic_score +                           -- semantic weight (0.40)
-            $7 * (rrf_semantic + rrf_keyword) * 30.0 +      -- keyword weight (0.20)
-            $8 * calculate_decay(last_accessed_at, $10) +   -- decay weight (0.25)
-            $9 * importance                                 -- importance weight (0.15)
+            $6 * semantic_score
+            + $7 * keyword_score
+            + CASE memory_type
+                WHEN 'constraint'  THEN (1.0 - $6 - $7) * (0.25 * decay_score + 0.75 * importance)
+                WHEN 'preference'  THEN (1.0 - $6 - $7) * (0.25 * decay_score + 0.75 * importance)
+                WHEN 'profile'     THEN (1.0 - $6 - $7) * (0.25 * decay_score + 0.75 * importance)
+                WHEN 'decision'    THEN (1.0 - $6 - $7) * (0.25 * decay_score + 0.75 * importance)
+                WHEN 'episodic'    THEN (1.0 - $6 - $7) * (0.75 * decay_score + 0.25 * importance)
+                WHEN 'tool_result' THEN (1.0 - $6 - $7) * (0.65 * decay_score + 0.35 * importance)
+                ELSE ($8 * decay_score + $9 * importance)
+              END
         ) AS combined_score
-    FROM combined
-    WHERE 
-        -- Early filtering: minimum semantic OR keyword match
-        (semantic_score > 0.1 OR rrf_keyword > 0.0)
+    FROM (
+        SELECT
+            memory_id,
+            agent_id,
+            user_id,
+            session_id,
+            memory_type,
+            fact AS content,  -- API compatibility
+            fact,
+            main_content,
+            importance,
+            metadata,
+            created_at,
+            last_accessed_at,
+            access_count,
+            lineage_id,
+            revision,
+            status,
+            valid_from,
+            valid_to,
+            superseded_by_memory_id,
+            superseded_at,
+            semantic_score,
+            -- Rescale RRF into the same 0-1 range as semantic_score so the
+            -- configured weights ($6..$9) combine on a common scale.
+            -- RRF per branch peaks at 1/(60+1) ≈ 0.0164 (k=60, rank 1); both
+            -- branches together ≈ 0.0328. Multiplying by 30 maps that to ≈ 0.98,
+            -- i.e. a rank-1-in-both match scores ~1.0 on the keyword term, matching
+            -- a perfect 1.0 cosine on the semantic term. The factor is the inverse
+            -- of the peak two-branch RRF (≈ 1/0.0328); it is not arbitrary tuning.
+            (rrf_semantic + rrf_keyword) * 30.0 AS keyword_score,
+            calculate_decay(last_accessed_at, $10) AS decay_score
+        FROM combined
+        WHERE
+            -- Early filtering: minimum semantic OR keyword match
+            (semantic_score > 0.1 OR rrf_keyword > 0.0)
+    ) pre_score
 )
 
 -- Final results: hybrid search output

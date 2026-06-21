@@ -353,13 +353,21 @@ class GraphTraversal:
         except Exception as e:
             raise GraphError(f"Failed to get graph relations: {e}") from e
 
-    async def traverse(self, query: TraversalQuery) -> list[TraversalResult]:
+    async def traverse(
+        self,
+        query: TraversalQuery,
+        *,
+        query_embedding: list[float] | None = None,
+    ) -> list[TraversalResult]:
         """Traverse the memory graph from a starting point.
 
         Uses recursive CTEs for efficient multi-hop traversal.
 
         Args:
             query: Traversal parameters.
+            query_embedding: Optional query vector. When supplied, node scores
+                are weighted toward topical relevance rather than path weight
+                alone (path_weight * 0.5 + similarity * 0.3 + importance * 0.2).
 
         Returns:
             List of traversal results ordered by depth and score.
@@ -389,6 +397,7 @@ class GraphTraversal:
                 direction,  # $4
                 query.min_weight,  # $5
                 query.limit,  # $6
+                query_embedding,  # $7 — NULL disables query-aware scoring
             )
 
             return [self._row_to_traversal_result(row) for row in rows]
@@ -411,12 +420,18 @@ class GraphTraversal:
         limit_per_seed: int = 25,
         total_limit: int = 100,
         skip_missing: bool = True,
+        query_embedding: list[float] | None = None,
     ) -> list[TraversalResult]:
         """Traverse from multiple seed memories and return deduplicated results.
 
         This is the preferred graph expansion primitive for prompt assembly:
         retrieval usually returns several relevant memories, and expanding all
         of them produces a more robust context graph than choosing one seed.
+
+        Args:
+            query_embedding: Optional query vector passed to each per-seed
+                traverse() call so nodes are scored for topical relevance, not
+                just graph distance. Shared across all seeds (same user query).
         """
         seen_seeds = list(dict.fromkeys(start_memory_ids))
         if not seen_seeds:
@@ -433,7 +448,8 @@ class GraphTraversal:
                         relation_types=relation_types,
                         min_weight=min_weight,
                         limit=limit_per_seed,
-                    )
+                    ),
+                    query_embedding=query_embedding,
                 )
                 for memory_id in seen_seeds
             ],

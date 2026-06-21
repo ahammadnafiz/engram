@@ -607,6 +607,7 @@ class TestGraphPromptHelpers:
             limit_per_seed=25,
             total_limit=100,
             skip_missing=True,
+            query_embedding=None,
         )
 
     def test_render_graph_context_delegates_to_graph(self) -> None:

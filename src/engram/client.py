@@ -2727,6 +2727,8 @@ class Engram:
         relation_types: list[RelationType] | None = None,
         min_weight: float = 0.0,
         limit: int = 50,
+        *,
+        query_embedding: list[float] | None = None,
     ) -> list[TraversalResult]:
         """Traverse the memory graph from a starting point.
 
@@ -2739,6 +2741,7 @@ class Engram:
             relation_types: Optional filter by relation types.
             min_weight: Minimum relation weight to follow.
             limit: Maximum results.
+            query_embedding: Optional query vector for relevance-weighted scoring.
 
         Returns:
             List of traversal results with depth and path info.
@@ -2763,7 +2766,8 @@ class Engram:
                 relation_types=relation_types,
                 min_weight=min_weight,
                 limit=limit,
-            )
+            ),
+            query_embedding=query_embedding,
         )
 
     async def traverse_many(
@@ -2777,11 +2781,17 @@ class Engram:
         limit_per_seed: int = 25,
         total_limit: int = 100,
         skip_missing: bool = True,
+        query_embedding: list[float] | None = None,
     ) -> list[TraversalResult]:
         """Traverse the graph from multiple seed memories.
 
         Useful for prompt assembly, where retrieval often returns several
         relevant memories and the prompt should include their shared graph.
+
+        Args:
+            query_embedding: Optional query vector. When supplied, each seed
+                traversal scores nodes for topical relevance so off-topic
+                expansions rank lower than structurally-close but relevant ones.
         """
         self._ensure_connected()
         assert self._graph is not None
@@ -2795,6 +2805,7 @@ class Engram:
             limit_per_seed=limit_per_seed,
             total_limit=total_limit,
             skip_missing=skip_missing,
+            query_embedding=query_embedding,
         )
 
     def render_graph_context(

@@ -27,10 +27,17 @@ Stack defaults: free on-device sentence-transformers embeddings
 (`all-MiniLM-L6-v2`, 384-d) + Google `gemini-3.1-flash-lite` for composition.
 Override with the standard ENGRAM_* environment variables.
 
-Run:
+Run (Gemini):
     export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
     export ENGRAM_GEMINI_API_KEY=...   # or GEMINI_API_KEY
     python examples/chatbot.py
+
+Run (Claude):
+    export ENGRAM_DATABASE_URL=postgresql://engram:engram_secret@localhost:5432/engram
+    export ENGRAM_ANTHROPIC_API_KEY=...   # or ANTHROPIC_API_KEY
+    ENGRAM_LLM_PROVIDER=anthropic python examples/chatbot.py
+
+Switch model at runtime with /model gemini or /model claude.
 
 Non-interactive checks:
     python examples/chatbot.py --once "What do you remember about me?"
@@ -600,9 +607,11 @@ class MemoryChatbot:
         self.engram = Engram(settings=settings, memory_policy="default")
         await self.engram.connect()
         if self.engram.llm is None:
+            provider = os.environ.get("ENGRAM_LLM_PROVIDER", "gemini")
             raise RuntimeError(
-                "LLM provider is disabled. Set ENGRAM_LLM_PROVIDER=gemini and "
-                "ENGRAM_GEMINI_API_KEY before running examples/chatbot.py."
+                f"LLM provider '{provider}' is disabled or misconfigured. "
+                "Set ENGRAM_LLM_PROVIDER=gemini + ENGRAM_GEMINI_API_KEY, or "
+                "ENGRAM_LLM_PROVIDER=anthropic + ENGRAM_ANTHROPIC_API_KEY."
             )
 
         # Warm the reranker now (off the event loop) so the first turn's search
@@ -664,7 +673,7 @@ class MemoryChatbot:
         session = await self._session_context.__aenter__()
         self.session_id = session.session_id
         task = await self.engram.start_task(
-            "Run a real Gemini-backed chatbot with persistent Engram memory",
+            "Run a real Engram memory chatbot",
             AGENT_ID,
             user_id=USER_ID,
             session_id=self.session_id,
@@ -1189,7 +1198,7 @@ def print_help() -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a real Gemini-backed Engram memory chatbot."
+        description="Run an Engram memory chatbot (Gemini or Claude)."
     )
     parser.add_argument(
         "--once",
