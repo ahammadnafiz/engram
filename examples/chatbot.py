@@ -400,7 +400,7 @@ def prompt_text() -> str:
     if HAS_RICH:
         # Rich markup is stripped by input(), so we bake ANSI via console.export.
         you = Text("you", style="bold cyan")
-        arrow = Text(" › ", style="dim")
+        arrow = Text(" > ", style="dim")
         combined = Text()
         combined.append_text(you)
         combined.append_text(arrow)
@@ -415,20 +415,18 @@ def require_real_config() -> None:
         raise ValueError("Invalid ENGRAM_CHATBOT_RERANK. Use 'true' or 'false'.")
 
     provider = os.environ.get("ENGRAM_LLM_PROVIDER", "gemini").lower()
-    if provider in ("gemini", "google"):
-        if not os.environ.get("ENGRAM_GEMINI_API_KEY"):
-            raise ValueError(
-                "Missing required environment variable: ENGRAM_GEMINI_API_KEY "
-                "(or GEMINI_API_KEY).\nGet a key at https://aistudio.google.com/apikey "
-                "and set it before running the chatbot."
-            )
-    elif provider in ("anthropic", "claude"):
-        if not os.environ.get("ENGRAM_ANTHROPIC_API_KEY"):
-            raise ValueError(
-                "Missing required environment variable: ENGRAM_ANTHROPIC_API_KEY "
-                "(or ANTHROPIC_API_KEY).\nGet a key at https://console.anthropic.com/ "
-                "and set it before running the chatbot."
-            )
+    if provider in ("gemini", "google") and not os.environ.get("ENGRAM_GEMINI_API_KEY"):
+        raise ValueError(
+            "Missing required environment variable: ENGRAM_GEMINI_API_KEY "
+            "(or GEMINI_API_KEY).\nGet a key at https://aistudio.google.com/apikey "
+            "and set it before running the chatbot."
+        )
+    elif provider in ("anthropic", "claude") and not os.environ.get("ENGRAM_ANTHROPIC_API_KEY"):
+        raise ValueError(
+            "Missing required environment variable: ENGRAM_ANTHROPIC_API_KEY "
+            "(or ANTHROPIC_API_KEY).\nGet a key at https://console.anthropic.com/ "
+            "and set it before running the chatbot."
+        )
 
 
 # ===========================================================================
@@ -715,8 +713,10 @@ class MemoryChatbot:
         except ValueError as exc:
             print_notice(str(exc), level="error")
             print_notice("Reverting to previous model...", level="warn")
-            if prev_provider: os.environ["ENGRAM_LLM_PROVIDER"] = prev_provider
-            if prev_model: os.environ["ENGRAM_LLM_MODEL"] = prev_model
+            if prev_provider:
+                os.environ["ENGRAM_LLM_PROVIDER"] = prev_provider
+            if prev_model:
+                os.environ["ENGRAM_LLM_MODEL"] = prev_model
             return
 
         await self.close()
@@ -727,8 +727,10 @@ class MemoryChatbot:
         except Exception as exc:
             print_notice(f"Failed to connect with new model: {exc}", level="error")
             print_notice("Reverting to previous model...", level="warn")
-            if prev_provider: os.environ["ENGRAM_LLM_PROVIDER"] = prev_provider
-            if prev_model: os.environ["ENGRAM_LLM_MODEL"] = prev_model
+            if prev_provider:
+                os.environ["ENGRAM_LLM_PROVIDER"] = prev_provider
+            if prev_model:
+                os.environ["ENGRAM_LLM_MODEL"] = prev_model
             clear_settings_cache()
             await self.connect()
 
