@@ -23,7 +23,7 @@ Engram is evaluated on three long-term memory benchmarks. All runs use on-device
 
 **Honest caveats**: composer and judge are the same model family (`claude-sonnet-4-6`) across all three runs, which is a known leniency bias. `add_batch()` bypasses Engram's LLM-based extraction pipeline — these are floor numbers. `add_conversation()` is expected to score higher on structured fact types.
 
-![Engram benchmark results](assets/engram-benchmark.svg)
+![Engram benchmark results](docs/assets/engram-benchmark.svg)
 
 | Benchmark | Questions | Accuracy | Composer |
 |---|---|---|---|
