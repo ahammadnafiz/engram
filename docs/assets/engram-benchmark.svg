@@ -1,175 +1,96 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" width="100%" height="100%" style="background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
-  <defs>
-    <!-- Drop shadow for the main cards -->
-    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
-      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.04" />
-    </filter>
-    
-    <!-- Arrowhead marker for pipeline -->
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 1 L 10 5 L 0 9 z" fill="#94a3b8" />
-    </marker>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 760" width="100%" height="100%" style="background-color:#060608;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <rect width="1280" height="760" fill="#060608" />
+  <rect x="592" y="0" width="96" height="4" rx="2" fill="#6d5dfb" />
 
-  <!-- Background -->
-  <rect width="1200" height="900" fill="#f8fafc" />
+  <!-- Header -->
+  <text x="640" y="86" text-anchor="middle" font-size="40" font-weight="800" fill="#fbfbfd" letter-spacing="-0.5">Engram benchmark results</text>
+  <text x="640" y="122" text-anchor="middle" font-size="15" font-weight="400" fill="#8a8a96">Retrieval-layer accuracy on three long-term memory benchmarks — add_batch() ingest, zero LLM calls at write · 2026-06-21</text>
 
-  <!-- HEADER SECTION -->
-  <text x="600" y="80" text-anchor="middle" font-size="34" font-weight="800" fill="#0f172a" letter-spacing="-0.5">Engram Long-Term Memory Benchmarks</text>
-  <text x="600" y="110" text-anchor="middle" font-size="16" font-weight="500" fill="#64748b">Evaluating retrieval layer performance on progressively harder multi-session datasets</text>
+  <!-- Score cards -->
+  <rect x="70" y="158" width="360" height="150" rx="16" fill="#0e0e13" stroke="#24242e" stroke-width="1" />
+  <text x="250" y="206" text-anchor="middle" font-size="17" font-weight="700" fill="#f1f1f4">LongMemEval-S</text>
+  <text x="250" y="266" text-anchor="middle" font-size="46" font-weight="800" fill="#4f8ef7" letter-spacing="-0.5">89.8%</text>
+  <text x="250" y="292" text-anchor="middle" font-size="10" font-weight="500" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">500 QS · ISOLATED HAYSTACKS</text>
 
-  <!-- Top Right Badge -->
-  <rect x="990" y="45" width="160" height="28" rx="14" fill="#fef2f2" stroke="#fecaca" stroke-width="1" />
-  <text x="1070" y="64" text-anchor="middle" font-size="11" font-weight="700" fill="#ef4444" letter-spacing="0.5">ZERO-SHOT INGEST</text>
+  <rect x="460" y="158" width="360" height="150" rx="16" fill="#0e0e13" stroke="#24242e" stroke-width="1" />
+  <text x="640" y="206" text-anchor="middle" font-size="17" font-weight="700" fill="#f1f1f4">LoCoMo-10</text>
+  <text x="640" y="266" text-anchor="middle" font-size="46" font-weight="800" fill="#8b7bf0" letter-spacing="-0.5">85.2%</text>
+  <text x="640" y="292" text-anchor="middle" font-size="10" font-weight="500" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">1,540 QS · 10 CONVERSATIONS</text>
 
-  <!-- ========================================== -->
-  <!-- TOP ROW: OVERALL SCORE CARDS               -->
-  <!-- ========================================== -->
+  <rect x="850" y="158" width="360" height="150" rx="16" fill="#0e0e13" stroke="#24242e" stroke-width="1" />
+  <text x="1030" y="206" text-anchor="middle" font-size="17" font-weight="700" fill="#f1f1f4">BEAM 1M</text>
+  <text x="1030" y="266" text-anchor="middle" font-size="46" font-weight="800" fill="#34d399" letter-spacing="-0.5">77.4%</text>
+  <text x="1030" y="292" text-anchor="middle" font-size="10" font-weight="500" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">700 QS · 1M-TOKEN SCALE</text>
 
-  <!-- Card 1: LongMemEval-S -->
-  <rect x="50" y="160" width="333" height="150" rx="16" fill="#ffffff" filter="url(#shadow)" stroke="#e2e8f0" stroke-width="1" />
-  <text x="216" y="205" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a">LongMemEval-S</text>
-  <text x="216" y="260" text-anchor="middle" font-size="48" font-weight="800" fill="#2563eb">89.8%</text>
-  <text x="216" y="285" text-anchor="middle" font-size="13" font-weight="500" fill="#64748b">500 Qs | Isolated Haystacks</text>
+  <!-- Column headers -->
+  <text x="70" y="372" font-size="11" font-weight="700" fill="#6e6e79" letter-spacing="1.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">LONGMEMEVAL-S</text>
+  <text x="480" y="372" font-size="11" font-weight="700" fill="#6e6e79" letter-spacing="1.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">LOCOMO-10</text>
+  <text x="890" y="372" font-size="11" font-weight="700" fill="#6e6e79" letter-spacing="1.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">BEAM 1M</text>
 
-  <!-- Card 2: LoCoMo-10 -->
-  <rect x="433" y="160" width="333" height="150" rx="16" fill="#ffffff" filter="url(#shadow)" stroke="#e2e8f0" stroke-width="1" />
-  <text x="599" y="205" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a">LoCoMo-10</text>
-  <text x="599" y="260" text-anchor="middle" font-size="48" font-weight="800" fill="#7c3aed">85.7%</text>
-  <text x="599" y="285" text-anchor="middle" font-size="13" font-weight="500" fill="#64748b">1,540 Qs | 10 Conversations</text>
+  <!-- Column 1: LongMemEval (blue) -->
+  <text x="70" y="412" font-size="12.5" font-weight="500" fill="#9a9aa3">SS-User</text>
+  <rect x="175" y="399" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="399" width="147.9" height="18" rx="4" fill="#4f8ef7" />
+  <text x="340" y="412" font-size="12" font-weight="600" fill="#f1f1f4">98.6%</text>
 
-  <!-- Card 3: BEAM 1M -->
-  <rect x="816" y="160" width="333" height="150" rx="16" fill="#ffffff" filter="url(#shadow)" stroke="#e2e8f0" stroke-width="1" />
-  <text x="982" y="205" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a">BEAM 1M</text>
-  <text x="982" y="260" text-anchor="middle" font-size="48" font-weight="800" fill="#059669">79.6%</text>
-  <text x="982" y="285" text-anchor="middle" font-size="13" font-weight="500" fill="#64748b">700 Qs | 1M Token Scale</text>
+  <text x="70" y="456" font-size="12.5" font-weight="500" fill="#9a9aa3">Abstention</text>
+  <rect x="175" y="443" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="443" width="145.1" height="18" rx="4" fill="#4f8ef7" />
+  <text x="340" y="456" font-size="12" font-weight="600" fill="#f1f1f4">96.7%</text>
 
+  <text x="70" y="500" font-size="12.5" font-weight="500" fill="#9a9aa3">Know-Update</text>
+  <rect x="175" y="487" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="487" width="142.4" height="18" rx="4" fill="#4f8ef7" />
+  <text x="340" y="500" font-size="12" font-weight="600" fill="#f1f1f4">94.9%</text>
 
-  <!-- ========================================== -->
-  <!-- MIDDLE ROW: CATEGORY DRILL-DOWNS           -->
-  <!-- ========================================== -->
+  <text x="70" y="544" font-size="12.5" font-weight="500" fill="#9a9aa3">Temporal</text>
+  <rect x="175" y="531" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="531" width="133.1" height="18" rx="4" fill="#4f8ef7" />
+  <text x="340" y="544" font-size="12" font-weight="600" fill="#f1f1f4">88.7%</text>
 
-  <!-- Column 1: LongMemEval -->
-  <text x="50" y="370" font-size="14" font-weight="700" fill="#334155" text-transform="uppercase" letter-spacing="0.5">Category Breakdown</text>
-  
-  <text x="50" y="415" font-size="13" font-weight="600" fill="#475569">SS-User</text>
-  <rect x="150" y="400" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="150" y="400" width="147.9" height="20" rx="4" fill="#3b82f6" />
-  <text x="310" y="415" font-size="13" font-weight="700" fill="#0f172a">98.6%</text>
+  <text x="70" y="588" font-size="12.5" font-weight="500" fill="#9a9aa3">Multi-Session</text>
+  <rect x="175" y="575" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="575" width="120.8" height="18" rx="4" fill="#4f8ef7" />
+  <text x="340" y="588" font-size="12" font-weight="600" fill="#f1f1f4">80.5%</text>
 
-  <text x="50" y="455" font-size="13" font-weight="600" fill="#475569">Know-Update</text>
-  <rect x="150" y="440" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="150" y="440" width="146.1" height="20" rx="4" fill="#3b82f6" />
-  <text x="310" y="455" font-size="13" font-weight="700" fill="#0f172a">97.4%</text>
+  <!-- Column 2: LoCoMo (violet) -->
+  <text x="480" y="412" font-size="12.5" font-weight="500" fill="#9a9aa3">Multi-hop</text>
+  <rect x="585" y="399" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="399" width="129.8" height="18" rx="4" fill="#8b7bf0" />
+  <text x="750" y="412" font-size="12" font-weight="600" fill="#f1f1f4">86.5%</text>
 
-  <text x="50" y="495" font-size="13" font-weight="600" fill="#475569">Abstention</text>
-  <rect x="150" y="480" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="150" y="480" width="145.0" height="20" rx="4" fill="#3b82f6" />
-  <text x="310" y="495" font-size="13" font-weight="700" fill="#0f172a">96.7%</text>
+  <text x="480" y="456" font-size="12.5" font-weight="500" fill="#9a9aa3">Single-hop</text>
+  <rect x="585" y="443" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="443" width="129.2" height="18" rx="4" fill="#8b7bf0" />
+  <text x="750" y="456" font-size="12" font-weight="600" fill="#f1f1f4">86.1%</text>
 
-  <text x="50" y="535" font-size="13" font-weight="600" fill="#475569">Temporal</text>
-  <rect x="150" y="520" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="150" y="520" width="134.2" height="20" rx="4" fill="#3b82f6" />
-  <text x="310" y="535" font-size="13" font-weight="700" fill="#0f172a">89.5%</text>
+  <text x="480" y="500" font-size="12.5" font-weight="500" fill="#9a9aa3">Temporal</text>
+  <rect x="585" y="487" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="487" width="129.0" height="18" rx="4" fill="#8b7bf0" />
+  <text x="750" y="500" font-size="12" font-weight="600" fill="#f1f1f4">86.0%</text>
 
-  <text x="50" y="575" font-size="13" font-weight="600" fill="#475569">Multi-Session</text>
-  <rect x="150" y="560" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="150" y="560" width="120.7" height="20" rx="4" fill="#3b82f6" />
-  <text x="310" y="575" font-size="13" font-weight="700" fill="#0f172a">80.5%</text>
+  <text x="480" y="544" font-size="12.5" font-weight="500" fill="#9a9aa3">Open-domain</text>
+  <rect x="585" y="531" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="531" width="106.2" height="18" rx="4" fill="#8b7bf0" opacity="0.85" />
+  <text x="750" y="544" font-size="12" font-weight="600" fill="#f1f1f4">70.8%</text>
 
-  <!-- Column 2: LoCoMo -->
-  <text x="433" y="370" font-size="14" font-weight="700" fill="#334155" text-transform="uppercase" letter-spacing="0.5">Category Breakdown</text>
+  <!-- Column 3: BEAM (green) -->
+  <text x="890" y="412" font-size="12.5" font-weight="500" fill="#9a9aa3">Abstention</text>
+  <rect x="995" y="399" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="399" width="147.9" height="18" rx="4" fill="#34d399" />
+  <text x="1160" y="412" font-size="12" font-weight="600" fill="#f1f1f4">98.6%</text>
 
-  <text x="433" y="415" font-size="13" font-weight="600" fill="#475569">Multi-hop</text>
-  <rect x="533" y="400" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="533" y="400" width="131.8" height="20" rx="4" fill="#8b5cf6" />
-  <text x="693" y="415" font-size="13" font-weight="700" fill="#0f172a">87.9%</text>
+  <text x="890" y="456" font-size="12.5" font-weight="500" fill="#9a9aa3">Preference</text>
+  <rect x="995" y="443" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="443" width="135.0" height="18" rx="4" fill="#34d399" />
+  <text x="1160" y="456" font-size="12" font-weight="600" fill="#f1f1f4">90.0%</text>
 
-  <text x="433" y="455" font-size="13" font-weight="600" fill="#475569">Temporal</text>
-  <rect x="533" y="440" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="533" y="440" width="130.3" height="20" rx="4" fill="#8b5cf6" />
-  <text x="693" y="455" font-size="13" font-weight="700" fill="#0f172a">86.9%</text>
+  <text x="890" y="500" font-size="12.5" font-weight="500" fill="#9a9aa3">Instruction</text>
+  <rect x="995" y="487" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="487" width="128.6" height="18" rx="4" fill="#34d399" />
+  <text x="1160" y="500" font-size="12" font-weight="600" fill="#f1f1f4">85.7%</text>
 
-  <text x="433" y="495" font-size="13" font-weight="600" fill="#475569">Single-hop</text>
-  <rect x="533" y="480" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="533" y="480" width="129.9" height="20" rx="4" fill="#8b5cf6" />
-  <text x="693" y="495" font-size="13" font-weight="700" fill="#0f172a">86.6%</text>
+  <text x="890" y="544" font-size="12.5" font-weight="500" fill="#9a9aa3">Multi-Session</text>
+  <rect x="995" y="531" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="531" width="126.5" height="18" rx="4" fill="#34d399" />
+  <text x="1160" y="544" font-size="12" font-weight="600" fill="#f1f1f4">84.3%</text>
 
-  <text x="433" y="535" font-size="13" font-weight="600" fill="#475569">Open-domain</text>
-  <rect x="533" y="520" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="533" y="520" width="101.5" height="20" rx="4" fill="#8b5cf6" opacity="0.8" />
-  <text x="693" y="535" font-size="13" font-weight="700" fill="#0f172a">67.7%</text>
+  <text x="890" y="588" font-size="12.5" font-weight="500" fill="#9a9aa3">Temporal</text>
+  <rect x="995" y="575" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="575" width="102.9" height="18" rx="4" fill="#34d399" opacity="0.85" />
+  <text x="1160" y="588" font-size="12" font-weight="600" fill="#f1f1f4">68.6%</text>
 
-  <!-- Column 3: BEAM 1M -->
-  <text x="816" y="370" font-size="14" font-weight="700" fill="#334155" text-transform="uppercase" letter-spacing="0.5">Category Breakdown</text>
+  <text x="890" y="632" font-size="12.5" font-weight="500" fill="#9a9aa3">Summarize</text>
+  <rect x="995" y="619" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="619" width="60.0" height="18" rx="4" fill="#34d399" opacity="0.55" />
+  <text x="1160" y="632" font-size="12" font-weight="600" fill="#f1f1f4">40.0%</text>
 
-  <text x="816" y="415" font-size="13" font-weight="600" fill="#475569">Abstention</text>
-  <rect x="916" y="400" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="916" y="400" width="145.6" height="20" rx="4" fill="#10b981" />
-  <text x="1076" y="415" font-size="13" font-weight="700" fill="#0f172a">97.1%</text>
-
-  <text x="816" y="455" font-size="13" font-weight="600" fill="#475569">Preference</text>
-  <rect x="916" y="440" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="916" y="440" width="139.3" height="20" rx="4" fill="#10b981" />
-  <text x="1076" y="455" font-size="13" font-weight="700" fill="#0f172a">92.9%</text>
-
-  <text x="816" y="495" font-size="13" font-weight="600" fill="#475569">Instruction</text>
-  <rect x="916" y="480" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="916" y="480" width="135.0" height="20" rx="4" fill="#10b981" />
-  <text x="1076" y="495" font-size="13" font-weight="700" fill="#0f172a">90.0%</text>
-
-  <text x="816" y="535" font-size="13" font-weight="600" fill="#475569">Info Extract</text>
-  <rect x="916" y="520" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="916" y="520" width="126.4" height="20" rx="4" fill="#10b981" />
-  <text x="1076" y="535" font-size="13" font-weight="700" fill="#0f172a">84.3%</text>
-
-  <text x="816" y="575" font-size="13" font-weight="600" fill="#475569">Event Order</text>
-  <rect x="916" y="560" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="916" y="560" width="122.1" height="20" rx="4" fill="#10b981" />
-  <text x="1076" y="575" font-size="13" font-weight="700" fill="#0f172a">81.4%</text>
-
-  <text x="816" y="615" font-size="13" font-weight="600" fill="#475569">Temporal</text>
-  <rect x="916" y="600" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="916" y="600" width="98.5" height="20" rx="4" fill="#10b981" opacity="0.8" />
-  <text x="1076" y="615" font-size="13" font-weight="700" fill="#0f172a">65.7%</text>
-
-  <text x="816" y="655" font-size="13" font-weight="600" fill="#475569">Summarize</text>
-  <rect x="916" y="640" width="150" height="20" rx="4" fill="#f1f5f9" />
-  <rect x="916" y="640" width="62.1" height="20" rx="4" fill="#10b981" opacity="0.5" />
-  <text x="1076" y="655" font-size="13" font-weight="700" fill="#0f172a">41.4%</text>
-
-
-  <!-- ========================================== -->
-  <!-- BOTTOM ROW: SYSTEM ARCHITECTURE PIPELINE   -->
-  <!-- ========================================== -->
-
-  <path d="M 50 710 L 1150 710" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4 4" />
-  <text x="50" y="740" font-size="15" font-weight="700" fill="#0f172a">Shared Pipeline Architecture</text>
-  <text x="50" y="760" font-size="13" font-weight="500" fill="#64748b">Exact parameters used for inference across all three benchmarks</text>
-
-  <!-- Connective Arrows -->
-  <line x1="300" y1="820" x2="350" y2="820" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow)" />
-  <line x1="560" y1="820" x2="610" y2="820" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow)" />
-  <line x1="820" y1="820" x2="870" y2="820" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow)" />
-
-  <!-- Step 1 -->
-  <rect x="100" y="785" width="200" height="70" rx="8" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
-  <text x="200" y="815" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">1. Raw Ingest</text>
-  <text x="200" y="835" text-anchor="middle" font-size="12" font-weight="500" fill="#64748b">MiniLM-L6 (on-device)</text>
-
-  <!-- Step 2 -->
-  <rect x="360" y="785" width="200" height="70" rx="8" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
-  <text x="460" y="815" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">2. Hybrid Search</text>
-  <text x="460" y="835" text-anchor="middle" font-size="12" font-weight="500" fill="#64748b">pgvector + bm25 + lineage</text>
-
-  <!-- Step 3 -->
-  <rect x="620" y="785" width="200" height="70" rx="8" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
-  <text x="720" y="815" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">3. Rerank &amp; Graph</text>
-  <text x="720" y="835" text-anchor="middle" font-size="12" font-weight="500" fill="#64748b">Cross-encoder reranking</text>
-
-  <!-- Step 4 -->
-  <rect x="880" y="785" width="200" height="70" rx="8" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
-  <text x="980" y="815" text-anchor="middle" font-size="14" font-weight="700" fill="#0f172a">4. Composer</text>
-  <text x="980" y="835" text-anchor="middle" font-size="12" font-weight="500" fill="#64748b">claude-sonnet-4-6</text>
-
+  <!-- Footer -->
+  <line x1="70" y1="688" x2="1210" y2="688" stroke="#1c1c24" stroke-width="1" />
+  <text x="640" y="722" text-anchor="middle" font-size="10.5" font-weight="600" fill="#55555f" letter-spacing="3" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">COMPOSER &amp; JUDGE: CLAUDE-SONNET-4-6 · ON-DEVICE EMBEDDINGS · REPRODUCIBLE IN benchmark/</text>
 </svg>

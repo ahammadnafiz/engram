@@ -4,6 +4,8 @@ Engram is an async Python memory layer backed by PostgreSQL + pgvector. The
 current beta architecture is built for persistent fact memory, source-aware
 long-input handling, graph expansion, and resumable long-running task state.
 
+![Multi-surface retrieval — every recall fans out across four surfaces and fuses them over one PostgreSQL store](assets/engram-retrieval.svg)
+
 ## System View
 
 ```mermaid
@@ -161,13 +163,13 @@ flowchart TD
 
     subgraph PREP ["🔵 1 · Preparation"]
         direction TB
-        Emb([<b>EmbeddingService</b><br/>from_settings]) --> 
+        Emb([<b>EmbeddingService</b><br/>from_settings]) -->
         Detect(Detect embedding dimension)
     end
 
     subgraph INIT ["🟡 2 · Initialization"]
         direction TB
-        DBConn([<b>PostgresStorage</b><br/>connect]) --> 
+        DBConn([<b>PostgresStorage</b><br/>connect]) -->
         Schema(<b>init_schema</b><br/>run migrations, align dimension) -->
         Svcs(<b>Initialize Services</b><br/>MemoryStore, Tasks, etc.)
     end
@@ -193,6 +195,8 @@ If a vector dimension change would clear existing embeddings,
 `init_schema()` raises unless `ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=true`.
 
 ## Memory Write Flow
+
+![Single-pass write path — infer type, embed on-device, dedup, supersede, persist; no LLM required](assets/engram-write-path.svg)
 
 ```mermaid
 ---

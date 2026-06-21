@@ -1,0 +1,123 @@
+{
+  "benchmark": "LoCoMo-10 (ACL 2024)",
+  "pipeline": "add_batch(turns) -> search(hybrid, include_superseded) + recall(compose=False) + get_lineage + traverse_many -> composer LLM",
+  "judge_model": "claude-sonnet-4-6",
+  "answer_model": "claude-sonnet-4-6",
+  "memory_policy": "default",
+  "ingest_batch_size": 64,
+  "search_limit": 60,
+  "max_per_session": 4,
+  "rerank": true,
+  "graph_depth": 1,
+  "answer_max_tokens": 4000,
+  "conversations": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "categories": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "total": 1540,
+  "correct": 1312,
+  "accuracy": 0.8519,
+  "errored": 0,
+  "by_category": {
+    "multi-hop": {
+      "correct": 244,
+      "total": 282,
+      "accuracy": 0.8652
+    },
+    "open-domain": {
+      "correct": 68,
+      "total": 96,
+      "accuracy": 0.7083
+    },
+    "single-hop": {
+      "correct": 724,
+      "total": 841,
+      "accuracy": 0.8609
+    },
+    "temporal": {
+      "correct": 276,
+      "total": 321,
+      "accuracy": 0.8598
+    }
+  },
+  "failed_ids": [
+    "conv0_q104",
+    "conv0_q11",
+    "conv0_q118",
+    "conv0_q126",
+    "conv0_q135",
+    "conv0_q137",
+    "conv0_q144",
+    "conv0_q151",
+    "conv0_q26",
+    "conv0_q49",
+    "conv0_q59",
+    "conv0_q71",
+    "conv0_q84",
+    "conv0_q85",
+    "conv0_q90",
+    "conv1_q42",
+    "conv1_q43",
+    "conv1_q44",
+    "conv1_q47",
+    "conv1_q75",
+    "conv1_q81",
+    "conv2_q105",
+    "conv2_q107",
+    "conv2_q110",
+    "conv2_q112",
+    "conv2_q115",
+    "conv2_q122",
+    "conv2_q123",
+    "conv2_q130",
+    "conv2_q131",
+    "conv2_q133",
+    "conv2_q138",
+    "conv2_q42",
+    "conv2_q48",
+    "conv2_q63",
+    "conv2_q7",
+    "conv2_q85",
+    "conv2_q91",
+    "conv2_q93",
+    "conv3_q103",
+    "conv3_q119",
+    "conv3_q12",
+    "conv3_q120",
+    "conv3_q122",
+    "conv3_q123",
+    "conv3_q126",
+    "conv3_q137",
+    "conv3_q14",
+    "conv3_q140",
+    "conv3_q150"
+  ],
+  "latency": {
+    "avg_total_s": 13.352,
+    "p50_total_s": 12.556,
+    "p95_total_s": 20.181,
+    "avg_retrieval_s": 2.232,
+    "avg_generation_s": 11.12
+  },
+  "context_efficiency": {
+    "avg_evidence_tokens": 2686,
+    "avg_full_context_tokens": 20259,
+    "compression_pct": 86.7,
+    "avg_search_hits": 60.0,
+    "avg_graph_hits": 0.0
+  }
+}

@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 768" width="100%" height="100%" style="background-color:#060608;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0 1.5 L8.5 5 L0 8.5" fill="none" stroke="#4a4a55" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+    <g id="dbicon" fill="none" stroke="currentColor" stroke-width="1.5">
+      <ellipse cx="0" cy="-7" rx="10" ry="3.8" />
+      <path d="M-10 -7 V7" />
+      <path d="M10 -7 V7" />
+      <path d="M-10 7 a10 3.8 0 0 0 20 0" />
+      <path d="M-10 0 a10 3.8 0 0 0 20 0" />
+    </g>
+  </defs>
+
+  <rect width="1280" height="768" fill="#060608" />
+  <rect x="592" y="0" width="96" height="4" rx="2" fill="#6d5dfb" />
+
+  <!-- Header -->
+  <text x="640" y="92" text-anchor="middle" font-size="46" font-weight="800" fill="#fbfbfd" letter-spacing="-0.5">Multi-surface retrieval</text>
+  <text x="640" y="132" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">Every recall fans out across four retrieval surfaces and fuses them — hybrid vector + keyword search,</text>
+  <text x="640" y="156" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">intent-routed recall, supersession lineage, and graph traversal. The fused evidence beats any single surface.</text>
+
+  <!-- Panel -->
+  <rect x="48" y="188" width="1184" height="566" rx="20" fill="#0b0b0f" stroke="#1c1c24" stroke-width="1" />
+
+  <!-- Flow connectors -->
+  <line x1="246" y1="332" x2="284" y2="332" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr)" />
+  <line x1="466" y1="332" x2="504" y2="332" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr)" />
+  <line x1="776" y1="332" x2="800" y2="332" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr)" />
+  <line x1="980" y1="332" x2="1018" y2="332" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr)" />
+
+  <!-- Query -->
+  <rect x="96" y="292" width="150" height="80" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="171" y="328" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Query</text>
+  <text x="171" y="347" text-anchor="middle" font-size="10" font-weight="500" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">USER QUESTION</text>
+
+  <!-- Preprocess -->
+  <rect x="288" y="292" width="176" height="80" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="376" y="328" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Preprocess</text>
+  <text x="376" y="347" text-anchor="middle" font-size="9.5" font-weight="500" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">CLASSIFY INTENT · EMBED</text>
+
+  <!-- Parallel group -->
+  <rect x="506" y="210" width="268" height="244" rx="12" fill="#0c0c12" stroke="#24242e" stroke-width="1" />
+  <text x="640" y="236" text-anchor="middle" font-size="12" font-weight="600" fill="#b6b2e8" letter-spacing="0.5">Parallel</text>
+
+  <rect x="524" y="254" width="232" height="40" rx="7" fill="#15132c" stroke="#3a3469" stroke-width="1" />
+  <text x="640" y="272" text-anchor="middle" font-size="12.5" font-weight="600" fill="#e9e7ff">Hybrid Search</text>
+  <text x="640" y="286" text-anchor="middle" font-size="8" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">PGVECTOR + FULL-TEXT · RRF</text>
+
+  <rect x="524" y="302" width="232" height="40" rx="7" fill="#15132c" stroke="#3a3469" stroke-width="1" />
+  <text x="640" y="320" text-anchor="middle" font-size="12.5" font-weight="600" fill="#e9e7ff">Recall</text>
+  <text x="640" y="334" text-anchor="middle" font-size="8" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">INTENT-ROUTED EVIDENCE</text>
+
+  <rect x="524" y="350" width="232" height="40" rx="7" fill="#15132c" stroke="#3a3469" stroke-width="1" />
+  <text x="640" y="368" text-anchor="middle" font-size="12.5" font-weight="600" fill="#e9e7ff">Lineage</text>
+  <text x="640" y="382" text-anchor="middle" font-size="8" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">SUPERSESSION CHAINS</text>
+
+  <rect x="524" y="398" width="232" height="40" rx="7" fill="#15132c" stroke="#3a3469" stroke-width="1" />
+  <text x="640" y="416" text-anchor="middle" font-size="12.5" font-weight="600" fill="#e9e7ff">Graph Traverse</text>
+  <text x="640" y="430" text-anchor="middle" font-size="8" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">TRAVERSE_MANY · MULTI-HOP</text>
+
+  <!-- Rank Fusion -->
+  <rect x="802" y="292" width="176" height="80" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="890" y="328" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Rank Fusion</text>
+  <text x="890" y="347" text-anchor="middle" font-size="9.5" font-weight="500" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">RERANK · TOP-K</text>
+
+  <!-- Evidence -->
+  <rect x="1020" y="292" width="168" height="80" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="1104" y="328" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Evidence</text>
+  <text x="1104" y="347" text-anchor="middle" font-size="9.5" font-weight="500" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">COMPOSER CONTEXT</text>
+
+  <!-- Reads from -->
+  <line x1="640" y1="456" x2="640" y2="490" stroke="#3a3a44" stroke-width="1.3" stroke-dasharray="2 4" />
+  <rect x="594" y="458" width="92" height="16" fill="#0b0b0f" />
+  <text x="640" y="470" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="2" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">READS FROM</text>
+
+  <!-- Persistent storage -->
+  <rect x="300" y="492" width="680" height="168" rx="14" fill="#0c0c12" stroke="#24242e" stroke-width="1" />
+
+  <rect x="318" y="510" width="205" height="104" rx="9" fill="#0e1830" stroke="#2a4a82" stroke-width="1" />
+  <use href="#dbicon" transform="translate(420,536)" color="#9fb6e6" />
+  <text x="420" y="574" text-anchor="middle" font-size="13.5" font-weight="600" fill="#eef2fb">Fact Rows</text>
+  <text x="420" y="592" text-anchor="middle" font-size="8.5" font-weight="500" fill="#7f93bf" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">AGENT_MEMORY · FACTS</text>
+
+  <rect x="538" y="510" width="205" height="104" rx="9" fill="#0c1326" stroke="#223e72" stroke-width="1" />
+  <use href="#dbicon" transform="translate(640,536)" color="#8aa0d6" />
+  <text x="640" y="574" text-anchor="middle" font-size="13.5" font-weight="600" fill="#e9eefb">Vector Index</text>
+  <text x="640" y="592" text-anchor="middle" font-size="8.5" font-weight="500" fill="#7388b6" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">PGVECTOR · EMBEDDINGS</text>
+
+  <rect x="757" y="510" width="205" height="104" rx="9" fill="#1d1810" stroke="#5f4a1e" stroke-width="1" />
+  <use href="#dbicon" transform="translate(859,536)" color="#d8b765" />
+  <text x="859" y="574" text-anchor="middle" font-size="13.5" font-weight="600" fill="#f6efdd">Text + Graph</text>
+  <text x="859" y="592" text-anchor="middle" font-size="8" font-weight="500" fill="#b59a5e" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">PG_TRGM · MEMORY_RELATIONS</text>
+
+  <text x="640" y="644" text-anchor="middle" font-size="10" font-weight="500" fill="#6e6e79" letter-spacing="2" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">POSTGRESQL · ONE STORE, THREE SUBSTRATES</text>
+
+  <!-- Footer -->
+  <text x="640" y="716" text-anchor="middle" font-size="11" font-weight="600" fill="#55555f" letter-spacing="4" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">MULTI-SURFACE RETRIEVAL</text>
+</svg>

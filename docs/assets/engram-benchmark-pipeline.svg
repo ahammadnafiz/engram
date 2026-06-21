@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 768" width="100%" height="100%" style="background-color:#060608;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <defs>
+    <marker id="arr3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0 1.5 L8.5 5 L0 8.5" fill="none" stroke="#4a4a55" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+  </defs>
+
+  <rect width="1280" height="768" fill="#060608" />
+  <rect x="592" y="0" width="96" height="4" rx="2" fill="#6d5dfb" />
+
+  <!-- Header -->
+  <text x="640" y="92" text-anchor="middle" font-size="46" font-weight="800" fill="#fbfbfd" letter-spacing="-0.5">Shared benchmark pipeline</text>
+  <text x="640" y="132" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">All three benchmarks run one path: raw turns ingested with zero LLM calls, four retrieval surfaces fused</text>
+  <text x="640" y="156" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">into an evidence block, a single composer pass, then an independent judge.</text>
+
+  <!-- Panel -->
+  <rect x="48" y="188" width="1184" height="566" rx="20" fill="#0b0b0f" stroke="#1c1c24" stroke-width="1" />
+
+  <!-- Pipeline connectors -->
+  <line x1="242" y1="280" x2="262" y2="280" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr3)" />
+  <line x1="436" y1="280" x2="456" y2="280" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr3)" />
+  <line x1="630" y1="280" x2="650" y2="280" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr3)" />
+  <line x1="824" y1="280" x2="844" y2="280" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr3)" />
+  <line x1="1018" y1="280" x2="1038" y2="280" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr3)" />
+
+  <!-- Stage boxes -->
+  <rect x="70" y="236" width="170" height="88" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="155" y="274" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Raw Turns</text>
+  <text x="155" y="293" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">EPISODIC INPUT</text>
+
+  <rect x="264" y="236" width="170" height="88" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="349" y="274" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Ingest</text>
+  <text x="349" y="293" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">ADD_BATCH · 0 LLM</text>
+
+  <rect x="458" y="236" width="170" height="88" rx="8" fill="#11101d" stroke="#3a3469" stroke-width="1.2" />
+  <text x="543" y="274" text-anchor="middle" font-size="15" font-weight="600" fill="#eceaff">Retrieve</text>
+  <text x="543" y="293" text-anchor="middle" font-size="9" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">4 SURFACES · RERANK</text>
+
+  <rect x="652" y="236" width="170" height="88" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="737" y="274" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Compose</text>
+  <text x="737" y="293" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">CLAUDE-SONNET-4-6</text>
+
+  <rect x="846" y="236" width="170" height="88" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="931" y="274" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Judge</text>
+  <text x="931" y="293" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">SAME-FAMILY JUDGE</text>
+
+  <rect x="1040" y="236" width="170" height="88" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="1125" y="274" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Score</text>
+  <text x="1125" y="293" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">PASS / FAIL</text>
+
+  <!-- Fan-out from Retrieve -->
+  <line x1="543" y1="324" x2="543" y2="392" stroke="#3a3469" stroke-width="1.3" stroke-dasharray="2 4" />
+  <rect x="556" y="356" width="186" height="16" fill="#0b0b0f" />
+  <text x="650" y="368" text-anchor="middle" font-size="9" font-weight="500" fill="#8b85c4" letter-spacing="1.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">FANS OUT TO 4 SURFACES</text>
+  <path d="M274 396 H1006" fill="none" stroke="#2e2e38" stroke-width="1.2" />
+  <line x1="543" y1="392" x2="543" y2="396" stroke="#3a3469" stroke-width="1.3" />
+  <line x1="274" y1="396" x2="274" y2="410" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arr3)" />
+  <line x1="518" y1="396" x2="518" y2="410" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arr3)" />
+  <line x1="762" y1="396" x2="762" y2="410" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arr3)" />
+  <line x1="1006" y1="396" x2="1006" y2="410" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arr3)" />
+
+  <!-- Surface chips -->
+  <rect x="162" y="412" width="224" height="60" rx="9" fill="#15132c" stroke="#3a3469" stroke-width="1" />
+  <text x="274" y="439" text-anchor="middle" font-size="13" font-weight="600" fill="#e9e7ff">Hybrid Search</text>
+  <text x="274" y="456" text-anchor="middle" font-size="8" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">PGVECTOR + FTS · RRF</text>
+
+  <rect x="406" y="412" width="224" height="60" rx="9" fill="#15132c" stroke="#3a3469" stroke-width="1" />
+  <text x="518" y="439" text-anchor="middle" font-size="13" font-weight="600" fill="#e9e7ff">Recall</text>
+  <text x="518" y="456" text-anchor="middle" font-size="8" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">INTENT-ROUTED EVIDENCE</text>
+
+  <rect x="650" y="412" width="224" height="60" rx="9" fill="#15132c" stroke="#3a3469" stroke-width="1" />
+  <text x="762" y="439" text-anchor="middle" font-size="13" font-weight="600" fill="#e9e7ff">Lineage</text>
+  <text x="762" y="456" text-anchor="middle" font-size="8" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">SUPERSESSION CHAINS</text>
+
+  <rect x="894" y="412" width="224" height="60" rx="9" fill="#15132c" stroke="#3a3469" stroke-width="1" />
+  <text x="1006" y="439" text-anchor="middle" font-size="13" font-weight="600" fill="#e9e7ff">Graph</text>
+  <text x="1006" y="456" text-anchor="middle" font-size="8" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">TRAVERSE_MANY · MULTI-HOP</text>
+
+  <!-- One pipeline, three benchmarks -->
+  <text x="640" y="560" text-anchor="middle" font-size="10" font-weight="500" fill="#6e6e79" letter-spacing="2.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">ONE PIPELINE · THREE BENCHMARKS</text>
+
+  <rect x="361" y="584" width="170" height="36" rx="18" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="446" y="607" text-anchor="middle" font-size="12.5" font-weight="600" fill="#cfcfd6">LongMemEval-S</text>
+
+  <rect x="555" y="584" width="170" height="36" rx="18" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="640" y="607" text-anchor="middle" font-size="12.5" font-weight="600" fill="#cfcfd6">LoCoMo-10</text>
+
+  <rect x="749" y="584" width="170" height="36" rx="18" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="834" y="607" text-anchor="middle" font-size="12.5" font-weight="600" fill="#cfcfd6">BEAM 1M</text>
+
+  <!-- Footer -->
+  <text x="640" y="712" text-anchor="middle" font-size="11" font-weight="600" fill="#55555f" letter-spacing="4" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">SHARED BENCHMARK PIPELINE</text>
+</svg>

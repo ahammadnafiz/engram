@@ -28,46 +28,48 @@ Engram is evaluated on three long-term memory benchmarks. All runs use on-device
 | Benchmark | Questions | Accuracy | Composer |
 |---|---|---|---|
 | [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) (ICLR 2025) | 500 | **89.8%** | claude-sonnet-4-6 |
-| [LoCoMo-10](https://github.com/snap-research/locomo) (ACL 2024) | 1,540 | **85.7%** | claude-sonnet-4-6 |
-| [BEAM 1M](https://github.com/mohammadtavakoli78/BEAM) (ICLR 2026) | 700 | **79.6%** | claude-sonnet-4-6 |
+| [LoCoMo-10](https://github.com/snap-research/locomo) (ACL 2024) | 1,540 | **85.2%** | claude-sonnet-4-6 |
+| [BEAM 1M](https://github.com/mohammadtavakoli78/BEAM) (ICLR 2026) | 700 | **77.4%** | claude-sonnet-4-6 |
+
+_Latest run set: **2026-06-21**. Full per-type breakdowns, latency, and reproduce commands: [docs/benchmarks.md](docs/benchmarks.md)._
 
 **LongMemEval-S breakdown** (500 questions):
 
 | Question type | Accuracy |
 |---|---|
 | single-session-user | 98.6% |
-| knowledge-update | 97.4% |
 | abstention | 96.7% |
+| knowledge-update | 94.9% |
 | single-session-assistant | 94.6% |
-| temporal-reasoning | 89.5% |
-| single-session-preference | 83.3% |
+| single-session-preference | 93.3% |
+| temporal-reasoning | 88.7% |
 | multi-session | 80.5% |
 
 **LoCoMo-10 breakdown** (1,540 questions across 10 long conversations):
 
 | Category | Accuracy |
 |---|---|
-| multi-hop | 87.9% |
-| temporal | 86.9% |
-| single-hop | 86.6% |
-| open-domain | 67.7% |
+| multi-hop | 86.5% |
+| single-hop | 86.1% |
+| temporal | 86.0% |
+| open-domain | 70.8% |
 
 **BEAM 1M breakdown** (700 questions, 10 question types, nugget scoring):
 
 | Question type | Accuracy |
 |---|---|
-| abstention | 97.1% |
-| preference_following | 92.9% |
-| instruction_following | 90.0% |
-| information_extraction | 84.3% |
-| event_ordering | 81.4% |
-| knowledge_update | 81.4% |
-| multi_session_reasoning | 81.4% |
-| contradiction_resolution | 80.0% |
-| temporal_reasoning | 65.7% |
-| summarization | 41.4% |
+| abstention | 98.6% |
+| preference_following | 90.0% |
+| instruction_following | 85.7% |
+| multi_session_reasoning | 84.3% |
+| event_ordering | 82.9% |
+| information_extraction | 78.6% |
+| contradiction_resolution | 75.7% |
+| knowledge_update | 70.0% |
+| temporal_reasoning | 68.6% |
+| summarization | 40.0% |
 
-Summarization (41.4%) is a known architectural floor: relevance-ranked retrieval is precision-optimized, not coverage-maximizing. Full methodology, ablation table, and reproduce commands: [docs/benchmarks.md](docs/benchmarks.md).
+Summarization (40.0%) is a known architectural floor: relevance-ranked retrieval is precision-optimized, not coverage-maximizing. Full methodology, ablation table, and reproduce commands: [docs/benchmarks.md](docs/benchmarks.md).
 
 ---
 
@@ -306,6 +308,8 @@ When a user updates a fact, Engram does *not* destructively overwrite the old fa
 * Active searches only retrieve the active head, eliminating **Stale Context Dominance**.
 * The old fact is perfectly preserved for auditing or historical lineage queries (`get_lineage()`), eliminating **Derivation Drift**.
 
+![Single-pass write path — infer type, embed on-device, dedup, supersede, persist; no LLM required](docs/assets/engram-write-path.svg)
+
 ### Long-Running Task Memory
 
 For agents that need to work across many turns or process restarts, Engram
@@ -357,11 +361,8 @@ print(trace.superseded_memory_ids)
 Search combines multiple signals using Reciprocal Rank Fusion:
 
 ```
-score = 0.40 × semantic_similarity
-      + 0.20 × keyword_score
-      + 0.25 × time_decay
-      + 0.15 × importance
-```
+
+![Multi-surface retrieval — every recall fans out across four surfaces and fuses them over one PostgreSQL store](docs/assets/engram-retrieval.svg)
 
 ## Provider Support
 

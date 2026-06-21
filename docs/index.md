@@ -40,7 +40,7 @@ superseded.
 
 </div>
 
-> [!WARNING]  
+> [!WARNING]
 > **Beta**: Engram is at `0.3.0b1`. It is rigorously tested, but the public API and the database schema are subject to change before 1.0. Always back up your data before you run a migration.
 
 ## Documentation Guides
@@ -73,7 +73,7 @@ superseded.
 
 - :material-chart-bar: **[Benchmarks](benchmarks.md)**
 
-    79.6% on BEAM 1M (ICLR 2026), 89.8% on LongMemEval-S (ICLR 2025), 85.7% on LoCoMo-10 (ACL 2024). All three runs use `add_batch()` (no LLM at ingest) and are reproducible with the scripts in `benchmark/`.
+    77.4% on BEAM 1M (ICLR 2026), 89.8% on LongMemEval-S (ICLR 2025), 85.2% on LoCoMo-10 (ACL 2024). All three runs use `add_batch()` (no LLM at ingest) and are reproducible with the scripts in `benchmark/`.
 
 </div>
 
@@ -100,7 +100,7 @@ from engram import Engram
 async def main() -> None:
     # 1. Connect and automatically apply schema migrations
     async with Engram(memory_policy="coding_agent") as engram:
-        
+
         # 2. Store a durable, critical fact
         memory = await engram.add(
             "Repo constraint: never revert user changes without approval",
@@ -125,6 +125,8 @@ if __name__ == "__main__":
 This snippet stores a strict repo constraint, then asks Engram to answer a question about it. `recall()` classifies the question's intent, retrieves the matching memories, and composes a source-backed answer in `answer.answer_text`. It requires a configured LLM (set `ENGRAM_LLM_PROVIDER`); for LLM-free retrieval use `search()` instead.
 
 ## How It Works
+
+![Multi-surface retrieval — every recall fans out across four surfaces and fuses them over one PostgreSQL store](assets/engram-retrieval.svg)
 
 Engram keeps two kinds of memory side by side.
 
@@ -155,8 +157,8 @@ Engram is evaluated on three standard long-term memory benchmarks. All runs use 
 | Benchmark | Questions | Accuracy | Composer |
 |---|---|---|---|
 | [LongMemEval-S](benchmarks.md#longmemeval-s-898) (ICLR 2025) | 500 | **89.8%** | claude-sonnet-4-6 |
-| [LoCoMo-10](benchmarks.md#locomo-10-857) (ACL 2024) | 1,540 | **85.7%** | claude-sonnet-4-6 |
-| [BEAM 1M](benchmarks.md#beam-1m-796) (ICLR 2026) | 700 | **79.6%** | claude-sonnet-4-6 |
+| [LoCoMo-10](benchmarks.md#locomo-10-852) (ACL 2024) | 1,540 | **85.2%** | claude-sonnet-4-6 |
+| [BEAM 1M](benchmarks.md#beam-1m-774) (ICLR 2026) | 700 | **77.4%** | claude-sonnet-4-6 |
 
 All three benchmark scripts are in `benchmark/` and can be run against your own database. See [Benchmarks](benchmarks.md) for full per-type breakdowns, honest caveats, ablation table, and reproduce commands.
 

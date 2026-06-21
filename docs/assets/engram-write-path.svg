@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 768" width="100%" height="100%" style="background-color:#060608;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <defs>
+    <marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0 1.5 L8.5 5 L0 8.5" fill="none" stroke="#4a4a55" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+    <g id="dbicon2" fill="none" stroke="currentColor" stroke-width="1.5">
+      <ellipse cx="0" cy="-7" rx="10" ry="3.8" />
+      <path d="M-10 -7 V7" />
+      <path d="M10 -7 V7" />
+      <path d="M-10 7 a10 3.8 0 0 0 20 0" />
+      <path d="M-10 0 a10 3.8 0 0 0 20 0" />
+    </g>
+  </defs>
+
+  <rect width="1280" height="768" fill="#060608" />
+  <rect x="592" y="0" width="96" height="4" rx="2" fill="#6d5dfb" />
+
+  <!-- Header -->
+  <text x="640" y="92" text-anchor="middle" font-size="46" font-weight="800" fill="#fbfbfd" letter-spacing="-0.5">Single-pass write path</text>
+  <text x="640" y="132" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">add() and add_batch() persist memories in one deterministic pass — no LLM required. Infer the type,</text>
+  <text x="640" y="156" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">embed on-device, dedup inside a scope lock, supersede stale conflicts, then write the row.</text>
+
+  <!-- Panel -->
+  <rect x="48" y="188" width="1184" height="566" rx="20" fill="#0b0b0f" stroke="#1c1c24" stroke-width="1" />
+
+  <!-- Zero-LLM badge -->
+  <rect x="584" y="236" width="112" height="22" rx="11" fill="#14122a" stroke="#3a3469" stroke-width="1" />
+  <text x="640" y="251" text-anchor="middle" font-size="9" font-weight="600" fill="#b6b2e8" letter-spacing="1.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">ZERO-LLM INGEST</text>
+
+  <!-- Flow connectors (horizontal) -->
+  <line x1="280" y1="312" x2="308" y2="312" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr2)" />
+  <line x1="510" y1="312" x2="538" y2="312" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr2)" />
+  <line x1="740" y1="312" x2="768" y2="312" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr2)" />
+  <line x1="970" y1="312" x2="998" y2="312" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arr2)" />
+
+  <!-- Step boxes -->
+  <rect x="82" y="270" width="196" height="84" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="180" y="306" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Apply Policy</text>
+  <text x="180" y="325" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">INFER TYPE · CONFLICT KEY</text>
+
+  <rect x="312" y="270" width="196" height="84" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="410" y="306" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Embed</text>
+  <text x="410" y="325" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">ON-DEVICE VECTOR</text>
+
+  <rect x="542" y="270" width="196" height="84" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="640" y="306" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Deduplicate</text>
+  <text x="640" y="325" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">NEAR-DUP · SCOPE LOCK</text>
+
+  <rect x="772" y="270" width="196" height="84" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="870" y="306" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Supersede</text>
+  <text x="870" y="325" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">RETIRE OLD CONFLICTS</text>
+
+  <rect x="1002" y="270" width="196" height="84" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="1100" y="306" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Persist</text>
+  <text x="1100" y="325" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">AGENT_MEMORY ROW</text>
+
+  <!-- Write connectors down to storage -->
+  <polyline points="410,354 410,490 640,490 640,506" fill="none" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arr2)" />
+  <polyline points="640,354 640,476 420,476 420,506" fill="none" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arr2)" />
+  <polyline points="1100,354 1100,482 859,482 859,506" fill="none" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arr2)" />
+
+  <!-- Persistent storage -->
+  <rect x="300" y="492" width="680" height="168" rx="14" fill="#0c0c12" stroke="#24242e" stroke-width="1" />
+
+  <rect x="318" y="510" width="205" height="104" rx="9" fill="#0e1830" stroke="#2a4a82" stroke-width="1" />
+  <use href="#dbicon2" transform="translate(420,536)" color="#9fb6e6" />
+  <text x="420" y="574" text-anchor="middle" font-size="13.5" font-weight="600" fill="#eef2fb">Fact Rows</text>
+  <text x="420" y="592" text-anchor="middle" font-size="8.5" font-weight="500" fill="#7f93bf" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">AGENT_MEMORY · FACTS</text>
+
+  <rect x="538" y="510" width="205" height="104" rx="9" fill="#0c1326" stroke="#223e72" stroke-width="1" />
+  <use href="#dbicon2" transform="translate(640,536)" color="#8aa0d6" />
+  <text x="640" y="574" text-anchor="middle" font-size="13.5" font-weight="600" fill="#e9eefb">Vector Index</text>
+  <text x="640" y="592" text-anchor="middle" font-size="8.5" font-weight="500" fill="#7388b6" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">PGVECTOR · EMBEDDINGS</text>
+
+  <rect x="757" y="510" width="205" height="104" rx="9" fill="#1d1810" stroke="#5f4a1e" stroke-width="1" />
+  <use href="#dbicon2" transform="translate(859,536)" color="#d8b765" />
+  <text x="859" y="574" text-anchor="middle" font-size="13.5" font-weight="600" fill="#f6efdd">Text + Graph</text>
+  <text x="859" y="592" text-anchor="middle" font-size="8" font-weight="500" fill="#b59a5e" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">PG_TRGM · MEMORY_RELATIONS</text>
+
+  <text x="640" y="644" text-anchor="middle" font-size="10" font-weight="500" fill="#6e6e79" letter-spacing="2" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">POSTGRESQL · ACID WRITES + DEDUP</text>
+
+  <!-- Footer -->
+  <text x="640" y="716" text-anchor="middle" font-size="11" font-weight="600" fill="#55555f" letter-spacing="4" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">MEMORY WRITE PATH</text>
+</svg>
