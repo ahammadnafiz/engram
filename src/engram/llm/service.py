@@ -112,23 +112,151 @@ class ExtractionResult:
     summary: str | None = None
 
 
-_MONTHS_RE = re.compile(
-    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b"
+# --- deterministic value-change detection ------------------------------------
+# These power the duplicate-guard exemption: a near-identical fact carrying a
+# DIFFERENT value (number, amount+unit, or day) is a likely UPDATE, so it must
+# skip the no-LLM NOOP and reach the decision LLM. Matching is deliberately
+# liberal -- an extra/false token only routes a near-duplicate to the LLM (a
+# benign cost), whereas a MISSED change silently NOOPs a real update (the
+# dangerous direction this guards against). It is also monotone-safe: every rule
+# only ADDS tokens, so a difference in one field can never be masked by another.
+
+# Unit surface form -> canonical token, so '5 km' == '5km' and '5 min' == '5
+# minutes'. The canonical value is an opaque discriminator; it only needs to be
+# consistent, not semantically perfect (e.g. meter and a stray '5m' both map to
+# 'm', which never co-occur as near-duplicates).
+_UNIT_CANON = {
+    # distance
+    "km": "km",
+    "kilometer": "km",
+    "kilometers": "km",
+    "mi": "mi",
+    "mile": "mi",
+    "miles": "mi",
+    "m": "m",
+    "meter": "m",
+    "meters": "m",
+    "metre": "m",
+    "metres": "m",
+    "cm": "cm",
+    "mm": "mm",
+    "ft": "ft",
+    "foot": "ft",
+    "feet": "ft",
+    "yd": "yd",
+    "yard": "yd",
+    "yards": "yd",
+    "inch": "in",
+    "inches": "in",
+    # mass
+    "kg": "kg",
+    "kgs": "kg",
+    "kilogram": "kg",
+    "kilograms": "kg",
+    "g": "g",
+    "gram": "g",
+    "grams": "g",
+    "mg": "mg",
+    "lb": "lb",
+    "lbs": "lb",
+    "pound": "lb",
+    "pounds": "lb",
+    "oz": "oz",
+    "ounce": "oz",
+    "ounces": "oz",
+    # volume
+    "l": "l",
+    "liter": "l",
+    "liters": "l",
+    "litre": "l",
+    "litres": "l",
+    "ml": "ml",
+    "gal": "gal",
+    "gallon": "gal",
+    "gallons": "gal",
+    # time
+    "hr": "hr",
+    "hrs": "hr",
+    "hour": "hr",
+    "hours": "hr",
+    "min": "min",
+    "mins": "min",
+    "minute": "min",
+    "minutes": "min",
+    "sec": "sec",
+    "secs": "sec",
+    "second": "sec",
+    "seconds": "sec",
+    "day": "d",
+    "days": "d",
+    "week": "wk",
+    "weeks": "wk",
+    "month": "mo",
+    "months": "mo",
+    "year": "yr",
+    "years": "yr",
+    # data
+    "gb": "gb",
+    "mb": "mb",
+    "kb": "kb",
+    "tb": "tb",
+    # rate / proportion
+    "mph": "mph",
+    "kmh": "kmh",
+    "kph": "kmh",
+    "percent": "pct",
+    "%": "pct",
+    # money magnitude
+    "k": "k",
+    "thousand": "k",
+    "million": "mn",
+    "billion": "bn",
+    "bn": "bn",
+}
+
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
+# Longest unit alternatives first so 'km' wins over 'm' and 'kmh' over 'km'.
+_QTY_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*("
+    + "|".join(re.escape(u) for u in sorted(_UNIT_CANON, key=len, reverse=True))
+    + r")(?![a-z])"
+)
+
+# Months, weekdays, and relative-day words. Full names precede abbreviations so
+# 'september' matches before 'sep'; every match is canonicalized to its 3-letter
+# stem ('tuesday', 'tues', 'tue' -> 'tue'), which is unique across all entries.
+_DAYWORD_RE = re.compile(
+    r"\b(?:"
+    r"january|february|march|april|may|june|july|august|september"
+    r"|october|november|december"
+    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+    r"|today|tonight|tomorrow|yesterday"
+    r"|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec"
+    r"|mon|tues|tue|weds|wed|thurs|thur|thu|fri|sat|sun"
+    r")\b"
 )
 
 
 def _value_tokens(text: str) -> set[str]:
-    """Numbers and month names in a fact -- the tokens a value lives in.
+    """Normalized value tokens in a fact -- numbers, amount+unit, and day words.
 
-    Commas are stripped so '110,000' is one token. Used to detect a number/date
-    CHANGE between a new fact and a near-identical existing one.
+    Used to detect a VALUE CHANGE between a new fact and a near-identical
+    existing one (e.g. '90k'->'110k', '5km'->'5mi', 'Tuesday'->'Friday'). Commas
+    are stripped so '110,000' is one token; units and day words are canonicalized
+    so '5 km' == '5km' and 'Tuesday' == 'tue'.
     """
     low = text.lower().replace(",", "")
-    return set(re.findall(r"\d+(?:\.\d+)?", low)) | set(_MONTHS_RE.findall(low))
+    tokens = set(_NUMBER_RE.findall(low))
+    for num, unit in _QTY_RE.findall(low):
+        tokens.add(f"{num}{_UNIT_CANON[unit]}")
+    for word in _DAYWORD_RE.findall(low):
+        tokens.add(word[:3])
+    return tokens
 
 
 def _values_differ(a: str, b: str) -> bool:
-    """True when two near-duplicate facts carry DIFFERENT numbers/dates.
+    """True when two near-duplicate facts carry DIFFERENT values.
 
     Weak embeddings rate '...salary is 90000' and '...salary is 110000' as
     near-identical, so a raw-cosine duplicate guard would NOOP a real update.

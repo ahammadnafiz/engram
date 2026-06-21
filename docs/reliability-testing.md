@@ -1,6 +1,6 @@
 # Reliability & Testing
 
-This guide outlines the failure modes, edge cases, and security boundaries application teams must test when integrating Engram. 
+This guide outlines the failure modes, edge cases, and security boundaries application teams must test when integrating Engram.
 
 > [!NOTE]
 > Engram guarantees database-level integrity, vector storage, and memory consistency. However, it **does not** enforce application-level authorization or handle external LLM network retries automatically.
@@ -27,7 +27,7 @@ pytest tests/integration -q --run-integration
 
 Engram scopes all data by `agent_id` and (optionally) `user_id`. It **does not** enforce authorization.
 
-> [!CAUTION]  
+> [!CAUTION]
 > Never trust a client-supplied `user_id` from a JSON body or URL parameter. You must resolve the `user_id` strictly from your web framework's secure authentication layer (e.g., a JWT token) before passing it to Engram.
 
 **Failure Mode Test:** Attempt to search memories using a valid `user_id` but with a mocked, invalid JWT token. The web layer should block the request before Engram is ever called.
@@ -78,7 +78,7 @@ if trace.missing_expected_terms:
 ```
 
 ### Conflict Resolution
-When an agent learns a new, contradictory critical fact, Engram uses the `conflict_key` to supersede the old fact. 
+When an agent learns a new, contradictory critical fact, Engram uses the `conflict_key` to supersede the old fact.
 
 **Test:** Ensure the older fact's ID moves to `trace.superseded_memory_ids` and the new fact is in `trace.kept_memory_ids`.
 
@@ -91,14 +91,14 @@ The lineage write path has two failure sources that need separate tests, because
 **Layer 2 — write-time intelligence (LLM-gated).** Run scripted update sequences through `add_conversation()` and check the **update-capture rate**: an intended ADD/UPDATE that comes back with no written memory is a dropped update. `benchmark/lineage_writepath.py` covers numeric/date changes, oscillation, dedup, the assistant-restatement trap, contradictions, and multi-fact non-collision across models.
 
 > [!WARNING]
-> `add_conversation()` can decide `NOOP` for a fact that was actually a real update (most often a number/date change a weak embedding rates as a duplicate, or a value reversal). It now returns a list-compatible `ConversationResult`; **inspect `.decisions`** to catch this — each extracted fact carries its `operation`, `applied`, and `reason`, so a skipped update is visible (`operation="NOOP", applied=False`) instead of silently missing from the written list. On a write path, treat an unexpected `NOOP` on a stated change as an error to surface or override.
+> `add_conversation()` can decide `NOOP` for a fact that was actually a real update. The duplicate-guard exemption deterministically detects a changed **number, amount+unit (`5km`→`5mi`), money magnitude (`90k`→`110k`), or day (month/weekday/relative, `Tuesday`→`Friday`)** and routes such a near-duplicate to the decision LLM rather than NOOPing it. Two cases it still can't catch on its own: a **value reversal** (both the old and new fact mention both values, so the token sets match) and a unit/day word **outside the curated allowlist** in `_value_tokens`. For those, `add_conversation()` returns a list-compatible `ConversationResult`; **inspect `.decisions`** — each extracted fact carries its `operation`, `applied`, and `reason`, so a skipped update is visible (`operation="NOOP", applied=False`) instead of silently missing from the written list. On a write path, treat an unexpected `NOOP` on a stated change as an error to surface or override.
 
 ---
 
 ## 5. Network & Infrastructure
 
 ### Embedding Dimension Mismatch
-If you change your embedding model (e.g., OpenAI `1536` to local `384`), Engram will throw a `ConfigurationError` on boot to prevent wiping your vectors. 
+If you change your embedding model (e.g., OpenAI `1536` to local `384`), Engram will throw a `ConfigurationError` on boot to prevent wiping your vectors.
 
 **Test:** Verify your app fails safely if this occurs, or export `ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE=true` if you have an automated re-embedding pipeline.
 

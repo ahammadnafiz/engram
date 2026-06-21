@@ -484,3 +484,67 @@ class TestExpandQuery:
     async def test_caps_to_n_queries(self) -> None:
         svc = make_service("query one\nquery two\nquery three")
         assert len(await svc.expand_query("x", n_queries=2)) == 2
+
+
+class TestValueTokens:
+    """Tests for the deterministic value-change detector behind the dup-guard."""
+
+    def test_number_and_comma_normalization(self) -> None:
+        from engram.llm.service import _value_tokens
+
+        assert _value_tokens("salary is 110,000") == {"110000"}
+        assert _value_tokens("net income was 2.7 million") == {"2.7", "2.7mn"}
+
+    def test_unit_is_space_insensitive_and_canonical(self) -> None:
+        from engram.llm.service import _value_tokens
+
+        # '5 km' and '5km' must collapse; unit synonyms canonicalize.
+        assert _value_tokens("ran 5 km") == _value_tokens("ran 5km")
+        assert _value_tokens("for 5 minutes") == _value_tokens("for 5 min")
+
+    def test_dayword_is_canonical_stem(self) -> None:
+        from engram.llm.service import _value_tokens
+
+        assert _value_tokens("see you Tuesday") == _value_tokens("see you tue")
+        assert _value_tokens("born in September") == _value_tokens("born in sept")
+
+    def test_unit_not_split_inside_a_word(self) -> None:
+        from engram.llm.service import _value_tokens
+
+        # '5 meetings' must not parse 'm' as a unit -> only the bare number.
+        assert _value_tokens("had 5 meetings") == {"5"}
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("salary is 90000", "salary is 110000"),  # number
+            ("salary is 90k", "salary is 110k"),  # magnitude digits
+            ("budget is 5k", "budget is 5m"),  # same number, diff magnitude
+            ("the run is 5km", "the run is 5mi"),  # same number, diff unit
+            ("weighs 5kg", "weighs 5lb"),  # mass unit change
+            ("lasts 5 weeks", "lasts 5 months"),  # time-period unit change
+            ("meeting on Tuesday", "meeting on Friday"),  # weekday
+            ("renews in January", "renews in February"),  # month
+            ("the call is today", "the call is tomorrow"),  # relative day
+        ],
+    )
+    def test_values_differ_true(self, a: str, b: str) -> None:
+        from engram.llm.service import _values_differ
+
+        assert _values_differ(a, b) is True
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("the run is 5 km", "the run is 5km"),  # spacing only
+            ("for 5 minutes", "for 5 min"),  # unit synonym
+            ("see you Tuesday", "see you tue"),  # day abbreviation
+            ("I have 2 cats", "I have cats"),  # one side has no value token
+            ("I like coffee", "I love coffee"),  # no value tokens at all
+            ("salary is 90000", "salary is 90000"),  # identical
+        ],
+    )
+    def test_values_differ_false(self, a: str, b: str) -> None:
+        from engram.llm.service import _values_differ
+
+        assert _values_differ(a, b) is False

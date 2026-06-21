@@ -50,11 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("relocated from Berlin", "raised from 90k") as the *old* value, so a fresh
   assertion of it is an update, not a NOOP.
 
+- **The duplicate-guard exemption now covers unit, day, and magnitude changes,
+  not just bare numbers.** `_value_tokens` previously extracted only digits and
+  month names, so `5km` → `5mi`, `Tuesday` → `Friday`, and `90k` → `110k` read
+  as identical and were NOOPed. It now extracts amount+unit (length/mass/volume/
+  time/data/rate, canonicalized so `5 km` == `5km` and `5 minutes` == `5 min`),
+  money magnitudes, and weekday/month/relative-day words (canonicalized to a
+  stem so `Tuesday` == `tue`). Matching is deliberately liberal and
+  monotone-safe: a false token only routes a near-duplicate to the decision LLM
+  (benign), never masks a real change.
+
   Known limitation: a value *reversal* where both facts mention both values
   (e.g. city A→B→A) can still be NOOPed by the cosine guard before the decision
-  prompt runs, and currency-/unit-only changes ("90000 euros" → "90000 dollars")
-  still pass the guard. These are now *visible* via `.decisions` rather than
-  silent, and closing them is tracked as follow-up.
+  prompt runs, as can a unit/day word outside the curated allowlist. These are
+  now *visible* via `.decisions` rather than silent, and closing them is tracked
+  as follow-up.
 
 ## [0.3.0b2] - 2026-06-20
 
