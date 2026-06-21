@@ -82,6 +82,17 @@ When an agent learns a new, contradictory critical fact, Engram uses the `confli
 
 **Test:** Ensure the older fact's ID moves to `trace.superseded_memory_ids` and the new fact is in `trace.kept_memory_ids`.
 
+### Write-Path Lineage (`add_conversation`)
+
+The lineage write path has two failure sources that need separate tests, because conflating them hides which layer is wrong:
+
+**Layer 1 — mechanism (deterministic, no LLM).** Drive `add()` / `revise()` / `conflict_key` directly and assert the supersession state machine: exactly one active head per lineage, the head pointer agrees with the active row, superseded rows carry valid forward links, oscillation (A→B→A) mints a *new* row rather than resurrecting the old one, unrelated lineages don't collide, and concurrent revises serialize to a single active head. This must be 100% on any model. `benchmark/lineage_invariants.py` runs it (free, no API) and exits non-zero on violation, so it can gate CI.
+
+**Layer 2 — write-time intelligence (LLM-gated).** Run scripted update sequences through `add_conversation()` and check the **update-capture rate**: an intended ADD/UPDATE that comes back with no written memory is a dropped update. `benchmark/lineage_writepath.py` covers numeric/date changes, oscillation, dedup, the assistant-restatement trap, contradictions, and multi-fact non-collision across models.
+
+> [!WARNING]
+> `add_conversation()` can decide `NOOP` for a fact that was actually a real update (most often a number/date change a weak embedding rates as a duplicate, or a value reversal). It now returns a list-compatible `ConversationResult`; **inspect `.decisions`** to catch this — each extracted fact carries its `operation`, `applied`, and `reason`, so a skipped update is visible (`operation="NOOP", applied=False`) instead of silently missing from the written list. On a write path, treat an unexpected `NOOP` on a stated change as an error to surface or override.
+
 ---
 
 ## 5. Network & Infrastructure
