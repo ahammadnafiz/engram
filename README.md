@@ -79,6 +79,12 @@ source-anchored long-input ingestion, and traceable recall.
 > Status: **beta**. The architecture and local test suite are in good shape,
 > but public APIs may still change before a stable release.
 
+<p align="center">
+  <img src="assets/chatbot_image.png" alt="Engram Memory Chatbot — your second brain in the terminal" width="720">
+  <br>
+  <em>See it working — the Engram-backed memory chatbot running as your second brain in the terminal.</em>
+</p>
+
 ## The Problem: Why Conversational Memory Fails
 
 Long-term memory for LLMs is fundamentally a database engineering problem, not just a context window problem. Most memory systems fail due to a few common patterns:
@@ -156,7 +162,7 @@ async def main():
             agent_id="assistant",
             user_id="user_123",
         )
-        
+
         # Store with conversation context (two-column system)
         memory = await engram.add(
             content="User is learning Python",           # Fact (embedded)
@@ -164,14 +170,14 @@ async def main():
             agent_id="assistant",
             user_id="user_123",
         )
-        
+
         # Search memories
         results = await engram.search(
             query="user preferences",
             agent_id="assistant",
             user_id="user_123",
         )
-        
+
         for r in results:
             print(f"[{r.score:.2f}] {r.memory.content}")
 
@@ -296,8 +302,8 @@ Engram refuses to pick between raw transcripts and derived summaries. It separat
 
 ### Lineages & `supersedes`
 
-When a user updates a fact, Engram does *not* destructively overwrite the old fact. Instead, it inserts the new fact, changes the old fact's status to `superseded`, and draws a physical `supersedes` graph edge between them. 
-* Active searches only retrieve the active head, eliminating **Stale Context Dominance**. 
+When a user updates a fact, Engram does *not* destructively overwrite the old fact. Instead, it inserts the new fact, changes the old fact's status to `superseded`, and draws a physical `supersedes` graph edge between them.
+* Active searches only retrieve the active head, eliminating **Stale Context Dominance**.
 * The old fact is perfectly preserved for auditing or historical lineage queries (`get_lineage()`), eliminating **Derivation Drift**.
 
 ### Long-Running Task Memory
@@ -389,19 +395,19 @@ class CustomEmbeddingProvider(EmbeddingProvider):
     def __init__(self, api_key: str, model: str = "default"):
         self._model = model
         self._dimension = 768
-    
+
     @property
     def dimension(self) -> int:
         return self._dimension
-    
+
     @property
     def model(self) -> str:
         return self._model
-    
+
     async def embed(self, text: str) -> list[float]:
         # Implementation
         return [0.0] * self._dimension
-    
+
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [await self.embed(t) for t in texts]
 ```
@@ -439,10 +445,10 @@ async def example():
             content="Alice works in finance",
             agent_id="bot",
         )
-        
+
         # Create graph relations
         await engram.relate(m1.memory_id, m2.memory_id, "related_to", weight=0.8)
-        
+
         # Traverse the graph
         related = await engram.traverse(
             start_memory_id=m1.memory_id,
@@ -458,10 +464,10 @@ async def example():
         )
         graph_context = engram.render_graph_context(graph, max_tokens=500)
         print(graph_context)
-        
+
         # Reinforce important memories
         await engram.reinforce(m1.memory_id, importance_boost=0.2)
-        
+
         # Search with hybrid ranking
         results = await engram.search("Alice", agent_id="bot", limit=5)
         for r in results:
