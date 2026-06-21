@@ -421,7 +421,9 @@ def require_real_config() -> None:
             "(or GEMINI_API_KEY).\nGet a key at https://aistudio.google.com/apikey "
             "and set it before running the chatbot."
         )
-    elif provider in ("anthropic", "claude") and not os.environ.get("ENGRAM_ANTHROPIC_API_KEY"):
+    elif provider in ("anthropic", "claude") and not os.environ.get(
+        "ENGRAM_ANTHROPIC_API_KEY"
+    ):
         raise ValueError(
             "Missing required environment variable: ENGRAM_ANTHROPIC_API_KEY "
             "(or ANTHROPIC_API_KEY).\nGet a key at https://console.anthropic.com/ "
@@ -690,7 +692,9 @@ class MemoryChatbot:
     async def switch_model(self, model_choice: str) -> None:
         model_choice = model_choice.lower()
         if model_choice not in ("gemini", "claude", "anthropic"):
-            print_notice("Invalid model choice. Use 'gemini' or 'claude'.", level="warn")
+            print_notice(
+                "Invalid model choice. Use 'gemini' or 'claude'.", level="warn"
+            )
             return
 
         print_notice(f"Switching model to {model_choice}...")
@@ -703,10 +707,14 @@ class MemoryChatbot:
 
         if model_choice == "gemini":
             os.environ["ENGRAM_LLM_PROVIDER"] = "gemini"
-            os.environ["ENGRAM_LLM_MODEL"] = os.environ.get("ENGRAM_GEMINI_MODEL", "gemini-3.1-flash-lite")
+            os.environ["ENGRAM_LLM_MODEL"] = os.environ.get(
+                "ENGRAM_GEMINI_MODEL", "gemini-3.1-flash-lite"
+            )
         else:
             os.environ["ENGRAM_LLM_PROVIDER"] = "anthropic"
-            os.environ["ENGRAM_LLM_MODEL"] = os.environ.get("ENGRAM_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+            os.environ["ENGRAM_LLM_MODEL"] = os.environ.get(
+                "ENGRAM_ANTHROPIC_MODEL", "claude-sonnet-4-6"
+            )
 
         try:
             require_real_config()
