@@ -246,6 +246,15 @@ Match the extracted event to the BEST fitting reference event by semantic simila
 Return format: {{"index": <integer>, "reason": "<brief explanation>"}}"""
 
 
+def _pct(vals: list[float], p: float) -> float:
+    if not vals:
+        return 0.0
+    s = sorted(vals)
+    idx = (len(s) - 1) * p / 100
+    lo, hi = int(idx), min(int(idx) + 1, len(s) - 1)
+    return round(s[lo] + (s[hi] - s[lo]) * (idx - lo), 3)
+
+
 def _session_stratify(candidates: list[Any], search_limit: int, per_session: int = 2) -> list[Any]:
     """Enforce breadth across sessions by taking top-K per batch_idx, then fill from remainder."""
     from collections import defaultdict
@@ -542,6 +551,11 @@ async def ingest_conversation(
         user_id=user_id,
         max_memory_chars=max_memory_chars,
     )
+    full_context_chars = sum(
+        len(turn.get("content", "") or "")
+        for batch in parse_beam_chat(conversation.get("chat", []))
+        for turn in batch
+    )
 
     t0 = time.perf_counter()
     inserted = 0
@@ -563,6 +577,7 @@ async def ingest_conversation(
         "batches": len(list(_chunks(rows, batch_size))),
         "errors": errors,
         "first_error": first_error,
+        "full_context_chars": full_context_chars,
         "ingest_seconds": round(time.perf_counter() - t0, 3),
     }
 
@@ -1125,6 +1140,7 @@ async def process_question(
     composer_model = ""
     retrieval_trace: dict[str, Any] = {}
     cutoff_results: dict[str, Any] = {}
+    evidence_text = ""
 
     try:
         evidence_text, flat_memories, retrieval_trace = await retrieve_evidence(
@@ -1198,6 +1214,8 @@ async def process_question(
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
 
+    _elapsed = round(time.perf_counter() - start, 3)
+    _retrieval_s = retrieval_trace.get("retrieval_seconds", 0.0)
     return {
         "question_id": question_id,
         "chat_size": chat_size,
@@ -1212,8 +1230,11 @@ async def process_question(
         "agent_id": agent_id,
         "composer_model": composer_model,
         "retrieval": retrieval_trace,
+        "evidence": evidence_text,
+        "evidence_chars": len(evidence_text),
+        "generation_seconds": max(0.0, round(_elapsed - _retrieval_s, 3)),
+        "elapsed_seconds": _elapsed,
         "cutoff_results": cutoff_results,
-        "elapsed_seconds": round(time.perf_counter() - start, 3),
         "error": error,
     }
 
@@ -1710,6 +1731,33 @@ async def main() -> None:
             and (t.get("cutoff_results", {}).get(primary_label, {}).get("score", 0.0) < PASS_THRESHOLD)
         )[:50],
     }
+
+    _ok = [t for t in all_traces if not t.get("error")]
+    _el = [t.get("elapsed_seconds", 0.0) for t in _ok]
+    _ret = [t.get("retrieval", {}).get("retrieval_seconds", 0.0) for t in _ok]
+    _gen = [t.get("generation_seconds", 0.0) for t in _ok]
+    _ev = [t.get("evidence_chars", 0) for t in _ok if t.get("evidence_chars")]
+    _fc = [t.get("ingest_summary", {}).get("full_context_chars", 0) for t in _ok if t.get("ingest_summary", {}).get("full_context_chars")]
+    _sh = [t.get("retrieval", {}).get("search_hits", 0) for t in _ok]
+    _gh = [t.get("retrieval", {}).get("graph_hits", 0) for t in _ok]
+    _CPT = 4
+    _avg_ev = round(sum(_ev) / len(_ev) / _CPT) if _ev else 0
+    _avg_fc = round(sum(_fc) / len(_fc) / _CPT) if _fc else 0
+    summary["latency"] = {
+        "avg_total_s": round(sum(_el) / len(_el), 3) if _el else 0.0,
+        "p50_total_s": _pct(_el, 50),
+        "p95_total_s": _pct(_el, 95),
+        "avg_retrieval_s": round(sum(_ret) / len(_ret), 3) if _ret else 0.0,
+        "avg_generation_s": round(sum(_gen) / len(_gen), 3) if _gen else 0.0,
+    }
+    summary["context_efficiency"] = {
+        "avg_evidence_tokens": _avg_ev,
+        "avg_full_context_tokens": _avg_fc,
+        "compression_pct": round((1 - _avg_ev / _avg_fc) * 100, 1) if _avg_fc else 0.0,
+        "avg_search_hits": round(sum(_sh) / len(_sh), 1) if _sh else 0.0,
+        "avg_graph_hits": round(sum(_gh) / len(_gh), 1) if _gh else 0.0,
+    }
+
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
     print(f"\nanswer model : {summary['answer_model']}  |  judge: {args.judge_model}")
     print(f"primary cutoff: {primary_label}  accuracy={summary['accuracy']:.1f}%  avg_score={summary['avg_score']:.3f}")

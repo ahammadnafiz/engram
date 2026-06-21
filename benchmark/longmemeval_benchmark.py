@@ -490,6 +490,15 @@ def _parse_question_date(date_str: str) -> "datetime | None":
         return None
 
 
+def _pct(vals: list[float], p: float) -> float:
+    if not vals:
+        return 0.0
+    s = sorted(vals)
+    idx = (len(s) - 1) * p / 100
+    lo, hi = int(idx), min(int(idx) + 1, len(s) - 1)
+    return round(s[lo] + (s[hi] - s[lo]) * (idx - lo), 3)
+
+
 def _bounded_text(text: str, max_chars: int) -> str:
     """Truncate to max_chars keeping head and tail (harness parity)."""
     if max_chars <= 0 or len(text) <= max_chars:
@@ -616,6 +625,11 @@ async def ingest_sessions(
         memory_unit=memory_unit,
         max_memory_chars=max_memory_chars,
     )
+    full_context_chars = sum(
+        len(msg.get("content", "") or "")
+        for session in sample.get("haystack_sessions", [])
+        for msg in session
+    )
 
     t0 = time.perf_counter()
     inserted = 0
@@ -640,6 +654,7 @@ async def ingest_sessions(
         "batches": batches,
         "errors": errors,
         "first_error": first_error,
+        "full_context_chars": full_context_chars,
         "ingest_seconds": round(time.perf_counter() - t0, 3),
     }
 
@@ -1194,6 +1209,9 @@ async def run_sample(
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
 
+    _elapsed = round(time.perf_counter() - start, 3)
+    _ingest_s = ingest_summary.get("ingest_seconds", 0.0)
+    _retrieval_s = retrieval_trace.get("retrieval_seconds", 0.0)
     return {
         "question_id": question_id,
         "question_type": question_type,
@@ -1206,7 +1224,9 @@ async def run_sample(
         "ingest_summary": ingest_summary,
         "retrieval": retrieval_trace,
         "evidence": evidence,
-        "elapsed_seconds": round(time.perf_counter() - start, 3),
+        "evidence_chars": len(evidence),
+        "generation_seconds": max(0.0, round(_elapsed - _ingest_s - _retrieval_s, 3)),
+        "elapsed_seconds": _elapsed,
         "error": error,
     }
 
@@ -1236,8 +1256,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--judge-concurrency", type=int, default=8)
     parser.add_argument(
-        "--concurrency", 
-        type=int, 
+        "--concurrency",
+        type=int,
         default=5,
         help="Number of questions to process concurrently (default 5).",
     )
@@ -1684,7 +1704,7 @@ async def main() -> None:
     print(f"Samples      : {len(samples)}")
 
     traces: list[dict[str, Any]] = []
-    
+
     try:
         traces_path = args.output_dir / "traces.jsonl"
         with traces_path.open("w") as traces_file:
@@ -1832,6 +1852,35 @@ async def main() -> None:
             j["question_id"] for j in judgments if not j["correct"]
         ),
     }
+
+    _ok = [t for t in traces if not t.get("error")]
+    _el = [t.get("elapsed_seconds", 0.0) for t in _ok]
+    _ret = [t.get("retrieval", {}).get("retrieval_seconds", 0.0) for t in _ok]
+    _ing = [t.get("ingest_summary", {}).get("ingest_seconds", 0.0) for t in _ok]
+    _gen = [t.get("generation_seconds", 0.0) for t in _ok]
+    _ev = [t.get("evidence_chars", 0) for t in _ok if t.get("evidence_chars")]
+    _fc = [t.get("ingest_summary", {}).get("full_context_chars", 0) for t in _ok if t.get("ingest_summary", {}).get("full_context_chars")]
+    _sh = [t.get("retrieval", {}).get("search_hits", 0) for t in _ok]
+    _gh = [t.get("retrieval", {}).get("graph_hits", 0) for t in _ok]
+    _CPT = 4
+    _avg_ev = round(sum(_ev) / len(_ev) / _CPT) if _ev else 0
+    _avg_fc = round(sum(_fc) / len(_fc) / _CPT) if _fc else 0
+    summary["latency"] = {
+        "avg_total_s": round(sum(_el) / len(_el), 3) if _el else 0.0,
+        "p50_total_s": _pct(_el, 50),
+        "p95_total_s": _pct(_el, 95),
+        "avg_retrieval_s": round(sum(_ret) / len(_ret), 3) if _ret else 0.0,
+        "avg_ingest_s": round(sum(_ing) / len(_ing), 3) if _ing else 0.0,
+        "avg_generation_s": round(sum(_gen) / len(_gen), 3) if _gen else 0.0,
+    }
+    summary["context_efficiency"] = {
+        "avg_evidence_tokens": _avg_ev,
+        "avg_full_context_tokens": _avg_fc,
+        "compression_pct": round((1 - _avg_ev / _avg_fc) * 100, 1) if _avg_fc else 0.0,
+        "avg_search_hits": round(sum(_sh) / len(_sh), 1) if _sh else 0.0,
+        "avg_graph_hits": round(sum(_gh) / len(_gh), 1) if _gh else 0.0,
+    }
+
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False)
     )

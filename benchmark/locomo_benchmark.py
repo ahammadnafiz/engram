@@ -208,6 +208,15 @@ Generated answer: {response}
 Return JSON with "reasoning" (one sentence) and "label" (CORRECT or WRONG). Do NOT include both labels."""
 
 
+def _pct(vals: list[float], p: float) -> float:
+    if not vals:
+        return 0.0
+    s = sorted(vals)
+    idx = (len(s) - 1) * p / 100
+    lo, hi = int(idx), min(int(idx) + 1, len(s) - 1)
+    return round(s[lo] + (s[hi] - s[lo]) * (idx - lo), 3)
+
+
 def _preprocess_answer(category: int, answer: str) -> str:
     """Category 3 (open-domain): use only the part before the first semicolon."""
     if category == 3 and ";" in answer:
@@ -381,6 +390,11 @@ async def ingest_conversation(
         user_id=user_id,
         max_memory_chars=max_memory_chars,
     )
+    full_context_chars = sum(
+        len((turn.get("text", "") or "") + (turn.get("blip_caption", "") or ""))
+        for _, _, turns in get_sorted_sessions(conversation)
+        for turn in turns
+    )
 
     t0 = time.perf_counter()
     inserted = 0
@@ -404,6 +418,7 @@ async def ingest_conversation(
         "batches": batches,
         "errors": errors,
         "first_error": first_error,
+        "full_context_chars": full_context_chars,
         "ingest_seconds": round(time.perf_counter() - t0, 3),
     }
 
@@ -830,6 +845,11 @@ async def run_conversation(
         batch_size=ingest_batch_size,
     )
 
+    print(
+        f"[conv{conv_idx}] ingested={ingest_summary.get('inserted')}/"
+        f"{ingest_summary.get('rows')} in {ingest_summary.get('ingest_seconds')}s"
+    )
+
     questions = entry.get("qa", entry.get("qa_pairs", []))
     traces: list[dict[str, Any]] = []
 
@@ -901,6 +921,17 @@ async def run_conversation(
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
 
+        _elapsed = round(time.perf_counter() - start, 3)
+        _retrieval_s = retrieval_trace.get("retrieval_seconds", 0.0)
+        status = "ERR" if error else "OK"
+        retr = retrieval_trace
+        print(
+            f"  [conv{conv_idx}_q{qi}] {status} "
+            f"cat={CATEGORY_NAMES.get(category, category)} "
+            f"search={retr.get('search_hits', '?')} "
+            f"recall={retr.get('recall_intent', '?')} "
+            f"| {_elapsed}s"
+        )
         traces.append({
             "question_id": f"conv{conv_idx}_q{qi}",
             "category": category,
@@ -914,7 +945,10 @@ async def run_conversation(
             "composer_model": composer_model,
             "ingest_summary": ingest_summary,
             "retrieval": retrieval_trace,
-            "elapsed_seconds": round(time.perf_counter() - start, 3),
+            "evidence": evidence,
+            "evidence_chars": len(evidence),
+            "generation_seconds": max(0.0, round(_elapsed - _retrieval_s, 3)),
+            "elapsed_seconds": _elapsed,
             "error": error,
         })
 
@@ -1115,6 +1149,7 @@ async def main() -> None:
     print(f"LLM      : {settings.llm_provider} / {settings.llm_model}")
     print(f"Embedding: {settings.embedding_provider} / {settings.embedding_model}")
     print(f"Judge    : {args.judge_model}")
+    print(f"Rerank   : {args.rerank}  Search-limit: {args.search_limit}  Graph-depth: {args.graph_depth}")
     print(f"Convs    : {conv_indices}  Categories: {[CATEGORY_NAMES.get(c, c) for c in categories]}")
 
     all_traces: list[dict[str, Any]] = []
@@ -1169,26 +1204,12 @@ async def main() -> None:
                         print(f"[conv{conv_idx}] ERROR: {exc}")
                         return
 
-                    print(
-                        f"[conv{conv_idx}] ingested={ingest_summary.get('inserted')}/"
-                        f"{ingest_summary.get('rows')} | answered {len(traces)} questions"
-                    )
+                    print(f"[conv{conv_idx}] done — {len(traces)} questions answered")
 
                     for trace in traces:
                         all_traces.append(trace)
                         traces_file.write(json.dumps(trace, ensure_ascii=False) + "\n")
                         traces_file.flush()
-                        status = "ERR" if trace.get("error") else "OK"
-                        retr = trace.get("retrieval", {})
-                        print(
-                            f"  [{trace['question_id']}] {status} "
-                            f"cat={trace.get('category_name')} "
-                            f"search={retr.get('search_hits', '?')} "
-                            f"recall={retr.get('recall_intent', '?')} "
-                            f"| {trace.get('elapsed_seconds', '?')}s"
-                        )
-                        if trace.get("hypothesis"):
-                            print(f"    answer: {trace['hypothesis'][:100]}")
 
                     if not args.no_purge:
                         try:
@@ -1250,6 +1271,33 @@ async def main() -> None:
         },
         "failed_ids": sorted(j["question_id"] for j in judgments if not j["correct"])[:50],
     }
+
+    _ok = [t for t in all_traces if not t.get("error")]
+    _el = [t.get("elapsed_seconds", 0.0) for t in _ok]
+    _ret = [t.get("retrieval", {}).get("retrieval_seconds", 0.0) for t in _ok]
+    _gen = [t.get("generation_seconds", 0.0) for t in _ok]
+    _ev = [t.get("evidence_chars", 0) for t in _ok if t.get("evidence_chars")]
+    _fc = [t.get("ingest_summary", {}).get("full_context_chars", 0) for t in _ok if t.get("ingest_summary", {}).get("full_context_chars")]
+    _sh = [t.get("retrieval", {}).get("search_hits", 0) for t in _ok]
+    _gh = [t.get("retrieval", {}).get("graph_hits", 0) for t in _ok]
+    _CPT = 4
+    _avg_ev = round(sum(_ev) / len(_ev) / _CPT) if _ev else 0
+    _avg_fc = round(sum(_fc) / len(_fc) / _CPT) if _fc else 0
+    summary["latency"] = {
+        "avg_total_s": round(sum(_el) / len(_el), 3) if _el else 0.0,
+        "p50_total_s": _pct(_el, 50),
+        "p95_total_s": _pct(_el, 95),
+        "avg_retrieval_s": round(sum(_ret) / len(_ret), 3) if _ret else 0.0,
+        "avg_generation_s": round(sum(_gen) / len(_gen), 3) if _gen else 0.0,
+    }
+    summary["context_efficiency"] = {
+        "avg_evidence_tokens": _avg_ev,
+        "avg_full_context_tokens": _avg_fc,
+        "compression_pct": round((1 - _avg_ev / _avg_fc) * 100, 1) if _avg_fc else 0.0,
+        "avg_search_hits": round(sum(_sh) / len(_sh), 1) if _sh else 0.0,
+        "avg_graph_hits": round(sum(_gh) / len(_gh), 1) if _gh else 0.0,
+    }
+
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
 
     _print_scorecard(judgments)
