@@ -298,6 +298,24 @@ If the user is watching the 11th episode of a series is watching it normally, as
 """
 
 
+# ---------------------------------------------------------------------------
+# Frozen "dumb reader" — the control prompt for condition C.
+#
+# This is the naive baseline a developer gets by plugging Engram in and writing
+# a one-line prompt: no counting heuristics, no abstention coaching, no domain
+# quirks, no <mem_thinking> scaffold. It gets exactly two things that are DATA,
+# not task-engineering: today's date (needed for any temporal question) and a
+# one-line gloss of the framework's own [ACTIVE]/[SUPERSEDED] output tags.
+#
+# Run it against the same retrieval + judge as the tuned composer (condition D).
+# The D - C accuracy delta isolates how much of the score comes from the
+# hand-tuned 300-line prompt versus from Engram's retrieved evidence itself.
+# ---------------------------------------------------------------------------
+DUMB_READER_SYSTEM = """You are a helpful assistant. Answer the question using only the memories from the user's past conversations provided below. Today's date is {question_date}.
+
+If the memories contain the answer, give it directly and concisely. If they do not, say you don't have that information. Memories tagged [SUPERSEDED] are outdated values that were later changed — prefer [ACTIVE] ones for the current answer."""
+
+
 # ===========================================================================
 # Judge Prompts (official LongMemEval rubrics)
 # ===========================================================================
@@ -421,6 +439,25 @@ def get_judge_prompt(
 # ===========================================================================
 # Helpers
 # ===========================================================================
+
+def _provider_for_model(model: str) -> str:
+    """Map an LLM model name to its Engram provider id.
+
+    The benchmark answers + judges with Claude/GPT, but a repo .env that points
+    the *chatbot* at Gemini (ENGRAM_LLM_PROVIDER=gemini) would otherwise leak in
+    and ask the Gemini API for a 'claude-*' model -> 404. Deriving the provider
+    from the chosen model keeps the answer LLM consistent regardless of the env
+    default. Returns "" for unknown models (leave the env-configured provider).
+    """
+    m = model.lower()
+    if m.startswith("claude"):
+        return "anthropic"
+    if m.startswith(("gpt", "o1", "o3", "o4", "chatgpt")):
+        return "openai"
+    if m.startswith("gemini"):
+        return "gemini"
+    return ""
+
 
 def _to_human_date(date_str: str) -> str:
     """Convert LongMemEval date format '2023/05/20 (Sat) 02:21' to a human date."""
@@ -915,26 +952,42 @@ async def generate_answer(
     question_date: str,
     evidence: str,
     max_tokens: int,
+    dumb_reader: bool = False,
 ) -> tuple[str, str]:
     """Generate answer from evidence using Engram's LLM.
+
+    With ``dumb_reader=True`` (condition C) the tuned composer prompt and the
+    <mem_thinking> scaffold are replaced by a neutral one-paragraph reader, so
+    the only thing that differs from condition D is the prompt. Everything
+    upstream (retrieval, evidence block) and downstream (judge) is identical.
 
     Returns:
         (answer_text, model_name)
     """
     assert engram.llm is not None
 
-    system = COMPOSER_SYSTEM.format(question_date=question_date)
-
-    # Mirror the reference harness layout: evidence first, the question LAST, and
-    # an explicit "Reasoning and answer:" primer. Question-last plus the primer
-    # measurably reduces premature abstention vs. a bare question turn.
-    user_prompt = (
-        f"<engram_memory_evidence>\n{evidence}\n</engram_memory_evidence>\n\n"
-        f"Today's Date: {question_date}\n"
-        f"Question: {question}\n\n"
-        "IMPORTANT: You MUST provide your full thinking in <mem_thinking> tags "
-        "BEFORE giving your answer.\nReasoning and answer:"
-    )
+    if dumb_reader:
+        # Condition C: neutral reader, no scaffold, no primer. Just answer.
+        system = DUMB_READER_SYSTEM.format(question_date=question_date)
+        user_prompt = (
+            f"<memories>\n{evidence}\n</memories>\n\n"
+            f"Today's Date: {question_date}\n"
+            f"Question: {question}\n\n"
+            "Answer:"
+        )
+    else:
+        # Condition D: the tuned composer. Mirror the reference harness layout:
+        # evidence first, the question LAST, and an explicit "Reasoning and
+        # answer:" primer. Question-last plus the primer measurably reduces
+        # premature abstention vs. a bare question turn.
+        system = COMPOSER_SYSTEM.format(question_date=question_date)
+        user_prompt = (
+            f"<engram_memory_evidence>\n{evidence}\n</engram_memory_evidence>\n\n"
+            f"Today's Date: {question_date}\n"
+            f"Question: {question}\n\n"
+            "IMPORTANT: You MUST provide your full thinking in <mem_thinking> tags "
+            "BEFORE giving your answer.\nReasoning and answer:"
+        )
     resp = await engram.llm.complete_full(
         [
             {"role": "system", "content": system},
@@ -1081,6 +1134,7 @@ async def run_sample(
     ingest_batch_size: int,
     max_per_session: int,
     rerank: bool = False,
+    dumb_reader: bool = False,
 ) -> dict[str, Any]:
     """Run a single LongMemEval question end-to-end."""
     question_id = str(sample["question_id"])
@@ -1132,6 +1186,7 @@ async def run_sample(
             hypothesis, composer_model = await generate_answer(
                 engram, question, question_date, evidence,
                 max_tokens=answer_max_tokens,
+                dumb_reader=dumb_reader,
             )
         else:
             error = "No LLM configured; cannot generate answer"
@@ -1190,6 +1245,17 @@ def parse_args() -> argparse.Namespace:
         "--llm-model",
         default=DEFAULT_LLM_MODEL,
         help=f"LLM model for recall + answer composition (default {DEFAULT_LLM_MODEL}). Ingestion uses embeddings only.",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=("anthropic", "openai", "gemini"),
+        default=None,
+        help=(
+            "Force the answer LLM provider. Default: derived from --llm-model "
+            "(claude-* -> anthropic, gpt-* -> openai, gemini-* -> gemini), which "
+            "overrides any ENGRAM_LLM_PROVIDER from .env so a chatbot-oriented "
+            "Gemini default doesn't hijack a Claude benchmark run."
+        ),
     )
     parser.add_argument(
         "--embedding-provider",
@@ -1281,6 +1347,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dumb-reader",
+        action="store_true",
+        help=(
+            "ABLATION (condition C): replace the tuned composer prompt with a "
+            "neutral one-paragraph reader, holding ingest/retrieval/judge "
+            "identical. Run with and without this flag on the same sample set; "
+            "the accuracy delta isolates how much the hand-tuned prompt "
+            "contributes versus Engram's retrieved evidence itself."
+        ),
+    )
+    parser.add_argument(
         "--answer-max-tokens",
         type=int,
         default=4000,
@@ -1334,6 +1411,14 @@ def parse_args() -> argparse.Namespace:
         "answer generation). Cheapest way to apply judge fixes.",
     )
     parser.add_argument(
+        "--score-retrieval",
+        type=Path,
+        help="Prompt-free retrieval scoring of an existing traces.jsonl: "
+        "joins retrieved_session_ids against the dataset's gold "
+        "answer_session_ids and reports hit-rate (answer-in-context ceiling) "
+        "and mean recall. No DB, no LLM, no judge.",
+    )
+    parser.add_argument(
         "--smoke-test",
         action="store_true",
         help="Run only the 22 curated smoke-test questions (quick validation).",
@@ -1384,6 +1469,112 @@ def load_samples(path: Path, args: argparse.Namespace) -> list[dict[str, Any]]:
     return data
 
 
+def score_retrieval(args: argparse.Namespace) -> None:
+    """Prompt-free retrieval quality, computed from an existing traces.jsonl.
+
+    The framework's job at read time is to surface the gold answer session(s).
+    This joins each trace's ``retrieval.retrieved_session_ids`` against the
+    dataset's gold ``answer_session_ids`` and reports:
+
+      - hit-rate  : % of questions where >=1 gold session was retrieved. This is
+                    the HARD CEILING on answer accuracy -- no reader, dumb or
+                    tuned, can answer a question whose evidence never made the
+                    evidence block. Compare it to the C/D answer accuracy:
+                      * answer_acc ~ hit-rate  -> retrieval is the bottleneck.
+                      * answer_acc << hit-rate -> the reader is losing answers
+                        that WERE retrieved (prompt/composition problem).
+      - recall    : mean |gold ∩ retrieved| / |gold| (partial credit for
+                    multi-session-gold questions).
+
+    No DB, no LLM, no judge -- pure set math over the trace file. Retrieval is
+    identical between conditions C and D, so either run's traces give the same
+    number. _abs (intentionally unanswerable) questions are broken out
+    separately: scoring retrieval recall on them is meaningless.
+    """
+    traces = [
+        json.loads(line)
+        for line in args.score_retrieval.read_text().splitlines()
+        if line.strip()
+    ]
+    data = json.loads(args.data_path.read_text())
+    gold_by_id: dict[str, set[str]] = {
+        str(s["question_id"]): set(map(str, s.get("answer_session_ids") or []))
+        for s in data
+    }
+
+    # [n, hits, recall_sum] per bucket.
+    overall = [0, 0, 0.0]
+    by_type: dict[str, list[float]] = collections.defaultdict(lambda: [0, 0, 0.0])
+    abst = [0, 0, 0.0]
+    missing_gold = 0
+
+    for t in traces:
+        qid = str(t.get("question_id", ""))
+        gold = gold_by_id.get(qid)
+        if not gold:
+            missing_gold += 1
+            continue
+        retrieved = set(map(str, t.get("retrieval", {}).get("retrieved_session_ids", [])))
+        inter = gold & retrieved
+        hit = 1 if inter else 0
+        recall = len(inter) / len(gold)
+
+        bucket = abst if qid.endswith("_abs") else overall
+        bucket[0] += 1
+        bucket[1] += hit
+        bucket[2] += recall
+        if not qid.endswith("_abs"):
+            bt = by_type[t.get("question_type", "")]
+            bt[0] += 1
+            bt[1] += hit
+            bt[2] += recall
+
+    def fmt(b: list[float]) -> str:
+        n = b[0]
+        if not n:
+            return "no questions"
+        return (
+            f"hit-rate {b[1]}/{n} = {b[1] / n * 100:.1f}%  |  "
+            f"mean recall {b[2] / n * 100:.1f}%"
+        )
+
+    print("\n" + "=" * 60)
+    print(f"RETRIEVAL QUALITY (prompt-free)  from {args.score_retrieval}")
+    print(f"answerable ({overall[0]} q): {fmt(overall)}")
+    print("\nby question_type (answerable only):")
+    for qtype, b in sorted(by_type.items()):
+        print(f"  {qtype:35s} {fmt(b)}")
+    if abst[0]:
+        print(f"\n_abs ({abst[0]} q, retrieval recall is not meaningful here): {fmt(abst)}")
+    if missing_gold:
+        print(f"\n[warn] {missing_gold} trace(s) had no gold in the dataset (skipped)")
+
+    summary = {
+        "source_traces": str(args.score_retrieval),
+        "answerable": {
+            "n": overall[0],
+            "hit_rate": round(overall[1] / overall[0], 4) if overall[0] else 0.0,
+            "mean_recall": round(overall[2] / overall[0], 4) if overall[0] else 0.0,
+        },
+        "by_question_type": {
+            qtype: {
+                "n": b[0],
+                "hit_rate": round(b[1] / b[0], 4),
+                "mean_recall": round(b[2] / b[0], 4),
+            }
+            for qtype, b in sorted(by_type.items())
+        },
+        "abstention_excluded": {
+            "n": abst[0],
+            "hit_rate": round(abst[1] / abst[0], 4) if abst[0] else 0.0,
+        },
+    }
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    out = args.output_dir / "retrieval_score.json"
+    out.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    print(f"\nretrieval score written to {out}")
+
+
 async def rejudge_only(args: argparse.Namespace) -> None:
     """Re-score an existing traces.jsonl with the current judge logic."""
     traces = [
@@ -1421,6 +1612,10 @@ async def rejudge_only(args: argparse.Namespace) -> None:
 async def main() -> None:
     args = parse_args()
 
+    if args.score_retrieval is not None:
+        score_retrieval(args)
+        return
+
     if args.rejudge_only is not None:
         await rejudge_only(args)
         return
@@ -1438,14 +1633,20 @@ async def main() -> None:
 
     # Build Engram settings: Anthropic LLM + Gemini embeddings (overridable via CLI)
     settings = get_settings()
-    settings = settings.model_copy(update={
+    settings_update: dict[str, Any] = {
         "llm_model": args.llm_model,
         "embedding_provider": args.embedding_provider,
         "embedding_model": args.embedding_model,
         "embedding_dimension": args.embedding_dimension,
         "allow_embedding_dimension_change": True,
         "near_duplicate_threshold": 1.0,  # keep all benchmark memories
-    })
+    }
+    # Reconcile the provider with the chosen model so a .env that points the
+    # chatbot at Gemini can't make the benchmark ask Gemini for a Claude model.
+    llm_provider = args.llm_provider or _provider_for_model(args.llm_model)
+    if llm_provider:
+        settings_update["llm_provider"] = llm_provider
+    settings = settings.model_copy(update=settings_update)
 
     engram = Engram(settings=settings, memory_policy=BENCHMARK_POLICY)
     await engram.connect()
@@ -1477,6 +1678,7 @@ async def main() -> None:
     print(f"LLM provider : {settings.llm_provider} / {settings.llm_model}")
     print(f"Embedding    : {settings.embedding_provider} / {settings.embedding_model}")
     print(f"Judge model  : {args.judge_model}")
+    print(f"Reader       : {'DUMB (condition C — ablation)' if args.dumb_reader else 'tuned composer (condition D)'}")
     print(f"Ingest       : add_batch / unit={args.memory_unit} "
           f"batch={args.ingest_batch_size} max_chars={args.max_memory_chars}")
     print(f"Samples      : {len(samples)}")
@@ -1520,6 +1722,7 @@ async def main() -> None:
                             ingest_batch_size=args.ingest_batch_size,
                             max_per_session=args.max_per_session,
                             rerank=args.rerank,
+                            dumb_reader=args.dumb_reader,
                         )
                     except Exception as exc:
                         if args.fail_fast:
@@ -1609,6 +1812,7 @@ async def main() -> None:
         "ingest_batch_size": args.ingest_batch_size,
         "search_limit": args.search_limit,
         "rerank": args.rerank,
+        "reader": "dumb (condition C)" if args.dumb_reader else "tuned composer (condition D)",
         "graph_depth": args.graph_depth,
         "answer_max_tokens": args.answer_max_tokens,
         "total": total,
