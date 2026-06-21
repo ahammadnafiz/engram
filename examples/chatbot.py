@@ -52,23 +52,68 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+# ---------------------------------------------------------------------------
+# Rich — optional but strongly recommended for beautiful terminal output.
+# ---------------------------------------------------------------------------
+try:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from rich.theme import Theme
+
+    _ENGRAM_THEME = Theme(
+        {
+            "engram.accent": "cyan",
+            "engram.dim": "dim",
+            "engram.good": "green",
+            "engram.warn": "yellow",
+            "engram.bad": "red bold",
+            "engram.heading": "bold cyan",
+            "engram.key": "dim cyan",
+            "engram.value": "",
+            "engram.cmd": "bold cyan",
+            "engram.cmd_desc": "dim",
+            "engram.prompt_you": "bold cyan",
+            "engram.prompt_arrow": "dim",
+        }
+    )
+    console = Console(theme=_ENGRAM_THEME, highlight=False)
+    HAS_RICH = True
+except ImportError:  # pragma: no cover
+    HAS_RICH = False
+    console = None  # type: ignore[assignment]
+
 from engram.core.exceptions import DatabaseConnectionError
 
 gemini_api_key_alias = os.environ.get("GEMINI_API_KEY")
+anthropic_api_key_alias = os.environ.get("ANTHROPIC_API_KEY")
 load_dotenv(Path(__file__).parent.parent / ".env", override=False)
 gemini_api_key_alias = os.environ.get("GEMINI_API_KEY") or gemini_api_key_alias
+anthropic_api_key_alias = os.environ.get("ANTHROPIC_API_KEY") or anthropic_api_key_alias
 
-# Map the bare google-genai convention key onto Engram's namespaced variable.
+# Map the bare convention keys onto Engram's namespaced variable.
 if gemini_api_key_alias and "ENGRAM_GEMINI_API_KEY" not in os.environ:
     os.environ["ENGRAM_GEMINI_API_KEY"] = gemini_api_key_alias
+if anthropic_api_key_alias and "ENGRAM_ANTHROPIC_API_KEY" not in os.environ:
+    os.environ["ENGRAM_ANTHROPIC_API_KEY"] = anthropic_api_key_alias
 
-# Optimized default stack: free on-device embeddings + Gemini for responses.
+# Optimized default stack: free on-device embeddings + Gemini/Claude for responses.
 # setdefault keeps any value already supplied via the environment or .env.
 os.environ.setdefault("ENGRAM_EMBEDDING_PROVIDER", "sentence-transformers")
 os.environ.setdefault("ENGRAM_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 os.environ.setdefault("ENGRAM_EMBEDDING_DIMENSION", "384")
+
+os.environ.setdefault("ENGRAM_GEMINI_MODEL", "gemini-3.1-flash-lite")
+os.environ.setdefault("ENGRAM_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
 os.environ.setdefault("ENGRAM_LLM_PROVIDER", "gemini")
-os.environ.setdefault("ENGRAM_LLM_MODEL", "gemini-3.1-flash-lite")
+provider = os.environ["ENGRAM_LLM_PROVIDER"].lower()
+if provider in ("gemini", "google"):
+    os.environ.setdefault("ENGRAM_LLM_MODEL", os.environ["ENGRAM_GEMINI_MODEL"])
+elif provider in ("anthropic", "claude"):
+    os.environ.setdefault("ENGRAM_LLM_MODEL", os.environ["ENGRAM_ANTHROPIC_MODEL"])
 
 AGENT_ID = os.environ.get("ENGRAM_CHATBOT_AGENT_ID", "engram-chatbot")
 USER_ID = os.environ.get("ENGRAM_CHATBOT_USER_ID", "default-user")
@@ -190,6 +235,15 @@ def terminal_width() -> int:
 
 
 def rule(label: str = "") -> str:
+    if HAS_RICH:
+        # Return empty — callers that use rule() as a separator will be
+        # replaced by richer equivalents.  Keep it functional for fallback
+        # callers that print(rule(...)).
+        width = terminal_width()
+        if not label:
+            return dim("─" * width)
+        prefix = f" {label} "
+        return dim(prefix + "─" * max(0, width - len(prefix)))
     width = terminal_width()
     if not label:
         return dim("-" * width)
@@ -198,6 +252,22 @@ def rule(label: str = "") -> str:
 
 
 def print_header() -> None:
+    if HAS_RICH:
+        console.print()
+        title = Text()
+        title.append("🧠 Engram Memory Chat", style="bold cyan")
+        title.append("  ·  ", style="dim")
+        title.append("benchmark pipeline · second brain", style="dim italic")
+        console.print(
+            Panel(
+                title,
+                border_style="cyan",
+                padding=(0, 2),
+                subtitle="[dim italic]Type a message to chat, or /help for commands[/]",
+                subtitle_align="left",
+            )
+        )
+        return
     print()
     print(rule("engram"))
     print(f"{bold('Engram Memory Chat')} | {dim('benchmark pipeline · second brain')}")
@@ -205,11 +275,53 @@ def print_header() -> None:
 
 
 def print_table(rows: list[tuple[str, Any]]) -> None:
+    if HAS_RICH:
+        table = Table(
+            show_header=False,
+            show_edge=False,
+            box=None,
+            padding=(0, 1, 0, 2),
+            expand=False,
+        )
+        table.add_column("Key", style="engram.key", min_width=18)
+        table.add_column("Value", style="engram.value")
+        for key, value in rows:
+            table.add_row(key, str(value))
+        console.print(table)
+        return
     for key, value in rows:
         print(f"{dim(f'{key:<20}')} {value}")
 
 
 def print_status_panel(rows: list[tuple[str, Any]]) -> None:
+    if HAS_RICH:
+        print_header()
+        table = Table(
+            show_header=False,
+            show_edge=False,
+            box=None,
+            padding=(0, 1),
+            expand=False,
+        )
+        table.add_column("Key", style="engram.key", min_width=18)
+        table.add_column("Value", style="engram.value")
+        for key, value in rows:
+            # Colorize health value
+            if key == "health":
+                style = "green bold" if str(value) == "healthy" else "yellow bold"
+                table.add_row(key, Text(str(value), style=style))
+            else:
+                table.add_row(key, str(value))
+        console.print(
+            Panel(
+                table,
+                title="[bold]session[/]",
+                title_align="left",
+                border_style="dim cyan",
+                padding=(0, 1),
+            )
+        )
+        return
     print_header()
     print(rule("session"))
     print_table(rows)
@@ -217,6 +329,26 @@ def print_status_panel(rows: list[tuple[str, Any]]) -> None:
 
 
 def print_notice(message: str, *, level: str = "info") -> None:
+    if HAS_RICH:
+        style_map = {
+            "info": "engram.accent",
+            "ok": "engram.good",
+            "warn": "engram.warn",
+            "error": "engram.bad",
+        }
+        prefix_map = {
+            "info": "▸ engram",
+            "ok": "✓ engram",
+            "warn": "⚠ engram",
+            "error": "✗ error",
+        }
+        style = style_map.get(level, "engram.accent")
+        prefix = prefix_map.get(level, "▸ engram")
+        text = Text()
+        text.append(prefix, style=style)
+        text.append(f"  {message}", style="dim")
+        console.print(text)
+        return
     prefix = {
         "info": accent("engram"),
         "ok": good("engram"),
@@ -227,6 +359,21 @@ def print_notice(message: str, *, level: str = "info") -> None:
 
 
 def print_response(text: str) -> None:
+    if HAS_RICH:
+        console.print()
+        md = Markdown(text, code_theme="monokai")
+        console.print(
+            Panel(
+                md,
+                title="[bold cyan]assistant[/]",
+                title_align="left",
+                border_style="cyan",
+                padding=(1, 2),
+                expand=True,
+            )
+        )
+        return
+    # Fallback: plain text rendering
     width = terminal_width() - 4
     print()
     print(f"{accent('assistant')} {dim('-' * max(1, terminal_width() - 10))}")
@@ -250,18 +397,38 @@ def print_response(text: str) -> None:
 
 
 def prompt_text() -> str:
+    if HAS_RICH:
+        # Rich markup is stripped by input(), so we bake ANSI via console.export.
+        you = Text("you", style="bold cyan")
+        arrow = Text(" › ", style="dim")
+        combined = Text()
+        combined.append_text(you)
+        combined.append_text(arrow)
+        with console.capture() as capture:
+            console.print(combined, end="")
+        return capture.get()
     return f"{accent('you')} {dim('> ')}" if COLOR_ENABLED else "you> "
 
 
 def require_real_config() -> None:
     if RERANK_MODE not in VALID_RERANK_MODES:
-        raise SystemExit("Invalid ENGRAM_CHATBOT_RERANK. Use 'true' or 'false'.")
-    if not os.environ.get("ENGRAM_GEMINI_API_KEY"):
-        raise SystemExit(
-            "Missing required environment variable: ENGRAM_GEMINI_API_KEY "
-            "(or GEMINI_API_KEY).\nGet a key at https://aistudio.google.com/apikey "
-            "and set it before running the chatbot."
-        )
+        raise ValueError("Invalid ENGRAM_CHATBOT_RERANK. Use 'true' or 'false'.")
+
+    provider = os.environ.get("ENGRAM_LLM_PROVIDER", "gemini").lower()
+    if provider in ("gemini", "google"):
+        if not os.environ.get("ENGRAM_GEMINI_API_KEY"):
+            raise ValueError(
+                "Missing required environment variable: ENGRAM_GEMINI_API_KEY "
+                "(or GEMINI_API_KEY).\nGet a key at https://aistudio.google.com/apikey "
+                "and set it before running the chatbot."
+            )
+    elif provider in ("anthropic", "claude"):
+        if not os.environ.get("ENGRAM_ANTHROPIC_API_KEY"):
+            raise ValueError(
+                "Missing required environment variable: ENGRAM_ANTHROPIC_API_KEY "
+                "(or ANTHROPIC_API_KEY).\nGet a key at https://console.anthropic.com/ "
+                "and set it before running the chatbot."
+            )
 
 
 # ===========================================================================
@@ -521,6 +688,49 @@ class MemoryChatbot:
 
     def _rerank_enabled(self) -> bool:
         return RERANK_MODE == "true"
+
+    async def switch_model(self, model_choice: str) -> None:
+        model_choice = model_choice.lower()
+        if model_choice not in ("gemini", "claude", "anthropic"):
+            print_notice("Invalid model choice. Use 'gemini' or 'claude'.", level="warn")
+            return
+
+        print_notice(f"Switching model to {model_choice}...")
+
+        # Save current state to revert if needed
+        prev_provider = os.environ.get("ENGRAM_LLM_PROVIDER")
+        prev_model = os.environ.get("ENGRAM_LLM_MODEL")
+
+        from engram.core.config import clear_settings_cache
+
+        if model_choice == "gemini":
+            os.environ["ENGRAM_LLM_PROVIDER"] = "gemini"
+            os.environ["ENGRAM_LLM_MODEL"] = os.environ.get("ENGRAM_GEMINI_MODEL", "gemini-3.1-flash-lite")
+        else:
+            os.environ["ENGRAM_LLM_PROVIDER"] = "anthropic"
+            os.environ["ENGRAM_LLM_MODEL"] = os.environ.get("ENGRAM_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
+        try:
+            require_real_config()
+        except ValueError as exc:
+            print_notice(str(exc), level="error")
+            print_notice("Reverting to previous model...", level="warn")
+            if prev_provider: os.environ["ENGRAM_LLM_PROVIDER"] = prev_provider
+            if prev_model: os.environ["ENGRAM_LLM_MODEL"] = prev_model
+            return
+
+        await self.close()
+        clear_settings_cache()
+
+        try:
+            await self.connect()
+        except Exception as exc:
+            print_notice(f"Failed to connect with new model: {exc}", level="error")
+            print_notice("Reverting to previous model...", level="warn")
+            if prev_provider: os.environ["ENGRAM_LLM_PROVIDER"] = prev_provider
+            if prev_model: os.environ["ENGRAM_LLM_MODEL"] = prev_model
+            clear_settings_cache()
+            await self.connect()
 
     # -- the pipeline ------------------------------------------------------
 
@@ -910,12 +1120,47 @@ COMMANDS = [
     ("/evidence <query>", "show the 4-surface evidence block for a query"),
     ("/forget <memory_id>", "delete one memory"),
     ("/clear", "purge this chatbot user's memories"),
+    ("/model <gemini|claude>", "switch the LLM model"),
     ("/help", "show this command palette"),
     ("/quit", "exit"),
 ]
 
 
 def print_help() -> None:
+    if HAS_RICH:
+        table = Table(
+            show_header=False,
+            show_edge=False,
+            box=None,
+            padding=(0, 1),
+            expand=False,
+        )
+        table.add_column("Command", style="engram.cmd", no_wrap=True)
+        table.add_column("Description", style="engram.cmd_desc")
+        for command, description in COMMANDS:
+            table.add_row(command, description)
+
+        group = Text()
+        group.append_text(Text.from_markup("\n"))
+        footer = Text(
+            "Plain text runs the benchmark pipeline: "
+            "retrieve (search + recall + lineage + graph) → compose → "
+            "store the turn via add_batch.",
+            style="dim italic",
+        )
+        console.print()
+        console.print(
+            Panel(
+                table,
+                title="[bold]commands[/]",
+                title_align="left",
+                border_style="dim cyan",
+                padding=(1, 2),
+                subtitle=footer,
+                subtitle_align="left",
+            )
+        )
+        return
     print()
     print(rule("commands"))
     width = max(len(command) for command, _ in COMMANDS)
@@ -980,6 +1225,8 @@ async def run_command(bot: MemoryChatbot, line: str) -> bool:
         await bot.evidence(rest)
     elif command == "/forget" and rest:
         await bot.forget(rest)
+    elif command == "/model" and rest:
+        await bot.switch_model(rest)
     elif command == "/clear":
         clear_prompt = (
             warn("clear") + " " + dim("Delete this user's chatbot memories? y/N: ")
@@ -1060,6 +1307,9 @@ async def main(argv: list[str] | None = None) -> None:
             "in .env may differ from an older existing Docker volume.",
             level="warn",
         )
+        return
+    except ValueError as exc:
+        print_notice(str(exc), level="error")
         return
     try:
         if args.demo:

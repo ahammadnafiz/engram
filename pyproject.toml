@@ -79,6 +79,7 @@ rerank-onnx = [
 ]
 examples = [
     "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
 ]
 all = [
     "openai>=1.0.0",
