@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 768" width="100%" height="100%" style="background-color:#060608;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <defs>
+    <marker id="arrT2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 1.5 L8.5 5 L0 8.5" fill="none" stroke="#4a4a55" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+  </defs>
+
+  <rect width="1280" height="768" fill="#060608" />
+  <rect x="592" y="0" width="96" height="4" rx="2" fill="#6d5dfb" />
+
+  <!-- Header -->
+  <text x="640" y="92" text-anchor="middle" font-size="46" font-weight="800" fill="#fbfbfd" letter-spacing="-0.5">Two-column memory</text>
+  <text x="640" y="132" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">Each memory stores a concise fact and its full source context in one row. Only the fact is embedded —</text>
+  <text x="640" y="156" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">recall stays sharp and cheap, while the original text is preserved verbatim for grounding.</text>
+
+  <!-- Panel -->
+  <rect x="48" y="188" width="1184" height="566" rx="20" fill="#0b0b0f" stroke="#1c1c24" stroke-width="1" />
+
+  <!-- FACT lane -->
+  <rect x="96" y="232" width="1088" height="160" rx="14" fill="#0c1326" stroke="#223e72" stroke-width="1" />
+  <text x="120" y="262" font-size="14" font-weight="700" fill="#e9eefb">fact</text>
+  <text x="156" y="262" font-size="11" font-weight="500" fill="#7388b6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">· embedded column</text>
+  <text x="1160" y="262" text-anchor="end" font-size="9" font-weight="600" fill="#9fb6e6" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">COST · EMBEDDING COMPUTE</text>
+
+  <rect x="120" y="300" width="232" height="64" rx="9" fill="#0e1830" stroke="#2a4a82" stroke-width="1" />
+  <text x="236" y="328" text-anchor="middle" font-size="13" font-weight="600" fill="#eef2fb">Concise fact</text>
+  <text x="236" y="346" text-anchor="middle" font-size="8.5" font-weight="500" fill="#7f93bf" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">EXTRACTED VALUE</text>
+
+  <rect x="389" y="300" width="232" height="64" rx="9" fill="#0e1830" stroke="#2a4a82" stroke-width="1" />
+  <text x="505" y="328" text-anchor="middle" font-size="13" font-weight="600" fill="#eef2fb">Embedded</text>
+  <text x="505" y="346" text-anchor="middle" font-size="8.5" font-weight="500" fill="#7f93bf" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">VECTOR(d) · HNSW</text>
+
+  <rect x="658" y="300" width="232" height="64" rx="9" fill="#0e1830" stroke="#2a4a82" stroke-width="1" />
+  <text x="774" y="328" text-anchor="middle" font-size="13" font-weight="600" fill="#eef2fb">Vector + keyword</text>
+  <text x="774" y="346" text-anchor="middle" font-size="8.5" font-weight="500" fill="#7f93bf" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">HYBRID SEARCH</text>
+
+  <rect x="927" y="300" width="234" height="64" rx="9" fill="#0e1830" stroke="#2a4a82" stroke-width="1" />
+  <text x="1044" y="328" text-anchor="middle" font-size="13" font-weight="600" fill="#eef2fb">In prompt context</text>
+  <text x="1044" y="346" text-anchor="middle" font-size="8.5" font-weight="500" fill="#7f93bf" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">RETURNED TO CALLER</text>
+
+  <line x1="352" y1="332" x2="389" y2="332" stroke="#3a4a6a" stroke-width="1.3" marker-end="url(#arrT2)" />
+  <line x1="621" y1="332" x2="658" y2="332" stroke="#3a4a6a" stroke-width="1.3" marker-end="url(#arrT2)" />
+  <line x1="890" y1="332" x2="927" y2="332" stroke="#3a4a6a" stroke-width="1.3" marker-end="url(#arrT2)" />
+
+  <!-- MAIN lane -->
+  <rect x="96" y="412" width="1088" height="160" rx="14" fill="#1d1810" stroke="#5f4a1e" stroke-width="1" />
+  <text x="120" y="442" font-size="14" font-weight="700" fill="#f6efdd">main_content</text>
+  <text x="226" y="442" font-size="11" font-weight="500" fill="#b59a5e" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">· context column</text>
+  <text x="1160" y="442" text-anchor="end" font-size="9" font-weight="600" fill="#d8b765" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">COST · STORAGE ONLY</text>
+
+  <rect x="120" y="480" width="232" height="64" rx="9" fill="#241d10" stroke="#5f4a1e" stroke-width="1" />
+  <text x="236" y="508" text-anchor="middle" font-size="13" font-weight="600" fill="#f6efdd">Source text</text>
+  <text x="236" y="526" text-anchor="middle" font-size="8.5" font-weight="500" fill="#b59a5e" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">CONVERSATION · CHUNK</text>
+
+  <rect x="389" y="480" width="232" height="64" rx="9" fill="#241d10" stroke="#5f4a1e" stroke-width="1" />
+  <text x="505" y="508" text-anchor="middle" font-size="13" font-weight="600" fill="#f6efdd">Not embedded</text>
+  <text x="505" y="526" text-anchor="middle" font-size="8.5" font-weight="500" fill="#b59a5e" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">NO VECTOR COST</text>
+
+  <rect x="658" y="480" width="232" height="64" rx="9" fill="#241d10" stroke="#5f4a1e" stroke-width="1" />
+  <text x="774" y="508" text-anchor="middle" font-size="13" font-weight="600" fill="#f6efdd">Not ranked</text>
+  <text x="774" y="526" text-anchor="middle" font-size="8.5" font-weight="500" fill="#b59a5e" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">SKIPS SCORING</text>
+
+  <rect x="927" y="480" width="234" height="64" rx="9" fill="#241d10" stroke="#5f4a1e" stroke-width="1" />
+  <text x="1044" y="508" text-anchor="middle" font-size="13" font-weight="600" fill="#f6efdd">Supporting context</text>
+  <text x="1044" y="526" text-anchor="middle" font-size="8.5" font-weight="500" fill="#b59a5e" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">GROUNDING / CITATION</text>
+
+  <line x1="352" y1="512" x2="389" y2="512" stroke="#6a5526" stroke-width="1.3" marker-end="url(#arrT2)" />
+  <line x1="621" y1="512" x2="658" y2="512" stroke="#6a5526" stroke-width="1.3" marker-end="url(#arrT2)" />
+  <line x1="890" y1="512" x2="927" y2="512" stroke="#6a5526" stroke-width="1.3" marker-end="url(#arrT2)" />
+
+  <!-- bottom note -->
+  <text x="640" y="624" text-anchor="middle" font-size="11" font-weight="600" fill="#9a9aa4">One row, two columns — sharp recall on facts, verbatim source for grounding, no extra embedding cost.</text>
+
+  <!-- Footer -->
+  <text x="640" y="724" text-anchor="middle" font-size="11" font-weight="600" fill="#55555f" letter-spacing="4" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">TWO-COLUMN MEMORY</text>
+</svg>

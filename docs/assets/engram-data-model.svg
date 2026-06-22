@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 768" width="100%" height="100%" style="background-color:#060608;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <defs>
+    <marker id="arrD" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 1.5 L8.5 5 L0 8.5" fill="none" stroke="#4a4a55" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+  </defs>
+
+  <rect width="1280" height="768" fill="#060608" />
+  <rect x="592" y="0" width="96" height="4" rx="2" fill="#6d5dfb" />
+
+  <!-- Header -->
+  <text x="640" y="92" text-anchor="middle" font-size="46" font-weight="800" fill="#fbfbfd" letter-spacing="-0.5">Storage data model</text>
+  <text x="640" y="132" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">A two-column memory row — fact (embedded) plus main_content (context, not embedded) — carries its own</text>
+  <text x="640" y="156" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">vector, full-text vectors, and version lineage. Lineages track the head; relations form the graph.</text>
+
+  <!-- Panel -->
+  <rect x="48" y="188" width="1184" height="566" rx="20" fill="#0b0b0f" stroke="#1c1c24" stroke-width="1" />
+
+  <!-- Parents: agents / users -->
+  <rect x="80" y="262" width="190" height="66" rx="9" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="175" y="290" text-anchor="middle" font-size="13.5" font-weight="600" fill="#f1f1f4">agents</text>
+  <text x="175" y="308" text-anchor="middle" font-size="8" font-weight="500" fill="#6e6e79" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">PK agent_id</text>
+
+  <rect x="80" y="360" width="190" height="66" rx="9" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="175" y="388" text-anchor="middle" font-size="13.5" font-weight="600" fill="#f1f1f4">users</text>
+  <text x="175" y="406" text-anchor="middle" font-size="8" font-weight="500" fill="#6e6e79" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">PK user_id</text>
+
+  <!-- FK lines parents -> agent_memory -->
+  <line x1="270" y1="295" x2="362" y2="320" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arrD)" />
+  <line x1="270" y1="393" x2="362" y2="360" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arrD)" />
+
+  <!-- Central: agent_memory -->
+  <rect x="364" y="232" width="404" height="380" rx="12" fill="#0e1830" stroke="#2a4a82" stroke-width="1.3" />
+  <rect x="364" y="232" width="404" height="40" rx="12" fill="#10203c" stroke="#2a4a82" stroke-width="1.3" />
+  <rect x="364" y="258" width="404" height="14" fill="#10203c" />
+  <text x="384" y="259" font-size="15" font-weight="700" fill="#eef2fb">agent_memory</text>
+  <text x="748" y="258" text-anchor="end" font-size="8.5" font-weight="500" fill="#7f93bf" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">CORE ROW</text>
+
+  <!-- columns -->
+  <g font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">
+    <text x="384" y="298" font-size="11.5" font-weight="600" fill="#cfe0fa">memory_id</text>
+    <text x="748" y="298" text-anchor="end" font-size="9.5" fill="#7f93bf">PK</text>
+
+    <text x="384" y="324" font-size="11.5" font-weight="500" fill="#aabfe0">agent_id · user_id · session_id</text>
+    <text x="748" y="324" text-anchor="end" font-size="9.5" fill="#6f84ad">FK</text>
+
+    <text x="384" y="350" font-size="11.5" font-weight="600" fill="#e9eefb">fact</text>
+    <text x="748" y="350" text-anchor="end" font-size="9.5" fill="#6f84ad">TEXT · embedded</text>
+
+    <text x="384" y="376" font-size="11.5" font-weight="500" fill="#aabfe0">main_content</text>
+    <text x="748" y="376" text-anchor="end" font-size="9.5" fill="#6f84ad">TEXT · not embedded</text>
+
+    <text x="384" y="402" font-size="11.5" font-weight="600" fill="#cfe0fa">embedding</text>
+    <text x="748" y="402" text-anchor="end" font-size="9.5" fill="#6f84ad">VECTOR · HNSW</text>
+
+    <text x="384" y="428" font-size="11.5" font-weight="500" fill="#aabfe0">fact_tsv · main_content_tsv</text>
+    <text x="748" y="428" text-anchor="end" font-size="9.5" fill="#6f84ad">TSVECTOR · GIN</text>
+
+    <text x="384" y="454" font-size="11.5" font-weight="500" fill="#aabfe0">memory_type</text>
+    <text x="748" y="454" text-anchor="end" font-size="9.5" fill="#6f84ad">10 TYPES</text>
+
+    <text x="384" y="480" font-size="11.5" font-weight="500" fill="#aabfe0">importance · access_count</text>
+    <text x="748" y="480" text-anchor="end" font-size="9.5" fill="#6f84ad">RANK SIGNALS</text>
+
+    <text x="384" y="506" font-size="11.5" font-weight="600" fill="#cfe0fa">lineage_id · revision · status</text>
+    <text x="748" y="506" text-anchor="end" font-size="9.5" fill="#6f84ad">VERSIONING</text>
+
+    <text x="384" y="532" font-size="11.5" font-weight="500" fill="#aabfe0">superseded_by · valid_from/to</text>
+    <text x="748" y="532" text-anchor="end" font-size="9.5" fill="#6f84ad">HISTORY</text>
+
+    <text x="384" y="558" font-size="11.5" font-weight="500" fill="#aabfe0">metadata</text>
+    <text x="748" y="558" text-anchor="end" font-size="9.5" fill="#6f84ad">JSONB · GIN</text>
+  </g>
+  <line x1="380" y1="574" x2="752" y2="574" stroke="#2a4a82" stroke-width="1" stroke-dasharray="2 3" />
+  <text x="384" y="595" font-size="9" font-weight="600" fill="#9fb6e6" letter-spacing="0.4" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">UNIQUE(agent, user, md5(fact)) WHERE status = active</text>
+
+  <!-- memory_lineages -->
+  <rect x="824" y="262" width="368" height="150" rx="11" fill="#0c0c12" stroke="#24242e" stroke-width="1" />
+  <text x="844" y="290" font-size="14" font-weight="700" fill="#f1f1f4">memory_lineages</text>
+  <g font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">
+    <text x="844" y="318" font-size="11" fill="#cfcfd6">PK lineage_id</text>
+    <text x="844" y="342" font-size="11" fill="#a6a6b0">current_memory_id</text>
+    <text x="1172" y="342" text-anchor="end" font-size="9.5" fill="#6e6e79">→ active head</text>
+    <text x="844" y="366" font-size="11" fill="#a6a6b0">conflict_key</text>
+    <text x="1172" y="366" text-anchor="end" font-size="9.5" fill="#6e6e79">mutable slot</text>
+    <text x="844" y="390" font-size="11" fill="#a6a6b0">agent_id · user_id</text>
+  </g>
+  <line x1="768" y1="340" x2="824" y2="340" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arrD)" />
+
+  <!-- memory_relations -->
+  <rect x="824" y="436" width="368" height="176" rx="11" fill="#1d1810" stroke="#5f4a1e" stroke-width="1" />
+  <text x="844" y="464" font-size="14" font-weight="700" fill="#f6efdd">memory_relations</text>
+  <g font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">
+    <text x="844" y="492" font-size="11" fill="#e6d3a3">source_memory_id</text>
+    <text x="1172" y="492" text-anchor="end" font-size="9.5" fill="#b59a5e">FK → memory</text>
+    <text x="844" y="516" font-size="11" fill="#e6d3a3">target_memory_id</text>
+    <text x="1172" y="516" text-anchor="end" font-size="9.5" fill="#b59a5e">FK → memory</text>
+    <text x="844" y="540" font-size="11" fill="#cbb888">relation_type · weight</text>
+    <text x="844" y="564" font-size="9.5" fill="#a07f3e">supersedes · related_to · causes …</text>
+  </g>
+  <text x="844" y="592" font-size="9" font-weight="500" fill="#8a7338" letter-spacing="0.3" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">UNIQUE(source, target, relation_type)</text>
+  <line x1="768" y1="500" x2="824" y2="500" stroke="#5f4a1e" stroke-width="1.3" marker-end="url(#arrD)" />
+  <line x1="768" y1="520" x2="824" y2="520" stroke="#5f4a1e" stroke-width="1.3" marker-end="url(#arrD)" />
+
+  <!-- Auxiliary tables strip -->
+  <text x="640" y="652" text-anchor="middle" font-size="9" font-weight="600" fill="#6e6e79" letter-spacing="2.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">ALSO IN SCHEMA · LEDGER + CONTINUITY</text>
+  <rect x="312" y="666" width="128" height="30" rx="15" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="376" y="685" text-anchor="middle" font-size="10.5" font-weight="600" fill="#cfcfd6">agent_events</text>
+  <rect x="450" y="666" width="132" height="30" rx="15" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="516" y="685" text-anchor="middle" font-size="10.5" font-weight="600" fill="#cfcfd6">agent_sessions</text>
+  <rect x="592" y="666" width="136" height="30" rx="15" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="660" y="685" text-anchor="middle" font-size="10.5" font-weight="600" fill="#cfcfd6">agent_task_runs</text>
+  <rect x="738" y="666" width="146" height="30" rx="15" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="811" y="685" text-anchor="middle" font-size="10.5" font-weight="600" fill="#cfcfd6">agent_checkpoints</text>
+  <rect x="894" y="666" width="116" height="30" rx="15" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="952" y="685" text-anchor="middle" font-size="10.5" font-weight="600" fill="#cfcfd6">memory_jobs</text>
+
+  <!-- Footer -->
+  <text x="640" y="728" text-anchor="middle" font-size="11" font-weight="600" fill="#55555f" letter-spacing="4" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">STORAGE DATA MODEL</text>
+</svg>

@@ -1,8 +1,8 @@
 # Examples
 
-The Engram repository ships with three core example scripts designed for local development, API exploration, and demonstrating best practices. 
+The Engram repository ships with three core example scripts designed for local development, API exploration, and demonstrating best practices.
 
-> [!WARNING]  
+> [!WARNING]
 > These scripts are intended for learning and experimentation. Do not run them directly as production services without adding your own auth, rate-limiting, and error-handling wrappers.
 
 ---
@@ -43,7 +43,7 @@ pip install -e ".[dev,examples,openai]"
 
 ## 1. `examples/basic_usage.py`
 
-**Goal:** A comprehensive, broad walkthrough of the entire Engram API surface.  
+**Goal:** A comprehensive, broad walkthrough of the entire Engram API surface.
 **Command:** `python examples/basic_usage.py`
 
 This script executes a series of isolated demonstrations. Use this as your primary reference when you need to see exactly how a specific API is called.
@@ -62,7 +62,7 @@ This script executes a series of isolated demonstrations. Use this as your prima
 
 ## 2. `examples/long_input_usage.py`
 
-**Goal:** Demonstrates the pattern for processing massive documents securely.  
+**Goal:** Demonstrates the pattern for processing massive documents securely.
 **Command:** `python examples/long_input_usage.py`
 
 This script ingests a large block of text, chunks it using heading and token boundaries, creates source-anchored `Artifact` events, extracts searchable facts, and then answers questions by tracing back to the exact source chunks.
@@ -78,13 +78,13 @@ This script ingests a large block of text, chunks it using heading and token bou
 
 ## 3. `examples/chatbot.py`
 
-**Goal:** A fully functional, terminal-based AI assistant backed by Engram memory.  
+**Goal:** A fully functional, terminal-based AI assistant backed by Engram memory.
 **Command:** `python examples/chatbot.py` *(defaults to local `all-MiniLM-L6-v2` embeddings + Google `gemini-3.1-flash-lite`; set `GEMINI_API_KEY`)*
 
 This is the exact pipeline proven in `benchmark/`, run live. Each turn does three things:
 
 1. **Ingest** — the turn is stored verbatim as a date-anchored episodic memory via `add_batch()`. On-device embeddings only: no LLM extraction at write time, no cost, no supersession.
-2. **Retrieve** — 4 surfaces over everything stored before the turn: hybrid `search()` (vector + full-text, cross-encoder reranked), `recall(compose_answer=False)` for structured current/previous evidence, `get_lineage()` for superseded predecessors, and `traverse_many()` for graph relations.
+2. **Retrieve** — 3 surfaces over everything stored before the turn: hybrid `search()` (vector + full-text, cross-encoder reranked), `recall(compose_answer=False)` for structured current/previous evidence, and `get_lineage()` for superseded predecessors. (`traverse_many()` graph traversal is available but a no-op here — `add_batch()` creates no edges.)
 3. **Generate** — one composer LLM call answers from the assembled evidence block.
 
 > **Why not `add_conversation()` at ingest?** We evaluated the hybrid (`add_batch` + `add_conversation` per turn) and removed it. With the raw turns co-located in the same memory space, `add_conversation`'s extractor finds each fact already present verbatim in the floor row it came from, so the decision step judges it "semantically identical" and NOOPs it — the lineage layer barely fires while roughly doubling LLM cost per turn. The floor + composer answers temporal and overwrite questions correctly on its own. `add_conversation()` remains a first-class API; it just must be the **sole writer** to a memory space, never mixed with `add_batch()` (see its API note).
@@ -122,19 +122,19 @@ from engram import Engram
 async def handle_message(task_id: str, message: str) -> str:
     # 1. Connect
     async with Engram(memory_policy="default") as engram:
-        
+
         # 2. Build context from existing memory/checkpoints
         context = await engram.build_context(task_id, query=message)
-        
+
         # 3. Call your standard LLM pipeline
         response = await call_your_llm(system_prompt=context.text, user_input=message)
-        
+
         # 4. Commit the turn to the immutable ledger
         await engram.record_turn(task_id, message, response)
-        
+
         # 5. Kick off derivation (extract facts from the turn)
         await engram.process_memory_jobs(limit=10)
-        
+
         return response
 ```
 

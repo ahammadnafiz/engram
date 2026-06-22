@@ -15,7 +15,8 @@ Pipeline (one self-contained run):
      b) recall(compose_answer=False) -- structured current/previous/conflict
         lineage evidence.
      c) get_lineage() -- superseded predecessors of retrieved active facts.
-     d) traverse_many() -- multi-hop graph relations from the top search hits.
+     (traverse_many() graph traversal is off by default -- ingest creates no
+      edges, so it is a no-op unless edges are added via add_relation().)
 
   3. GENERATE: A separate composer LLM call writes the final answer from
      the assembled evidence block, using the same COMPOSER_SYSTEM as
@@ -937,8 +938,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--graph-depth",
         type=int,
-        default=1,
-        help="Max graph traversal depth from search seeds. 0 to disable.",
+        default=0,
+        help="Max graph traversal depth from search seeds. 0 to disable. "
+        "Off by default: ingest does not create edges, so traversal is a "
+        "no-op unless edges are populated via add_relation().",
     )
     parser.add_argument(
         "--answer-max-tokens",

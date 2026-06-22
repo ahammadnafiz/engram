@@ -1,3 +1,3 @@
 """Engram version."""
 
-__version__ = "0.3.0b2"
+__version__ = "1.0.0"

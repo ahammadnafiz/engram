@@ -6,13 +6,14 @@ Pipeline (per conversation, one agent per conversation):
      memory row with the time_anchor date in the text, and bulk-insert
      via add_batch() — on-device embeddings only, zero LLM calls at ingest.
 
-  2. RETRIEVE (per question): 4-surface evidence gathering:
+  2. RETRIEVE (per question): 3-surface evidence gathering:
      a) search(mode="hybrid", rerank=True) — vector + full-text fused with
         RRF and cross-encoder reranking; diversified across sessions.
      b) recall(compose_answer=False) — structured current/previous/conflict
         lineage evidence with temporal anchor.
      c) get_lineage() — superseded predecessors for knowledge-update history.
-     d) traverse_many() — multi-hop graph relations from top search hits.
+     (traverse_many() graph traversal is off by default — ingest creates no
+      edges, so it is a no-op unless edges are added via add_relation().)
 
   3. GENERATE: Composer LLM answers from the assembled evidence block.
 
@@ -62,6 +63,7 @@ import uuid
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from dotenv import load_dotenv
@@ -88,6 +90,8 @@ if "ENGRAM_LLM_PROVIDER" not in os.environ:
         os.environ["ENGRAM_LLM_PROVIDER"] = "anthropic"
     elif os.environ.get("ENGRAM_OPENAI_API_KEY"):
         os.environ["ENGRAM_LLM_PROVIDER"] = "openai"
+
+from cost_tracking import CostAccumulator, count_tokens, normalize_usage  # noqa: E402
 
 from engram import Engram  # noqa: E402
 from engram.core.config import get_settings  # noqa: E402
@@ -255,25 +259,40 @@ def _pct(vals: list[float], p: float) -> float:
     return round(s[lo] + (s[hi] - s[lo]) * (idx - lo), 3)
 
 
-def _session_stratify(candidates: list[Any], search_limit: int, per_session: int = 2) -> list[Any]:
-    """Enforce breadth across sessions by taking top-K per batch_idx, then fill from remainder."""
-    from collections import defaultdict
-    by_batch: dict[int, list[Any]] = defaultdict(list)
-    for r in candidates:
-        batch = r.memory.metadata.get("batch_idx", 0)
-        by_batch[batch].append(r)
+async def _corpus_stratify(
+    engram: Engram,
+    agent_id: str,
+    user_id: str | None,
+    search_limit: int,
+) -> list[Any]:
+    """Coverage-maximizing retrieval for summarization questions.
 
-    stratified: list[Any] = []
-    for batch in sorted(by_batch.keys()):
-        stratified.extend(by_batch[batch][:per_session])
+    Query-similarity retrieval (even at candidate_limit=500) can never represent a
+    session whose turns are all semantically far from the question — those sessions
+    never enter the candidate pool, so a summary built from it undercounts. This
+    pulls EVERY memory for the conversation (query-independent) and spreads the
+    budget evenly across all sessions via round-robin, guaranteeing each session
+    contributes turns regardless of query similarity. Wrapped to match the
+    ``.memory`` shape of search results so the downstream evidence path is unchanged.
+    """
+    all_mems = await engram.list_recent(agent_id, user_id=user_id, limit=100_000)
+    by_session: dict[Any, list[Any]] = defaultdict(list)
+    for m in all_mems:
+        by_session[m.metadata.get("batch_idx", 0)].append(m)
 
-    seen = {r.memory.memory_id for r in stratified}
-    for r in candidates:
-        if len(stratified) >= search_limit:
-            break
-        if r.memory.memory_id not in seen:
-            stratified.append(r)
-    return stratified[:search_limit]
+    # list_recent is newest-first; restore chronological order within each session.
+    sessions = [list(reversed(by_session[k])) for k in sorted(by_session.keys())]
+
+    picked: list[Any] = []
+    depth = 0
+    while len(picked) < search_limit and any(depth < len(s) for s in sessions):
+        for s in sessions:
+            if depth < len(s):
+                picked.append(s[depth])
+                if len(picked) >= search_limit:
+                    break
+        depth += 1
+    return [SimpleNamespace(memory=m) for m in picked]
 
 
 def _format_evidence_for_beam(memories: list[Any], cutoff: int) -> str:
@@ -551,11 +570,13 @@ async def ingest_conversation(
         user_id=user_id,
         max_memory_chars=max_memory_chars,
     )
-    full_context_chars = sum(
-        len(turn.get("content", "") or "")
+    full_context_text = "\n".join(
+        turn.get("content", "") or ""
         for batch in parse_beam_chat(conversation.get("chat", []))
         for turn in batch
     )
+    full_context_chars = len(full_context_text)
+    full_context_tokens = count_tokens(full_context_text)
 
     t0 = time.perf_counter()
     inserted = 0
@@ -578,6 +599,7 @@ async def ingest_conversation(
         "errors": errors,
         "first_error": first_error,
         "full_context_chars": full_context_chars,
+        "full_context_tokens": full_context_tokens,
         "ingest_seconds": round(time.perf_counter() - t0, 3),
     }
 
@@ -802,7 +824,7 @@ async def retrieve_evidence(
         effective_limit = 60 if question_type in _SINGLE_FACT_TYPES else search_limit
 
         if question_type == "summarization":
-            search_results = _session_stratify(candidates, effective_limit)
+            search_results = await _corpus_stratify(engram, agent_id, user_id, effective_limit)
         else:
             search_results = candidates[:effective_limit]
         n_search_hits = len(search_results)
@@ -890,8 +912,12 @@ async def generate_answer(
     cutoff: int,
     max_tokens: int,
     question_type: str = "unknown",
-) -> tuple[str, str]:
-    """Generate answer from evidence at a specific memory cutoff."""
+) -> tuple[str, str, dict[str, int]]:
+    """Generate answer from evidence at a specific memory cutoff.
+
+    Returns (answer, model, usage) where usage is the provider's real token
+    accounting for billed-cost reporting.
+    """
     assert engram.llm is not None
     memories_text = _format_evidence_for_beam(flat_memories, cutoff)
     user_prompt = (
@@ -911,7 +937,7 @@ async def generate_answer(
     answer = resp.content.strip()
     if "ANSWER:" in answer:
         answer = answer.rsplit("ANSWER:", 1)[-1].strip()
-    return answer, resp.model
+    return answer, resp.model, resp.usage or {}
 
 
 # ===========================================================================
@@ -948,6 +974,34 @@ def _parse_nugget_json(text: str) -> dict[str, Any]:
     return {"score": score, "reason": text[:200]}
 
 
+# BEAM's judge fans out into many calls per question (per-nugget scoring plus
+# event-ordering fact-extraction + per-event alignment) across several
+# functions, so judge usage is accumulated here rather than threaded through
+# every call. Reset at the start of each run.
+_JUDGE_USAGE: list[tuple[int, int]] = []
+
+
+def _record_judge_usage(resp: Any, use_anthropic: bool) -> None:
+    """Append (input_tokens, output_tokens) from a judge response."""
+    u = getattr(resp, "usage", None)
+    if not u:
+        return
+    if use_anthropic:
+        _JUDGE_USAGE.append(
+            (getattr(u, "input_tokens", 0) or 0, getattr(u, "output_tokens", 0) or 0)
+        )
+    else:
+        _JUDGE_USAGE.append(
+            (getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0)
+        )
+
+
+def _judge_temp(model: str) -> dict[str, float]:
+    """opus-4-8 (and newer) reject the `temperature` param; omit it there and keep
+    deterministic temperature=0 for models that still accept it."""
+    return {} if "opus-4-8" in model.lower() else {"temperature": 0.0}
+
+
 async def judge_nugget(
     question: str,
     nugget: str,
@@ -968,12 +1022,13 @@ async def judge_nugget(
             resp = await judge_client.messages.create(
                 model=judge_model,
                 max_tokens=256,
-                temperature=0.0,
+                **_judge_temp(judge_model),
                 system=BEAM_JUDGE_SYSTEM,
                 messages=[{"role": "user", "content": prompt}],
             )
             parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
             raw = " ".join(parts).strip()
+            _record_judge_usage(resp, True)
         else:
             resp = await judge_client.chat.completions.create(
                 model=judge_model,
@@ -986,6 +1041,7 @@ async def judge_nugget(
                 response_format={"type": "json_object"},
             )
             raw = (resp.choices[0].message.content or "").strip()
+            _record_judge_usage(resp, False)
 
     parsed = _parse_nugget_json(raw)
     try:
@@ -1018,12 +1074,13 @@ async def compute_event_ordering(
             resp = await judge_client.messages.create(
                 model=judge_model,
                 max_tokens=512,
-                temperature=0.0,
+                **_judge_temp(judge_model),
                 system="Extract events as a JSON array of strings.",
                 messages=[{"role": "user", "content": extract_prompt}],
             )
             parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
             extract_raw = " ".join(parts).strip()
+            _record_judge_usage(resp, True)
         else:
             resp = await judge_client.chat.completions.create(
                 model=judge_model,
@@ -1033,6 +1090,7 @@ async def compute_event_ordering(
                 response_format={"type": "json_object"},
             )
             extract_raw = (resp.choices[0].message.content or "").strip()
+            _record_judge_usage(resp, False)
 
     extracted_events: list[str] = []
     try:
@@ -1065,12 +1123,13 @@ async def compute_event_ordering(
                 resp = await judge_client.messages.create(
                     model=judge_model,
                     max_tokens=128,
-                    temperature=0.0,
+                    **_judge_temp(judge_model),
                     system="Align the event to a reference event index. Return JSON.",
                     messages=[{"role": "user", "content": align_prompt}],
                 )
                 parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
                 align_raw = " ".join(parts).strip()
+                _record_judge_usage(resp, True)
             else:
                 resp = await judge_client.chat.completions.create(
                     model=judge_model,
@@ -1080,6 +1139,7 @@ async def compute_event_ordering(
                     response_format={"type": "json_object"},
                 )
                 align_raw = (resp.choices[0].message.content or "").strip()
+                _record_judge_usage(resp, False)
 
         try:
             data = json.loads(align_raw.strip().lstrip("```json").rstrip("```").strip())
@@ -1161,7 +1221,7 @@ async def process_question(
 
         for cutoff in cutoffs:
             label = f"top{cutoff}"
-            generated_answer, composer_model = await generate_answer(
+            generated_answer, composer_model, composer_usage = await generate_answer(
                 engram, question_text, flat_memories, cutoff, answer_max_tokens,
                 question_type=q_type,
             )
@@ -1173,6 +1233,7 @@ async def process_question(
                     "generated_answer": generated_answer,
                     "memories_evaluated": min(cutoff, len(flat_memories)),
                     "nugget_scores": [],
+                    "composer_usage": composer_usage,
                     "error": "No rubric nuggets",
                 }
                 continue
@@ -1194,6 +1255,7 @@ async def process_question(
                 "generated_answer": generated_answer,
                 "memories_evaluated": min(cutoff, len(flat_memories)),
                 "nugget_scores": nugget_score_records,
+                "composer_usage": composer_usage,
             }
 
             if q_type == "event_ordering" and event_ordering_tau:
@@ -1347,7 +1409,6 @@ async def rejudge_only(args: argparse.Namespace) -> None:
             continue
         question_text = trace.get("question", "")
         rubric_nuggets = trace.get("rubric", [])
-        q_type = trace.get("question_type", "unknown")
         cutoff_results: dict[str, Any] = {}
         for c in cutoffs:
             label = f"top{c}"
@@ -1419,12 +1480,12 @@ def parse_args() -> argparse.Namespace:
                         help="Memories retrieved per question (default: 60; must be >= max cutoff)")
     parser.add_argument("--candidate-limit", type=int, default=100,
                         help="Pre-rerank candidate pool size (default: 100). Increase for large conversations (500+ for 1M).")
-    parser.add_argument("--graph-depth", type=int, default=1)
+    parser.add_argument("--graph-depth", type=int, default=0)
     parser.add_argument("--rerank", action="store_true",
                         help="Enable cross-encoder reranking (strongly recommended — biggest accuracy lever)")
     parser.add_argument("--max-memory-chars", type=int, default=DEFAULT_MAX_MEMORY_CHARS)
     parser.add_argument("--ingest-batch-size", type=int, default=DEFAULT_INGEST_BATCH_SIZE)
-    parser.add_argument("--answer-max-tokens", type=int, default=1000)
+    parser.add_argument("--answer-max-tokens", type=int, default=4000)
     parser.add_argument("--event-ordering-tau", action="store_true",
                         help="Compute Kendall tau-b for event_ordering questions (extra LLM calls).")
     parser.add_argument("--no-purge", action="store_true")
@@ -1702,7 +1763,7 @@ async def main() -> None:
         "benchmark": "BEAM (ICLR 2026)",
         "pipeline": (
             "add_batch(turns) -> search(hybrid, rerank) + recall(compose=False) "
-            "+ get_lineage + traverse_many -> composer LLM -> nugget judge (0/0.5/1.0)"
+            "+ get_lineage -> composer LLM -> nugget judge (0/0.5/1.0)"
         ),
         "judge_model": args.judge_model,
         "answer_model": settings.llm_model,
@@ -1735,31 +1796,72 @@ async def main() -> None:
     _ok = [t for t in all_traces if not t.get("error")]
     _el = [t.get("elapsed_seconds", 0.0) for t in _ok]
     _ret = [t.get("retrieval", {}).get("retrieval_seconds", 0.0) for t in _ok]
+    _ing = [t.get("ingest_summary", {}).get("ingest_seconds", 0.0) for t in _ok]
     _gen = [t.get("generation_seconds", 0.0) for t in _ok]
-    _ev = [t.get("evidence_chars", 0) for t in _ok if t.get("evidence_chars")]
-    _fc = [t.get("ingest_summary", {}).get("full_context_chars", 0) for t in _ok if t.get("ingest_summary", {}).get("full_context_chars")]
     _sh = [t.get("retrieval", {}).get("search_hits", 0) for t in _ok]
     _gh = [t.get("retrieval", {}).get("graph_hits", 0) for t in _ok]
-    _CPT = 4
-    _avg_ev = round(sum(_ev) / len(_ev) / _CPT) if _ev else 0
-    _avg_fc = round(sum(_fc) / len(_fc) / _CPT) if _fc else 0
     summary["latency"] = {
         "avg_total_s": round(sum(_el) / len(_el), 3) if _el else 0.0,
         "p50_total_s": _pct(_el, 50),
         "p95_total_s": _pct(_el, 95),
         "avg_retrieval_s": round(sum(_ret) / len(_ret), 3) if _ret else 0.0,
+        "avg_ingest_s": round(sum(_ing) / len(_ing), 3) if _ing else 0.0,
         "avg_generation_s": round(sum(_gen) / len(_gen), 3) if _gen else 0.0,
     }
+
+    # Real token accounting + end-to-end cost (tiktoken compression baseline +
+    # provider-billed usage).
+    cost = CostAccumulator()
+    for u_in, u_out in _JUDGE_USAGE:
+        cost.add_judge(args.judge_model, {"input_tokens": u_in, "output_tokens": u_out})
+
+    for t in _ok:
+        primary_cr = t.get("cutoff_results", {}).get(primary_label, {})
+        cu = primary_cr.get("composer_usage") or {}
+        # We only count the primary cutoff's composer usage to reflect the cost
+        # of the pipeline (rather than penalizing for the benchmark's sweep).
+        cost.add_composer(t.get("composer_model") or summary["answer_model"], cu)
+        cost.add_compression(
+            evidence_text=t.get("evidence", ""),
+            real_input_tokens=int(cu.get("input_tokens") or cu.get("prompt_tokens") or 0),
+            full_context_tokens=t.get("ingest_summary", {}).get("full_context_tokens", 0),
+        )
+    summary["cost"] = cost.summary()
+
     summary["context_efficiency"] = {
-        "avg_evidence_tokens": _avg_ev,
-        "avg_full_context_tokens": _avg_fc,
-        "compression_pct": round((1 - _avg_ev / _avg_fc) * 100, 1) if _avg_fc else 0.0,
+        "avg_evidence_tokens": summary["cost"]["context_compression"]["avg_evidence_tokens"],
+        "avg_full_context_tokens": summary["cost"]["context_compression"]["avg_full_context_tokens"],
+        "compression_pct": summary["cost"]["context_compression"]["compression_pct"],
         "avg_search_hits": round(sum(_sh) / len(_sh), 1) if _sh else 0.0,
         "avg_graph_hits": round(sum(_gh) / len(_gh), 1) if _gh else 0.0,
+        "token_counter": "tiktoken/o200k_base",
     }
 
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
-    print(f"\nanswer model : {summary['answer_model']}  |  judge: {args.judge_model}")
+
+    print("\n" + "=" * 60)
+    _c = summary["cost"]
+    print(
+        f"api calls    : {_c['api_calls']['total']} "
+        f"({_c['api_calls']['composer']} composer + {_c['api_calls']['judge']} judge)"
+    )
+    print(
+        f"real cost    : ${_c['real_cost_usd']['total']} total "
+        f"(${_c['real_cost_usd']['per_question']}/question) | "
+        f"composer ${_c['real_cost_usd']['composer']} + judge ${_c['real_cost_usd']['judge']}"
+    )
+    print(
+        f"compression  : {_c['context_compression']['avg_evidence_tokens']} evidence tok "
+        f"vs {_c['context_compression']['avg_full_context_tokens']} full-context tok "
+        f"= {_c['context_compression']['compression_pct']}% smaller"
+    )
+    print(
+        f"vs full-ctx  : composer ${_c['full_context_baseline']['our_composer_cost_usd']} "
+        f"vs ${_c['full_context_baseline']['projected_composer_cost_usd']} naive "
+        f"= {_c['full_context_baseline']['savings_pct']}% cheaper "
+        f"({_c['full_context_baseline']['cost_multiplier']}x)"
+    )
+    print(f"answer model : {summary['answer_model']}  |  judge: {args.judge_model}")
     print(f"primary cutoff: {primary_label}  accuracy={summary['accuracy']:.1f}%  avg_score={summary['avg_score']:.3f}")
     print(f"artifacts    : {args.output_dir}")
 

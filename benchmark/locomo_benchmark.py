@@ -6,13 +6,14 @@ Pipeline (per conversation, one agent per conversation):
      bulk-insert via ``add_batch()`` — embeddings only, no LLM extraction.
      Sessions are inserted chronologically.
 
-  2. RETRIEVE (per question): 4-surface evidence gathering:
+  2. RETRIEVE (per question): 3-surface evidence gathering:
      a) search(mode="hybrid", include_superseded=True) — wide candidate pool,
         diversified across sessions (round-robin, user turns first).
      b) recall(compose_answer=False) — structured current/previous/conflict
         lineage evidence with temporal anchor.
      c) get_lineage() — superseded predecessors for full history.
-     d) traverse_many() — multi-hop graph relations from top search hits.
+     (traverse_many() graph traversal is off by default — ingest creates no
+      edges, so it is a no-op unless edges are added via add_relation().)
 
   3. GENERATE: Composer LLM answers each question from the evidence block
      using LoCoMo-optimized prompts (adapted from the reference prompts.py).
@@ -81,6 +82,8 @@ if "ENGRAM_LLM_PROVIDER" not in os.environ:
         os.environ["ENGRAM_LLM_PROVIDER"] = "anthropic"
     elif os.environ.get("ENGRAM_OPENAI_API_KEY"):
         os.environ["ENGRAM_LLM_PROVIDER"] = "openai"
+
+from cost_tracking import CostAccumulator, count_tokens  # noqa: E402
 
 from engram import Engram  # noqa: E402
 from engram.core.config import get_settings  # noqa: E402
@@ -390,11 +393,13 @@ async def ingest_conversation(
         user_id=user_id,
         max_memory_chars=max_memory_chars,
     )
-    full_context_chars = sum(
-        len((turn.get("text", "") or "") + (turn.get("blip_caption", "") or ""))
+    full_context_text = "\n".join(
+        (turn.get("text", "") or "") + (turn.get("blip_caption", "") or "")
         for _, _, turns in get_sorted_sessions(conversation)
         for turn in turns
     )
+    full_context_chars = len(full_context_text)
+    full_context_tokens = count_tokens(full_context_text)
 
     t0 = time.perf_counter()
     inserted = 0
@@ -419,6 +424,7 @@ async def ingest_conversation(
         "errors": errors,
         "first_error": first_error,
         "full_context_chars": full_context_chars,
+        "full_context_tokens": full_context_tokens,
         "ingest_seconds": round(time.perf_counter() - t0, 3),
     }
 
@@ -552,6 +558,7 @@ async def retrieve_evidence(
     max_per_session: int,
     reference_date: str = "",
     rerank: bool = False,
+    candidate_limit: int = 100,
 ) -> tuple[str, dict[str, Any]]:
     """Retrieve evidence using Engram's 4-surface APIs."""
     t0 = time.perf_counter()
@@ -563,7 +570,11 @@ async def retrieve_evidence(
     recall_intent = ""
 
     try:
-        candidate_limit = 100 if rerank else min(max(search_limit * 3, search_limit), 100)
+        candidate_limit = (
+            candidate_limit
+            if rerank
+            else min(max(search_limit * 3, search_limit), candidate_limit)
+        )
         candidates = await engram.search(
             query=question,
             agent_id=agent_id,
@@ -664,8 +675,12 @@ async def generate_answer(
     reference_date_human: str,
     evidence: str,
     max_tokens: int,
-) -> tuple[str, str]:
-    """Generate answer from evidence using Engram's LLM."""
+) -> tuple[str, str, dict[str, int]]:
+    """Generate answer from evidence using Engram's LLM.
+
+    Returns (answer, model, usage) where usage is the provider's real token
+    accounting for billed-cost reporting.
+    """
     assert engram.llm is not None
 
     system = LOCOMO_COMPOSER_SYSTEM.format(reference_date=reference_date_human or "2023")
@@ -685,7 +700,7 @@ async def generate_answer(
     )
     raw = resp.content.strip()
     answer = raw.rsplit("ANSWER:", 1)[-1].strip() if "ANSWER:" in raw else raw
-    return answer, resp.model
+    return answer, resp.model, resp.usage or {}
 
 
 # ===========================================================================
@@ -724,6 +739,12 @@ def _parse_json_judgment(raw: str) -> bool:
     return False
 
 
+def _judge_temp(model: str) -> dict[str, float]:
+    """opus-4-8 (and newer) reject the `temperature` param; omit it there and keep
+    deterministic temperature=0 for models that still accept it."""
+    return {} if "opus-4-8" in model.lower() else {"temperature": 0.0}
+
+
 async def judge_all(
     answer_traces: list[dict[str, Any]],
     judge_model: str,
@@ -753,18 +774,22 @@ async def judge_all(
 
     sem = asyncio.Semaphore(concurrency)
 
-    async def verdict_for(prompt: str) -> str:
+    async def verdict_for(prompt: str) -> tuple[str, dict[str, int]]:
         async with sem:
             if use_anthropic:
                 resp = await client.messages.create(
                     model=judge_model,
                     max_tokens=256,
-                    temperature=0.0,
+                    **_judge_temp(judge_model),
                     system=JUDGE_SYSTEM,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
-                return " ".join(parts).strip()
+                usage = {
+                    "input_tokens": getattr(resp.usage, "input_tokens", 0),
+                    "output_tokens": getattr(resp.usage, "output_tokens", 0),
+                }
+                return " ".join(parts).strip(), usage
             resp = await client.chat.completions.create(
                 model=judge_model,
                 messages=[
@@ -775,7 +800,12 @@ async def judge_all(
                 max_tokens=256,
                 response_format={"type": "json_object"},
             )
-            return (resp.choices[0].message.content or "").strip()
+            u = getattr(resp, "usage", None)
+            usage = {
+                "input_tokens": getattr(u, "prompt_tokens", 0) if u else 0,
+                "output_tokens": getattr(u, "completion_tokens", 0) if u else 0,
+            }
+            return (resp.choices[0].message.content or "").strip(), usage
 
     async def judge_one(trace: dict[str, Any]) -> dict[str, Any]:
         if trace.get("error"):
@@ -786,13 +816,15 @@ async def judge_all(
                 "correct": False,
                 "verdict": "error",
                 "judge_raw": "",
+                "judge_model": judge_model,
+                "judge_usage": {},
             }
         prompt = JUDGE_PROMPT.format(
             question=trace["question"],
             answer=str(trace["answer"]),
             response=trace["hypothesis"],
         )
-        raw = await verdict_for(prompt)
+        raw, judge_usage = await verdict_for(prompt)
         correct = _parse_json_judgment(raw)
         return {
             "question_id": trace["question_id"],
@@ -801,6 +833,8 @@ async def judge_all(
             "correct": correct,
             "verdict": "CORRECT" if correct else "WRONG",
             "judge_raw": raw[:400],
+            "judge_model": judge_model,
+            "judge_usage": judge_usage,
         }
 
     return await asyncio.gather(*(judge_one(t) for t in answer_traces))
@@ -826,6 +860,8 @@ async def run_conversation(
     categories: list[int],
     max_questions: int | None,
     rerank: bool = False,
+    candidate_limit: int = 100,
+    question_filter: set[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Ingest a conversation's sessions, then answer all in-scope questions.
 
@@ -888,6 +924,8 @@ async def run_conversation(
     for qi, qa in enumerate(questions):
         if qa.get("category") not in categories:
             continue
+        if question_filter is not None and f"conv{conv_idx}_q{qi}" not in question_filter:
+            continue
         if max_questions is not None and len(traces) >= max_questions:
             break
 
@@ -899,6 +937,7 @@ async def run_conversation(
         error = None
         hypothesis = ""
         composer_model = ""
+        composer_usage: dict[str, int] = {}
         retrieval_trace: dict[str, Any] = {}
         evidence = ""
 
@@ -910,9 +949,10 @@ async def run_conversation(
                 max_per_session=max_per_session,
                 reference_date=reference_date_raw,
                 rerank=rerank,
+                candidate_limit=candidate_limit,
             )
             if engram.llm is not None:
-                hypothesis, composer_model = await generate_answer(
+                hypothesis, composer_model, composer_usage = await generate_answer(
                     engram, question, reference_date_human, evidence,
                     max_tokens=answer_max_tokens,
                 )
@@ -947,6 +987,8 @@ async def run_conversation(
             "retrieval": retrieval_trace,
             "evidence": evidence,
             "evidence_chars": len(evidence),
+            "evidence_tokens": count_tokens(evidence),
+            "composer_usage": composer_usage,
             "generation_seconds": max(0.0, round(_elapsed - _retrieval_s, 3)),
             "elapsed_seconds": _elapsed,
             "error": error,
@@ -1014,10 +1056,25 @@ def parse_args() -> argparse.Namespace:
         help="Memories per question after session-diversified selection.",
     )
     parser.add_argument(
-        "--max-per-session", type=int, default=4,
+        "--max-per-session", type=int, default=6,
         help="Max turns kept per session in the diversified evidence set.",
     )
-    parser.add_argument("--graph-depth", type=int, default=1)
+    parser.add_argument(
+        "--candidate-limit", type=int, default=100,
+        help="Reranked candidates returned per question before diversification.",
+    )
+    parser.add_argument(
+        "--max-search-limit", type=int, default=500,
+        help="Pre-rerank candidate pool the cross-encoder scores (overfetch "
+        "depth). Decoupled from --candidate-limit so recall can go deep without "
+        "bloating the evidence window.",
+    )
+    parser.add_argument(
+        "--question-id", action="append",
+        help="Answer only this question_id (e.g. conv0_q104). Repeatable. "
+        "Full conversations are still ingested; only these questions are scored.",
+    )
+    parser.add_argument("--graph-depth", type=int, default=0)
     parser.add_argument("--rerank", action="store_true")
     parser.add_argument(
         "--answer-max-tokens", type=int, default=4000,
@@ -1110,6 +1167,14 @@ async def main() -> None:
     conv_indices = [int(c) for c in args.conversations.split(",")]
     categories = [int(c) for c in args.categories.split(",")]
 
+    # --question-id restricts scoring to specific questions. Derive the
+    # conversations they belong to so we only ingest what we need.
+    question_filter: set[str] | None = None
+    if args.question_id:
+        question_filter = set(args.question_id)
+        wanted_convs = {int(q.split("_q")[0].removeprefix("conv")) for q in question_filter}
+        conv_indices = [c for c in conv_indices if c in wanted_convs]
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     run_id = uuid.uuid4().hex[:8]
 
@@ -1126,6 +1191,7 @@ async def main() -> None:
         "embedding_dimension": args.embedding_dimension,
         "allow_embedding_dimension_change": True,
         "near_duplicate_threshold": 1.0,
+        "max_search_limit": args.max_search_limit,
     })
 
     engram = Engram(settings=settings, memory_policy=BENCHMARK_POLICY)
@@ -1197,6 +1263,8 @@ async def main() -> None:
                             categories=categories,
                             max_questions=args.max_questions,
                             rerank=args.rerank,
+                            candidate_limit=args.candidate_limit,
+                            question_filter=question_filter,
                         )
                     except Exception as exc:
                         if args.fail_fast:
@@ -1245,7 +1313,7 @@ async def main() -> None:
 
     summary = {
         "benchmark": "LoCoMo-10 (ACL 2024)",
-        "pipeline": "add_batch(turns) -> search(hybrid, include_superseded) + recall(compose=False) + get_lineage + traverse_many -> composer LLM",
+        "pipeline": "add_batch(turns) -> search(hybrid, include_superseded) + recall(compose=False) + get_lineage -> composer LLM",
         "judge_model": args.judge_model,
         "answer_model": settings.llm_model,
         "memory_policy": BENCHMARK_POLICY,
@@ -1276,13 +1344,8 @@ async def main() -> None:
     _el = [t.get("elapsed_seconds", 0.0) for t in _ok]
     _ret = [t.get("retrieval", {}).get("retrieval_seconds", 0.0) for t in _ok]
     _gen = [t.get("generation_seconds", 0.0) for t in _ok]
-    _ev = [t.get("evidence_chars", 0) for t in _ok if t.get("evidence_chars")]
-    _fc = [t.get("ingest_summary", {}).get("full_context_chars", 0) for t in _ok if t.get("ingest_summary", {}).get("full_context_chars")]
     _sh = [t.get("retrieval", {}).get("search_hits", 0) for t in _ok]
     _gh = [t.get("retrieval", {}).get("graph_hits", 0) for t in _ok]
-    _CPT = 4
-    _avg_ev = round(sum(_ev) / len(_ev) / _CPT) if _ev else 0
-    _avg_fc = round(sum(_fc) / len(_fc) / _CPT) if _fc else 0
     summary["latency"] = {
         "avg_total_s": round(sum(_el) / len(_el), 3) if _el else 0.0,
         "p50_total_s": _pct(_el, 50),
@@ -1290,17 +1353,55 @@ async def main() -> None:
         "avg_retrieval_s": round(sum(_ret) / len(_ret), 3) if _ret else 0.0,
         "avg_generation_s": round(sum(_gen) / len(_gen), 3) if _gen else 0.0,
     }
+
+    # Real token accounting + end-to-end cost (tiktoken compression baseline +
+    # provider-billed usage). One CostAccumulator over every answered question.
+    _judge_by_id = {j["question_id"]: j for j in judgments}
+    cost = CostAccumulator()
+    for t in _ok:
+        cu = t.get("composer_usage") or {}
+        cost.add_composer(t.get("composer_model") or summary["answer_model"], cu)
+        j = _judge_by_id.get(t["question_id"], {})
+        cost.add_judge(j.get("judge_model") or args.judge_model, j.get("judge_usage") or {})
+        cost.add_compression(
+            evidence_text=t.get("evidence", ""),
+            real_input_tokens=int(cu.get("input_tokens") or cu.get("prompt_tokens") or 0),
+            full_context_tokens=t.get("ingest_summary", {}).get("full_context_tokens", 0),
+        )
+    summary["cost"] = cost.summary()
     summary["context_efficiency"] = {
-        "avg_evidence_tokens": _avg_ev,
-        "avg_full_context_tokens": _avg_fc,
-        "compression_pct": round((1 - _avg_ev / _avg_fc) * 100, 1) if _avg_fc else 0.0,
+        "avg_evidence_tokens": summary["cost"]["context_compression"]["avg_evidence_tokens"],
+        "avg_full_context_tokens": summary["cost"]["context_compression"]["avg_full_context_tokens"],
+        "compression_pct": summary["cost"]["context_compression"]["compression_pct"],
         "avg_search_hits": round(sum(_sh) / len(_sh), 1) if _sh else 0.0,
         "avg_graph_hits": round(sum(_gh) / len(_gh), 1) if _gh else 0.0,
+        "token_counter": "tiktoken/o200k_base",
     }
 
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
 
     _print_scorecard(judgments)
+    _c = summary["cost"]
+    print(
+        f"\napi calls    : {_c['api_calls']['total']} "
+        f"({_c['api_calls']['composer']} composer + {_c['api_calls']['judge']} judge)"
+    )
+    print(
+        f"real cost    : ${_c['real_cost_usd']['total']} total "
+        f"(${_c['real_cost_usd']['per_question']}/question) | "
+        f"composer ${_c['real_cost_usd']['composer']} + judge ${_c['real_cost_usd']['judge']}"
+    )
+    print(
+        f"compression  : {_c['context_compression']['avg_evidence_tokens']} evidence tok "
+        f"vs {_c['context_compression']['avg_full_context_tokens']} full-context tok "
+        f"= {_c['context_compression']['compression_pct']}% smaller"
+    )
+    print(
+        f"vs full-ctx  : composer ${_c['full_context_baseline']['our_composer_cost_usd']} "
+        f"vs ${_c['full_context_baseline']['projected_composer_cost_usd']} naive "
+        f"= {_c['full_context_baseline']['savings_pct']}% cheaper "
+        f"({_c['full_context_baseline']['cost_multiplier']}x)"
+    )
     print(f"\nanswer model : {summary['answer_model']}  |  judge: {args.judge_model}")
     print(f"pipeline     : {summary['pipeline']}")
     print(f"artifacts    : {args.output_dir}")

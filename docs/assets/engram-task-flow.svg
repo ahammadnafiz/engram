@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 768" width="100%" height="100%" style="background-color:#060608;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <defs>
+    <marker id="arrTk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0 1.5 L8.5 5 L0 8.5" fill="none" stroke="#4a4a55" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+    <g id="dbiconTk" fill="none" stroke="currentColor" stroke-width="1.5">
+      <ellipse cx="0" cy="-7" rx="10" ry="3.8" />
+      <path d="M-10 -7 V7" />
+      <path d="M10 -7 V7" />
+      <path d="M-10 7 a10 3.8 0 0 0 20 0" />
+      <path d="M-10 0 a10 3.8 0 0 0 20 0" />
+    </g>
+  </defs>
+
+  <rect width="1280" height="768" fill="#060608" />
+  <rect x="592" y="0" width="96" height="4" rx="2" fill="#6d5dfb" />
+
+  <!-- Header -->
+  <text x="640" y="92" text-anchor="middle" font-size="46" font-weight="800" fill="#fbfbfd" letter-spacing="-0.5">Long-running task memory</text>
+  <text x="640" y="132" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">A turn appends to an authoritative event ledger and enqueues derivation in one transaction. A worker</text>
+  <text x="640" y="156" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">distills durable memories; checkpoints and context assembly resume work without replaying raw events.</text>
+
+  <!-- Panel -->
+  <rect x="48" y="188" width="1184" height="566" rx="20" fill="#0b0b0f" stroke="#1c1c24" stroke-width="1" />
+
+  <!-- Stage connectors -->
+  <line x1="312" y1="298" x2="381" y2="298" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arrTk)" />
+  <line x1="605" y1="298" x2="674" y2="298" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arrTk)" />
+  <line x1="898" y1="298" x2="967" y2="298" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arrTk)" />
+
+  <!-- Stage boxes -->
+  <rect x="90" y="256" width="220" height="84" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="200" y="292" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">start_task</text>
+  <text x="200" y="311" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">GOAL → TASK RUN</text>
+
+  <rect x="383" y="256" width="220" height="84" rx="8" fill="#11101d" stroke="#3a3469" stroke-width="1.2" />
+  <text x="493" y="288" text-anchor="middle" font-size="15" font-weight="600" fill="#eceaff">record_turn</text>
+  <text x="493" y="307" text-anchor="middle" font-size="9" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">APPEND EVENTS + JOB</text>
+  <text x="493" y="323" text-anchor="middle" font-size="8" font-weight="500" fill="#6f699c" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">ONE TRANSACTION</text>
+
+  <rect x="676" y="256" width="220" height="84" rx="8" fill="#11101d" stroke="#3a3469" stroke-width="1.2" />
+  <text x="786" y="288" text-anchor="middle" font-size="15" font-weight="600" fill="#eceaff">process_memory_jobs</text>
+  <text x="786" y="307" text-anchor="middle" font-size="9" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">WORKER · DERIVE FACTS</text>
+  <text x="786" y="323" text-anchor="middle" font-size="8" font-weight="500" fill="#6f699c" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">IF LLM CONFIGURED</text>
+
+  <rect x="969" y="256" width="220" height="84" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="1079" y="288" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">checkpoint + context</text>
+  <text x="1079" y="307" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">SNAPSHOT · build_context</text>
+  <text x="1079" y="323" text-anchor="middle" font-size="8" font-weight="500" fill="#5c5c66" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">RESUMABLE STATE</text>
+
+  <!-- writes-to label -->
+  <line x1="640" y1="354" x2="640" y2="396" stroke="#3a3a44" stroke-width="1.3" stroke-dasharray="2 4" />
+  <rect x="594" y="362" width="92" height="16" fill="#0b0b0f" />
+  <text x="640" y="374" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="2" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">WRITES TO</text>
+
+  <!-- storage band -->
+  <rect x="120" y="406" width="1040" height="218" rx="14" fill="#0c0c12" stroke="#24242e" stroke-width="1" />
+
+  <rect x="138" y="430" width="184" height="148" rx="9" fill="#0e1830" stroke="#2a4a82" stroke-width="1" />
+  <use href="#dbiconTk" transform="translate(230,470)" color="#9fb6e6" />
+  <text x="230" y="512" text-anchor="middle" font-size="12.5" font-weight="600" fill="#eef2fb">Task Runs</text>
+  <text x="230" y="530" text-anchor="middle" font-size="7.5" font-weight="500" fill="#7f93bf" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">AGENT_TASK_RUNS</text>
+
+  <rect x="343" y="430" width="184" height="148" rx="9" fill="#0e1830" stroke="#2a4a82" stroke-width="1" />
+  <use href="#dbiconTk" transform="translate(435,470)" color="#9fb6e6" />
+  <text x="435" y="512" text-anchor="middle" font-size="12.5" font-weight="600" fill="#eef2fb">Event Ledger</text>
+  <text x="435" y="530" text-anchor="middle" font-size="7.5" font-weight="500" fill="#7f93bf" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">AGENT_EVENTS · AUTHORITATIVE</text>
+
+  <rect x="548" y="430" width="184" height="148" rx="9" fill="#1d1810" stroke="#5f4a1e" stroke-width="1" />
+  <use href="#dbiconTk" transform="translate(640,470)" color="#d8b765" />
+  <text x="640" y="512" text-anchor="middle" font-size="12.5" font-weight="600" fill="#f6efdd">Job Queue</text>
+  <text x="640" y="530" text-anchor="middle" font-size="7.5" font-weight="500" fill="#b59a5e" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">MEMORY_JOBS · DURABLE</text>
+
+  <rect x="753" y="430" width="184" height="148" rx="9" fill="#0c1326" stroke="#223e72" stroke-width="1" />
+  <use href="#dbiconTk" transform="translate(845,470)" color="#8aa0d6" />
+  <text x="845" y="512" text-anchor="middle" font-size="12.5" font-weight="600" fill="#e9eefb">Derived Memory</text>
+  <text x="845" y="530" text-anchor="middle" font-size="7.5" font-weight="500" fill="#7388b6" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">AGENT_MEMORY · VIEW</text>
+
+  <rect x="958" y="430" width="184" height="148" rx="9" fill="#0e1830" stroke="#2a4a82" stroke-width="1" />
+  <use href="#dbiconTk" transform="translate(1050,470)" color="#9fb6e6" />
+  <text x="1050" y="512" text-anchor="middle" font-size="12.5" font-weight="600" fill="#eef2fb">Checkpoints</text>
+  <text x="1050" y="530" text-anchor="middle" font-size="7.5" font-weight="500" fill="#7f93bf" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">AGENT_CHECKPOINTS</text>
+
+  <text x="640" y="602" text-anchor="middle" font-size="9" font-weight="600" fill="#6e6e79" letter-spacing="1.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">RAW LEDGER IS AUTHORITATIVE · DERIVED MEMORIES + CHECKPOINTS ARE OPTIMIZED VIEWS</text>
+
+  <!-- Footer -->
+  <text x="640" y="724" text-anchor="middle" font-size="11" font-weight="600" fill="#55555f" letter-spacing="4" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">LONG-RUNNING TASK MEMORY</text>
+</svg>

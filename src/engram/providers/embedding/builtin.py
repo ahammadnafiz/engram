@@ -178,7 +178,7 @@ class SentenceTransformersEmbeddingProvider(EmbeddingProvider):
         self,
         model: str = "all-MiniLM-L6-v2",
         device: str | None = None,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> None:
         self._executor: ThreadPoolExecutor | None = None
         try:
@@ -190,6 +190,29 @@ class SentenceTransformersEmbeddingProvider(EmbeddingProvider):
             ) from e
 
         logger.info(f"Loading Sentence Transformers model: {model}")
+
+        # Auto-detect instructions and requirements based on known models
+        self._query_instruction = kwargs.get("query_instruction", "")
+        self._document_instruction = kwargs.get("document_instruction", "")
+        trust_remote_code = kwargs.get("trust_remote_code", False)
+
+        if not self._query_instruction and not self._document_instruction:
+            model_lower = model.lower()
+            if "nomic-embed-text" in model_lower:
+                self._query_instruction = "search_query: "
+                self._document_instruction = "search_document: "
+                trust_remote_code = True
+            elif "bge-" in model_lower and "-en" in model_lower:
+                self._query_instruction = (
+                    "Represent this sentence for searching relevant passages: "
+                )
+            elif "bge-" in model_lower and "-zh" in model_lower:
+                self._query_instruction = "为这个句子生成表示以用于检索相关文章："  # noqa: RUF001
+            elif "snowflake-arctic-embed" in model_lower:
+                self._query_instruction = (
+                    "Represent this sentence for searching relevant passages: "
+                )
+
         # transformers (a sentence-transformers dependency) prints a noisy
         # "LOAD REPORT" flagging the legacy embeddings.position_ids buffer as
         # UNEXPECTED. It is benign — the buffer is unused and embeddings are
@@ -209,7 +232,7 @@ class SentenceTransformersEmbeddingProvider(EmbeddingProvider):
             prev_verbosity = None
         try:
             self._st_model: SentenceTransformer = SentenceTransformer(
-                model, device=device
+                model, device=device, trust_remote_code=trust_remote_code
             )
         finally:
             if hf_logging is not None and prev_verbosity is not None:
@@ -234,7 +257,11 @@ class SentenceTransformersEmbeddingProvider(EmbeddingProvider):
     def model(self) -> str:
         return self._model
 
-    def _encode_sync(self, texts: list[str]) -> list[list[float]]:
+    def _encode_sync(
+        self, texts: list[str], instruction: str = ""
+    ) -> list[list[float]]:
+        if instruction:
+            texts = [f"{instruction}{t}" for t in texts]
         embeddings = self._st_model.encode(
             texts,
             convert_to_numpy=True,
@@ -249,7 +276,7 @@ class SentenceTransformersEmbeddingProvider(EmbeddingProvider):
             loop = asyncio.get_running_loop()
             results = await loop.run_in_executor(
                 self._executor,
-                partial(self._encode_sync, [text]),
+                partial(self._encode_sync, [text], self._query_instruction),
             )
             return results[0]
         except Exception as e:
@@ -267,7 +294,7 @@ class SentenceTransformersEmbeddingProvider(EmbeddingProvider):
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
                 self._executor,
-                partial(self._encode_sync, texts),
+                partial(self._encode_sync, texts, self._document_instruction),
             )
         except Exception as e:
             raise EmbeddingProviderError(

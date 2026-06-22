@@ -342,7 +342,7 @@ class SearchQuery(BaseModel):
     query: str = Field(..., min_length=1, max_length=10000)
     agent_id: AgentId
     user_id: UserId | None = None
-    limit: int = Field(default=10, ge=1, le=100)
+    limit: int = Field(default=10, ge=1, le=1000)
     mode: str = Field(default="hybrid")  # hybrid, semantic, keyword
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
     metadata_filter: dict[str, Any] | None = None

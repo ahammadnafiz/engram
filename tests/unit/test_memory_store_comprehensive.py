@@ -886,9 +886,10 @@ class TestSearchQueryValidation:
 
         from engram.memory.models import SearchQuery
 
-        # Valid limits
+        # Valid limits (cap raised to 1000 to allow deep candidate pools for
+        # large corpora; rerank narrows back to the caller's top-k)
         SearchQuery(query="test", agent_id="agent", limit=1)
-        SearchQuery(query="test", agent_id="agent", limit=100)
+        SearchQuery(query="test", agent_id="agent", limit=1000)
 
         # Invalid - too low
         with pytest.raises(ValidationError):
@@ -896,7 +897,7 @@ class TestSearchQueryValidation:
 
         # Invalid - too high
         with pytest.raises(ValidationError):
-            SearchQuery(query="test", agent_id="agent", limit=101)
+            SearchQuery(query="test", agent_id="agent", limit=1001)
 
     def test_search_query_min_score_bounds(self) -> None:
         """Test min_score validation."""

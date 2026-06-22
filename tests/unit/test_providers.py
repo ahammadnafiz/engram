@@ -20,9 +20,16 @@ class FakeSentenceTransformer:
 
     device = "cpu"
 
-    def __init__(self, model: str, device: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        device: str | None = None,
+        trust_remote_code: bool = False,
+        **_kwargs: object,
+    ) -> None:
         self.model = model
         self.device = device or "cpu"
+        self.trust_remote_code = trust_remote_code
 
     def get_sentence_embedding_dimension(self) -> int:
         return 384

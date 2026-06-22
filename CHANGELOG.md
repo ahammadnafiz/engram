@@ -5,9 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-06-22
+
+First stable release. The public API (`Engram`, `add_batch`, `add_conversation`,
+`search`, `recall`, `get_lineage`) is now stable and follows semantic versioning.
+The `0.3.0a1` through `0.3.0b2` pre-releases led up to this version.
 
 ### Added
+- **Cost and efficiency reporting in benchmarks.** Every run records
+  per-question latency (ingest / retrieval / generation, with p50/p95), context
+  compression (evidence tokens vs full-context tokens), and real billed cost
+  against a no-retrieval baseline. New `benchmark/cost_tracking.py` measures
+  Anthropic billed cost with a tiktoken compression baseline. Headline savings:
+  22.1× cheaper than full-context on BEAM 1M, 6.2× on LongMemEval-S, 2.5× on
+  LoCoMo-10.
+- **`engram-bento.svg`** summary graphic covering accuracy, cost, and context
+  savings, plus a refreshed architecture and diagram set under `docs/assets/`.
+- **`trust_remote_code` and instruction-aware embeddings** in the Sentence
+  Transformers provider, with built-in query/document instructions for
+  nomic-embed and BGE models.
+- **Corpus stratification for BEAM summarization** and targeted `--question-id`
+  / `--candidate-limit` flags for reproducing specific failures.
 - **Write-path correctness benchmarks** for the `add_conversation()` lineage
   pipeline, the part prior benchmarks never exercised (they ingest via
   `add_batch()`, so every row is a revision-1 lineage-of-one):
@@ -31,6 +49,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   top-up on sonnet (and net-negative on a weaker model), not the source of
   accuracy.
 - `ConversationResult` and `FactDecision` are now exported from `engram`.
+
+### Changed
+- **Decoupled the retrieval candidate pool from the evidence window.**
+  `SearchQuery.limit` now allows up to 1000 (was 100), so a deep candidate pool
+  can be reranked down to a smaller evidence block without one cap throttling the
+  other.
+- **Composer prompt** now matches evidence on meaning rather than exact wording,
+  reports genuine contradictions instead of silently picking one value, and
+  enumerates items (and date endpoints) before counting or computing intervals.
+- **Benchmark headline numbers** updated to the 2026-06-22 final run set:
+  LongMemEval-S 90.6%, LoCoMo-10 93.6%, BEAM 1M 81.9% (composer
+  `claude-sonnet-4-6`, judge `claude-opus-4-8`).
+- Memory-type-aware SQL scoring with query-aware graph traversal, dropping a
+  redundant triple similarity computation.
+- Sentence Transformers provider supports the v5 `get_embedding_dimension()` API
+  alongside the older `get_sentence_embedding_dimension()`.
 
 ### Fixed
 - **`add_conversation()` no longer silently drops updates.** It previously
@@ -65,6 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt runs, as can a unit/day word outside the curated allowlist. These are
   now *visible* via `.decisions` rather than silent, and closing them is tracked
   as follow-up.
+
+- **The Anthropic provider no longer sends `temperature` to Opus 4 models**,
+  which reject the parameter.
 
 ## [0.3.0b2] - 2026-06-20
 

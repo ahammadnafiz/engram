@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 768" width="100%" height="100%" style="background-color:#060608;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <defs>
+    <marker id="arrC" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0 1.5 L8.5 5 L0 8.5" fill="none" stroke="#4a4a55" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+  </defs>
+
+  <rect width="1280" height="768" fill="#060608" />
+  <rect x="592" y="0" width="96" height="4" rx="2" fill="#6d5dfb" />
+
+  <!-- Header -->
+  <text x="640" y="92" text-anchor="middle" font-size="46" font-weight="800" fill="#fbfbfd" letter-spacing="-0.5">Connect &amp; schema init</text>
+  <text x="640" y="132" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">connect() detects the embedding dimension, opens the pool, brings the schema to version — skipping all</text>
+  <text x="640" y="156" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">DDL when a stamp matches — then wires the services. The LLM is optional and degrades to none.</text>
+
+  <!-- Panel -->
+  <rect x="48" y="188" width="1184" height="566" rx="20" fill="#0b0b0f" stroke="#1c1c24" stroke-width="1" />
+
+  <!-- Flow connectors -->
+  <line x1="280" y1="312" x2="308" y2="312" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arrC)" />
+  <line x1="510" y1="312" x2="538" y2="312" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arrC)" />
+  <line x1="740" y1="312" x2="768" y2="312" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arrC)" />
+  <line x1="970" y1="312" x2="998" y2="312" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arrC)" />
+
+  <!-- Step boxes -->
+  <rect x="82" y="270" width="196" height="84" rx="8" fill="#11101d" stroke="#3a3469" stroke-width="1.2" />
+  <text x="180" y="306" text-anchor="middle" font-size="15" font-weight="600" fill="#eceaff">Embed Init</text>
+  <text x="180" y="325" text-anchor="middle" font-size="9" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">FROM_SETTINGS · DETECT DIM</text>
+
+  <rect x="312" y="270" width="196" height="84" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="410" y="306" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">DB Connect</text>
+  <text x="410" y="325" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">POSTGRES · ASYNCPG POOL</text>
+
+  <rect x="542" y="270" width="196" height="84" rx="8" fill="#11101d" stroke="#3a3469" stroke-width="1.2" />
+  <text x="640" y="306" text-anchor="middle" font-size="15" font-weight="600" fill="#eceaff">Init Schema</text>
+  <text x="640" y="325" text-anchor="middle" font-size="9" font-weight="500" fill="#8b85c4" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">STAMP FAST-PATH · MIGRATE</text>
+
+  <rect x="772" y="270" width="196" height="84" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="870" y="306" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">Wire Services</text>
+  <text x="870" y="325" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">STORE · GRAPH · TASK</text>
+
+  <rect x="1002" y="270" width="196" height="84" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="1100" y="306" text-anchor="middle" font-size="15" font-weight="600" fill="#f1f1f4">LLM Service</text>
+  <text x="1100" y="325" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">OPTIONAL · OR NONE</text>
+
+  <!-- to connected pill -->
+  <line x1="640" y1="354" x2="640" y2="400" stroke="#3a3a44" stroke-width="1.4" marker-end="url(#arrC)" />
+  <rect x="552" y="402" width="176" height="36" rx="18" fill="#14122a" stroke="#3a3469" stroke-width="1" />
+  <text x="640" y="425" text-anchor="middle" font-size="11" font-weight="600" fill="#b6b2e8" letter-spacing="1.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">CONNECTED CLIENT</text>
+
+  <!-- note panels -->
+  <rect x="96" y="470" width="540" height="156" rx="12" fill="#0c0c12" stroke="#24242e" stroke-width="1" />
+  <text x="118" y="500" font-size="14" font-weight="600" fill="#e9e7ff">Schema fast-path</text>
+  <text x="118" y="528" font-size="11.5" font-weight="500" fill="#9a9aa4">engram_schema_meta stamps the version, embedding</text>
+  <text x="118" y="548" font-size="11.5" font-weight="500" fill="#9a9aa4">dimension, and text-search config. On reconnect, a</text>
+  <text x="118" y="568" font-size="11.5" font-weight="500" fill="#9a9aa4">matching stamp skips every CREATE / ALTER / probe.</text>
+  <text x="118" y="600" font-size="8.5" font-weight="600" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">CHEAP RECONNECTS FOR SERVERLESS PROCESSES</text>
+
+  <rect x="644" y="470" width="540" height="156" rx="12" fill="#0c0c12" stroke="#24242e" stroke-width="1" />
+  <text x="666" y="500" font-size="14" font-weight="600" fill="#d8b765">Dimension guard</text>
+  <text x="666" y="528" font-size="11.5" font-weight="500" fill="#9a9aa4">A changed embedding size would orphan every stored</text>
+  <text x="666" y="548" font-size="11.5" font-weight="500" fill="#9a9aa4">vector, making those rows invisible to search — so</text>
+  <text x="666" y="568" font-size="11.5" font-weight="500" fill="#9a9aa4">init_schema() refuses the change and raises.</text>
+  <text x="666" y="600" font-size="8.5" font-weight="600" fill="#6e6e79" letter-spacing="0.6" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">OVERRIDE: ENGRAM_ALLOW_EMBEDDING_DIMENSION_CHANGE</text>
+
+  <!-- Footer -->
+  <text x="640" y="724" text-anchor="middle" font-size="11" font-weight="600" fill="#55555f" letter-spacing="4" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">CONNECT &amp; SCHEMA INIT</text>
+</svg>

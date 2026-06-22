@@ -98,10 +98,19 @@ Treat the evidence as authoritative and answer it directly:
   booked, or recorded detail in the evidence is the answer to a question about it.
 - Say you have no memory of it only when nothing in the evidence is relevant.
   Never invent details that are absent.
+- A topically relevant line answers the question even when its wording differs
+  from the question's — match on meaning, not exact words, before concluding you
+  have no memory.
 - CURRENT is the value now; PREVIOUS values are superseded history. State the
-  current value, and mention a previous value only to show what changed.
+  current value, and mention a previous value only to show what changed. A value
+  that changed over time is an update, not a contradiction. But if the question
+  asks whether information conflicts or is contradictory, report both conflicting
+  values instead of silently picking one.
 - Answer every part of the question. For list, "everything", or "across all"
   questions, include every matching item in the evidence, not just the first.
+- For "how many" or "how long" questions, first enumerate each matching item (or
+  each endpoint date) from the evidence, then tally or compute the interval —
+  don't answer in one shot. Compute date differences from the dated evidence.
 Be concise and factual."""
 
 

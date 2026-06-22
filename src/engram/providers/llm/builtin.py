@@ -259,7 +259,7 @@ class AnthropicLLMProvider(LLMProvider):
             }
             if system_parts:
                 call_kwargs["system"] = "\n\n".join(system_parts)
-            if temperature is not None:
+            if temperature is not None and "opus-4" not in self._model:
                 call_kwargs["temperature"] = temperature
             call_kwargs.update(kwargs)
 

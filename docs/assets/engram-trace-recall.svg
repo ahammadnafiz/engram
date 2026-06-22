@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 768" width="100%" height="100%" style="background-color:#060608;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <defs>
+    <marker id="arrTR" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 1.5 L8.5 5 L0 8.5" fill="none" stroke="#4a4a55" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+    </marker>
+  </defs>
+
+  <rect width="1280" height="768" fill="#060608" />
+  <rect x="592" y="0" width="96" height="4" rx="2" fill="#6d5dfb" />
+
+  <!-- Header -->
+  <text x="640" y="92" text-anchor="middle" font-size="46" font-weight="800" fill="#fbfbfd" letter-spacing="-0.5">Observable recall</text>
+  <text x="640" y="132" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">trace_recall() fuses deterministic critical recall with ranked search, notes what is superseded, and trims to the</text>
+  <text x="640" y="156" text-anchor="middle" font-size="16" font-weight="400" fill="#8a8a96">prompt budget — returning a trace of exactly what was kept, trimmed, or missing from the context.</text>
+
+  <!-- Panel -->
+  <rect x="48" y="188" width="1184" height="566" rx="20" fill="#0b0b0f" stroke="#1c1c24" stroke-width="1" />
+
+  <!-- Query -->
+  <rect x="80" y="382" width="150" height="80" rx="8" fill="#0e0e13" stroke="#292932" stroke-width="1" />
+  <text x="155" y="418" text-anchor="middle" font-size="14" font-weight="600" fill="#f1f1f4">trace_recall</text>
+  <text x="155" y="437" text-anchor="middle" font-size="9" font-weight="500" fill="#6e6e79" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">QUERY + BUDGET</text>
+
+  <!-- Retrieval group -->
+  <rect x="262" y="240" width="300" height="296" rx="12" fill="#0c0c12" stroke="#24242e" stroke-width="1" />
+  <text x="412" y="266" text-anchor="middle" font-size="12" font-weight="600" fill="#b6b2e8" letter-spacing="0.5">Retrieval surfaces</text>
+
+  <rect x="282" y="284" width="260" height="64" rx="8" fill="#15132c" stroke="#3a3469" stroke-width="1" />
+  <text x="412" y="311" text-anchor="middle" font-size="13" font-weight="600" fill="#e9e7ff">recall_critical()</text>
+  <text x="412" y="329" text-anchor="middle" font-size="8.5" font-weight="500" fill="#8b85c4" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">DETERMINISTIC · NO RANKING</text>
+
+  <rect x="282" y="356" width="260" height="64" rx="8" fill="#15132c" stroke="#3a3469" stroke-width="1" />
+  <text x="412" y="383" text-anchor="middle" font-size="13" font-weight="600" fill="#e9e7ff">deep_search() / search()</text>
+  <text x="412" y="401" text-anchor="middle" font-size="8.5" font-weight="500" fill="#8b85c4" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">VECTOR + KEYWORD + DECAY</text>
+
+  <rect x="282" y="428" width="260" height="64" rx="8" fill="#1d1810" stroke="#5f4a1e" stroke-width="1" />
+  <text x="412" y="455" text-anchor="middle" font-size="13" font-weight="600" fill="#f6efdd">list superseded</text>
+  <text x="412" y="473" text-anchor="middle" font-size="8.5" font-weight="500" fill="#b59a5e" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">OBSERVABILITY ONLY</text>
+
+  <line x1="230" y1="422" x2="262" y2="388" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arrTR)" />
+
+  <!-- Fuse + trim -->
+  <rect x="600" y="316" width="186" height="92" rx="10" fill="#11101d" stroke="#3a3469" stroke-width="1.2" />
+  <text x="693" y="350" text-anchor="middle" font-size="14" font-weight="600" fill="#eceaff">Fuse &amp; Trim</text>
+  <text x="693" y="370" text-anchor="middle" font-size="8.5" font-weight="500" fill="#8b85c4" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">DEDUPE · CRITICAL FIRST</text>
+  <text x="693" y="386" text-anchor="middle" font-size="8.5" font-weight="500" fill="#8b85c4" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">TOKEN BUDGET</text>
+
+  <line x1="542" y1="316" x2="600" y2="350" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arrTR)" />
+  <line x1="542" y1="388" x2="600" y2="378" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arrTR)" />
+  <!-- superseded feeds trace directly (dashed) -->
+  <path d="M542 460 C 760 470, 824 470, 824 470" fill="none" stroke="#5f4a1e" stroke-width="1.3" stroke-dasharray="3 3" marker-end="url(#arrTR)" />
+
+  <!-- RecallTrace -->
+  <rect x="824" y="288" width="360" height="220" rx="12" fill="#0e1830" stroke="#2a4a82" stroke-width="1.2" />
+  <text x="844" y="316" font-size="15" font-weight="700" fill="#eef2fb">RecallTrace</text>
+  <text x="1164" y="316" text-anchor="end" font-size="8.5" font-weight="500" fill="#7f93bf" letter-spacing="0.8" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">DEBUG VIEW</text>
+  <g font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">
+    <text x="844" y="350" font-size="11.5" fill="#cfe0fa">kept_memory_ids</text>
+    <text x="1164" y="350" text-anchor="end" font-size="9.5" fill="#6f84ad">in budget</text>
+    <text x="844" y="380" font-size="11.5" fill="#cfe0fa">trimmed_memory_ids</text>
+    <text x="1164" y="380" text-anchor="end" font-size="9.5" fill="#6f84ad">dropped by budget</text>
+    <text x="844" y="410" font-size="11.5" fill="#cfe0fa">missing_expected_terms</text>
+    <text x="1164" y="410" text-anchor="end" font-size="9.5" fill="#6f84ad">recall gap</text>
+    <text x="844" y="440" font-size="11.5" fill="#cfe0fa">superseded_memory_ids</text>
+    <text x="1164" y="440" text-anchor="end" font-size="9.5" fill="#6f84ad">hidden by conflict</text>
+    <text x="844" y="470" font-size="11.5" fill="#9fb6e6">context</text>
+    <text x="1164" y="470" text-anchor="end" font-size="9.5" fill="#6f84ad">prompt-ready block</text>
+  </g>
+  <line x1="844" y1="486" x2="1164" y2="486" stroke="#2a4a82" stroke-width="1" stroke-dasharray="2 3" />
+  <text x="844" y="500" font-size="8.5" font-weight="600" fill="#7f93bf" letter-spacing="0.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">notes · every retrieval decision is auditable</text>
+
+  <line x1="786" y1="362" x2="824" y2="380" stroke="#3a3a44" stroke-width="1.3" marker-end="url(#arrTR)" />
+
+  <!-- caption -->
+  <text x="640" y="588" text-anchor="middle" font-size="9" font-weight="600" fill="#6e6e79" letter-spacing="2.5" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">DETERMINISTIC + RANKED RETRIEVAL · FULLY TRACED</text>
+  <text x="640" y="616" text-anchor="middle" font-size="11" font-weight="500" fill="#8a8a96">Critical facts never lose to a broad query; trimmed and missing items are reported, not silently dropped.</text>
+
+  <!-- Footer -->
+  <text x="640" y="724" text-anchor="middle" font-size="11" font-weight="600" fill="#55555f" letter-spacing="4" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">OBSERVABLE RECALL</text>
+</svg>
