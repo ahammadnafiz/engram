@@ -33,6 +33,8 @@ Engram is evaluated on three long-term memory benchmarks. All runs use on-device
 
 _Latest run set: **2026-06-22**. Full per-type breakdowns, latency, and reproduce commands: [docs/benchmarks.md](docs/benchmarks.md)._
 
+![Engram per-type benchmark accuracy](docs/assets/engram-benchmark.svg)
+
 **LongMemEval-S breakdown** (500 questions):
 
 | Question type | Accuracy |
