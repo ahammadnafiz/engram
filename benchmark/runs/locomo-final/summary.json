@@ -1,0 +1,158 @@
+{
+  "benchmark": "LoCoMo-10 (ACL 2024)",
+  "pipeline": "add_batch(turns) -> search(hybrid, include_superseded) + recall(compose=False) + get_lineage -> composer LLM",
+  "judge_model": "claude-opus-4-8",
+  "answer_model": "claude-sonnet-4-6",
+  "memory_policy": "default",
+  "ingest_batch_size": 64,
+  "search_limit": 100,
+  "max_per_session": 6,
+  "rerank": true,
+  "graph_depth": 0,
+  "answer_max_tokens": 4000,
+  "conversations": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "categories": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "total": 1540,
+  "correct": 1442,
+  "accuracy": 0.9364,
+  "errored": 0,
+  "by_category": {
+    "multi-hop": {
+      "correct": 264,
+      "total": 282,
+      "accuracy": 0.9362
+    },
+    "open-domain": {
+      "correct": 75,
+      "total": 96,
+      "accuracy": 0.7812
+    },
+    "single-hop": {
+      "correct": 800,
+      "total": 841,
+      "accuracy": 0.9512
+    },
+    "temporal": {
+      "correct": 303,
+      "total": 321,
+      "accuracy": 0.9439
+    }
+  },
+  "failed_ids": [
+    "conv0_q104",
+    "conv0_q135",
+    "conv0_q138",
+    "conv0_q151",
+    "conv0_q40",
+    "conv0_q59",
+    "conv0_q71",
+    "conv1_q43",
+    "conv1_q44",
+    "conv1_q56",
+    "conv2_q107",
+    "conv2_q42",
+    "conv2_q48",
+    "conv2_q8",
+    "conv2_q85",
+    "conv3_q103",
+    "conv3_q119",
+    "conv3_q120",
+    "conv3_q14",
+    "conv3_q151",
+    "conv3_q183",
+    "conv3_q195",
+    "conv3_q24",
+    "conv3_q34",
+    "conv3_q4",
+    "conv3_q52",
+    "conv3_q53",
+    "conv3_q54",
+    "conv3_q66",
+    "conv3_q72",
+    "conv3_q74",
+    "conv3_q91",
+    "conv3_q92",
+    "conv4_q105",
+    "conv4_q11",
+    "conv4_q135",
+    "conv4_q136",
+    "conv4_q160",
+    "conv4_q164",
+    "conv4_q165",
+    "conv4_q166",
+    "conv4_q19",
+    "conv4_q20",
+    "conv4_q25",
+    "conv4_q28",
+    "conv4_q50",
+    "conv4_q53",
+    "conv4_q56",
+    "conv4_q66",
+    "conv4_q67"
+  ],
+  "latency": {
+    "avg_total_s": 14.572,
+    "p50_total_s": 13.511,
+    "p95_total_s": 22.01,
+    "avg_retrieval_s": 2.941,
+    "avg_generation_s": 11.631
+  },
+  "cost": {
+    "pricing_source": "Anthropic public pricing (base input/output USD per MTok)",
+    "token_counter": "tiktoken/o200k_base (compression baseline); provider usage (billed)",
+    "api_calls": {
+      "composer": 1540,
+      "judge": 1540,
+      "total": 3080
+    },
+    "billed_tokens": {
+      "composer_input": 9354055,
+      "composer_output": 788021,
+      "judge_input": 1430927,
+      "judge_output": 80230,
+      "total": 11653233
+    },
+    "real_cost_usd": {
+      "composer": 39.8825,
+      "judge": 9.1604,
+      "total": 49.0429,
+      "per_question": 0.031846
+    },
+    "context_compression": {
+      "avg_evidence_tokens": 4608,
+      "avg_full_context_tokens": 17888,
+      "compression_pct": 74.2
+    },
+    "full_context_baseline": {
+      "note": "Projected cost if the entire conversation were sent as context for every question (no retrieval), composer only.",
+      "projected_composer_cost_usd": 101.2361,
+      "our_composer_cost_usd": 39.8825,
+      "savings_pct": 60.6,
+      "cost_multiplier": 2.5
+    }
+  },
+  "context_efficiency": {
+    "avg_evidence_tokens": 4608,
+    "avg_full_context_tokens": 17888,
+    "compression_pct": 74.2,
+    "avg_search_hits": 99.9,
+    "avg_graph_hits": 0.0,
+    "token_counter": "tiktoken/o200k_base"
+  }
+}

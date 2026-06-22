@@ -1,7 +1,7 @@
 {
   "benchmark": "LongMemEval (longmemeval_s_cleaned)",
-  "pipeline": "add_batch(rendered turns/sessions) -> search(include_superseded) + recall(compose=False) + traverse_many -> composer LLM",
-  "judge_model": "claude-sonnet-4-6",
+  "pipeline": "add_batch(rendered turns/sessions) -> search(include_superseded) + recall(compose=False) -> composer LLM",
+  "judge_model": "claude-opus-4-8",
   "answer_model": "claude-sonnet-4-6",
   "memory_policy": "default",
   "memory_unit": "turn",
@@ -13,19 +13,19 @@
   "graph_depth": 0,
   "answer_max_tokens": 4000,
   "total": 500,
-  "correct": 449,
-  "accuracy": 0.898,
+  "correct": 453,
+  "accuracy": 0.906,
   "errored": 0,
   "by_question_type": {
     "knowledge-update": {
-      "correct": 74,
+      "correct": 75,
       "total": 78,
-      "accuracy": 0.9487
+      "accuracy": 0.9615
     },
     "multi-session": {
-      "correct": 107,
+      "correct": 111,
       "total": 133,
-      "accuracy": 0.8045
+      "accuracy": 0.8346
     },
     "single-session-assistant": {
       "correct": 53,
@@ -43,9 +43,9 @@
       "accuracy": 0.9857
     },
     "temporal-reasoning": {
-      "correct": 118,
+      "correct": 117,
       "total": 133,
-      "accuracy": 0.8872
+      "accuracy": 0.8797
     }
   },
   "abstention": {
@@ -54,17 +54,15 @@
     "accuracy": 0.9667
   },
   "failed_ids": [
-    "00ca467f",
     "01493427",
     "0a995998",
     "1a8a66a6",
     "2133c1b5",
-    "21d02d0d",
-    "2ce6a0f2",
     "370a8ff4",
     "37f165cf",
     "51c32626",
     "5d3d2817",
+    "618f13b2",
     "6e984301",
     "6e984302",
     "7024f17c",
@@ -77,12 +75,10 @@
     "8cf4d046",
     "92a0aa75",
     "9d25d4e0",
-    "9ea5eabc",
     "9ee3ecd6",
     "a11281a2",
     "a96c20ee_abs",
     "ba358f49",
-    "ba61f0b9",
     "c4a1ceb8",
     "c4f10528",
     "cc539528",
@@ -91,7 +87,7 @@
     "d851d5ba",
     "dd2973ad",
     "eac54add",
-    "gpt4_2f8be40d",
+    "gpt4_1e4a8aec",
     "gpt4_372c3eed",
     "gpt4_45189cb4",
     "gpt4_468eb063",
@@ -107,18 +103,53 @@
     "gpt4_f420262d"
   ],
   "latency": {
-    "avg_total_s": 26.841,
-    "p50_total_s": 26.483,
-    "p95_total_s": 39.4,
-    "avg_retrieval_s": 6.128,
-    "avg_ingest_s": 12.831,
-    "avg_generation_s": 7.881
+    "avg_total_s": 28.771,
+    "p50_total_s": 29.136,
+    "p95_total_s": 39.14,
+    "avg_retrieval_s": 6.297,
+    "avg_ingest_s": 14.416,
+    "avg_generation_s": 8.058
+  },
+  "cost": {
+    "pricing_source": "Anthropic public pricing (base input/output USD per MTok)",
+    "token_counter": "tiktoken/o200k_base (compression baseline); provider usage (billed)",
+    "api_calls": {
+      "composer": 500,
+      "judge": 500,
+      "total": 1000
+    },
+    "billed_tokens": {
+      "composer_input": 7843256,
+      "composer_output": 172655,
+      "judge_input": 1352024,
+      "judge_output": 39435,
+      "total": 9407370
+    },
+    "real_cost_usd": {
+      "composer": 26.1196,
+      "judge": 7.746,
+      "total": 33.8656,
+      "per_question": 0.067731
+    },
+    "context_compression": {
+      "avg_evidence_tokens": 11345,
+      "avg_full_context_tokens": 101601,
+      "compression_pct": 88.8
+    },
+    "full_context_baseline": {
+      "note": "Projected cost if the entire conversation were sent as context for every question (no retrieval), composer only.",
+      "projected_composer_cost_usd": 161.5043,
+      "our_composer_cost_usd": 26.1196,
+      "savings_pct": 83.8,
+      "cost_multiplier": 6.2
+    }
   },
   "context_efficiency": {
-    "avg_evidence_tokens": 12452,
-    "avg_full_context_tokens": 122324,
-    "compression_pct": 89.8,
+    "avg_evidence_tokens": 11345,
+    "avg_full_context_tokens": 101601,
+    "compression_pct": 88.8,
     "avg_search_hits": 58.0,
-    "avg_graph_hits": 0.0
+    "avg_graph_hits": 0.0,
+    "token_counter": "tiktoken/o200k_base"
   }
 }

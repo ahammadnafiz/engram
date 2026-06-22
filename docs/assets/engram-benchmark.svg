@@ -4,22 +4,22 @@
 
   <!-- Header -->
   <text x="640" y="86" text-anchor="middle" font-size="40" font-weight="800" fill="#fbfbfd" letter-spacing="-0.5">Engram benchmark results</text>
-  <text x="640" y="122" text-anchor="middle" font-size="15" font-weight="400" fill="#8a8a96">Retrieval-layer accuracy on three long-term memory benchmarks — add_batch() ingest, zero LLM calls at write · 2026-06-21</text>
+  <text x="640" y="122" text-anchor="middle" font-size="15" font-weight="400" fill="#8a8a96">Retrieval-layer accuracy on three long-term memory benchmarks — add_batch() ingest, zero LLM calls at write · 2026-06-22</text>
 
   <!-- Score cards -->
   <rect x="70" y="158" width="360" height="150" rx="16" fill="#0e0e13" stroke="#24242e" stroke-width="1" />
   <text x="250" y="206" text-anchor="middle" font-size="17" font-weight="700" fill="#f1f1f4">LongMemEval-S</text>
-  <text x="250" y="266" text-anchor="middle" font-size="46" font-weight="800" fill="#4f8ef7" letter-spacing="-0.5">89.8%</text>
+  <text x="250" y="266" text-anchor="middle" font-size="46" font-weight="800" fill="#4f8ef7" letter-spacing="-0.5">90.6%</text>
   <text x="250" y="292" text-anchor="middle" font-size="10" font-weight="500" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">500 QS · ISOLATED HAYSTACKS</text>
 
   <rect x="460" y="158" width="360" height="150" rx="16" fill="#0e0e13" stroke="#24242e" stroke-width="1" />
   <text x="640" y="206" text-anchor="middle" font-size="17" font-weight="700" fill="#f1f1f4">LoCoMo-10</text>
-  <text x="640" y="266" text-anchor="middle" font-size="46" font-weight="800" fill="#8b7bf0" letter-spacing="-0.5">85.2%</text>
+  <text x="640" y="266" text-anchor="middle" font-size="46" font-weight="800" fill="#8b7bf0" letter-spacing="-0.5">93.6%</text>
   <text x="640" y="292" text-anchor="middle" font-size="10" font-weight="500" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">1,540 QS · 10 CONVERSATIONS</text>
 
   <rect x="850" y="158" width="360" height="150" rx="16" fill="#0e0e13" stroke="#24242e" stroke-width="1" />
   <text x="1030" y="206" text-anchor="middle" font-size="17" font-weight="700" fill="#f1f1f4">BEAM 1M</text>
-  <text x="1030" y="266" text-anchor="middle" font-size="46" font-weight="800" fill="#34d399" letter-spacing="-0.5">77.4%</text>
+  <text x="1030" y="266" text-anchor="middle" font-size="46" font-weight="800" fill="#34d399" letter-spacing="-0.5">81.9%</text>
   <text x="1030" y="292" text-anchor="middle" font-size="10" font-weight="500" fill="#6e6e79" letter-spacing="1" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">700 QS · 1M-TOKEN SCALE</text>
 
   <!-- Column headers -->
@@ -37,60 +37,60 @@
   <text x="340" y="456" font-size="12" font-weight="600" fill="#f1f1f4">96.7%</text>
 
   <text x="70" y="500" font-size="12.5" font-weight="500" fill="#9a9aa3">Know-Update</text>
-  <rect x="175" y="487" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="487" width="142.4" height="18" rx="4" fill="#4f8ef7" />
-  <text x="340" y="500" font-size="12" font-weight="600" fill="#f1f1f4">94.9%</text>
+  <rect x="175" y="487" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="487" width="144.3" height="18" rx="4" fill="#4f8ef7" />
+  <text x="340" y="500" font-size="12" font-weight="600" fill="#f1f1f4">96.2%</text>
 
   <text x="70" y="544" font-size="12.5" font-weight="500" fill="#9a9aa3">Temporal</text>
-  <rect x="175" y="531" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="531" width="133.1" height="18" rx="4" fill="#4f8ef7" />
-  <text x="340" y="544" font-size="12" font-weight="600" fill="#f1f1f4">88.7%</text>
+  <rect x="175" y="531" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="531" width="132.0" height="18" rx="4" fill="#4f8ef7" />
+  <text x="340" y="544" font-size="12" font-weight="600" fill="#f1f1f4">88.0%</text>
 
   <text x="70" y="588" font-size="12.5" font-weight="500" fill="#9a9aa3">Multi-Session</text>
-  <rect x="175" y="575" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="575" width="120.8" height="18" rx="4" fill="#4f8ef7" />
-  <text x="340" y="588" font-size="12" font-weight="600" fill="#f1f1f4">80.5%</text>
+  <rect x="175" y="575" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="175" y="575" width="125.3" height="18" rx="4" fill="#4f8ef7" />
+  <text x="340" y="588" font-size="12" font-weight="600" fill="#f1f1f4">83.5%</text>
 
   <!-- Column 2: LoCoMo (violet) -->
-  <text x="480" y="412" font-size="12.5" font-weight="500" fill="#9a9aa3">Multi-hop</text>
-  <rect x="585" y="399" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="399" width="129.8" height="18" rx="4" fill="#8b7bf0" />
-  <text x="750" y="412" font-size="12" font-weight="600" fill="#f1f1f4">86.5%</text>
+  <text x="480" y="412" font-size="12.5" font-weight="500" fill="#9a9aa3">Single-hop</text>
+  <rect x="585" y="399" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="399" width="142.7" height="18" rx="4" fill="#8b7bf0" />
+  <text x="750" y="412" font-size="12" font-weight="600" fill="#f1f1f4">95.1%</text>
 
-  <text x="480" y="456" font-size="12.5" font-weight="500" fill="#9a9aa3">Single-hop</text>
-  <rect x="585" y="443" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="443" width="129.2" height="18" rx="4" fill="#8b7bf0" />
-  <text x="750" y="456" font-size="12" font-weight="600" fill="#f1f1f4">86.1%</text>
+  <text x="480" y="456" font-size="12.5" font-weight="500" fill="#9a9aa3">Temporal</text>
+  <rect x="585" y="443" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="443" width="141.6" height="18" rx="4" fill="#8b7bf0" />
+  <text x="750" y="456" font-size="12" font-weight="600" fill="#f1f1f4">94.4%</text>
 
-  <text x="480" y="500" font-size="12.5" font-weight="500" fill="#9a9aa3">Temporal</text>
-  <rect x="585" y="487" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="487" width="129.0" height="18" rx="4" fill="#8b7bf0" />
-  <text x="750" y="500" font-size="12" font-weight="600" fill="#f1f1f4">86.0%</text>
+  <text x="480" y="500" font-size="12.5" font-weight="500" fill="#9a9aa3">Multi-hop</text>
+  <rect x="585" y="487" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="487" width="140.4" height="18" rx="4" fill="#8b7bf0" />
+  <text x="750" y="500" font-size="12" font-weight="600" fill="#f1f1f4">93.6%</text>
 
   <text x="480" y="544" font-size="12.5" font-weight="500" fill="#9a9aa3">Open-domain</text>
-  <rect x="585" y="531" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="531" width="106.2" height="18" rx="4" fill="#8b7bf0" opacity="0.85" />
-  <text x="750" y="544" font-size="12" font-weight="600" fill="#f1f1f4">70.8%</text>
+  <rect x="585" y="531" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="585" y="531" width="117.2" height="18" rx="4" fill="#8b7bf0" opacity="0.85" />
+  <text x="750" y="544" font-size="12" font-weight="600" fill="#f1f1f4">78.1%</text>
 
   <!-- Column 3: BEAM (green) -->
   <text x="890" y="412" font-size="12.5" font-weight="500" fill="#9a9aa3">Abstention</text>
-  <rect x="995" y="399" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="399" width="147.9" height="18" rx="4" fill="#34d399" />
-  <text x="1160" y="412" font-size="12" font-weight="600" fill="#f1f1f4">98.6%</text>
+  <rect x="995" y="399" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="399" width="145.7" height="18" rx="4" fill="#34d399" />
+  <text x="1160" y="412" font-size="12" font-weight="600" fill="#f1f1f4">97.1%</text>
 
   <text x="890" y="456" font-size="12.5" font-weight="500" fill="#9a9aa3">Preference</text>
   <rect x="995" y="443" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="443" width="135.0" height="18" rx="4" fill="#34d399" />
   <text x="1160" y="456" font-size="12" font-weight="600" fill="#f1f1f4">90.0%</text>
 
-  <text x="890" y="500" font-size="12.5" font-weight="500" fill="#9a9aa3">Instruction</text>
-  <rect x="995" y="487" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="487" width="128.6" height="18" rx="4" fill="#34d399" />
-  <text x="1160" y="500" font-size="12" font-weight="600" fill="#f1f1f4">85.7%</text>
+  <text x="890" y="500" font-size="12.5" font-weight="500" fill="#9a9aa3">Multi-Session</text>
+  <rect x="995" y="487" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="487" width="132.9" height="18" rx="4" fill="#34d399" />
+  <text x="1160" y="500" font-size="12" font-weight="600" fill="#f1f1f4">88.6%</text>
 
-  <text x="890" y="544" font-size="12.5" font-weight="500" fill="#9a9aa3">Multi-Session</text>
-  <rect x="995" y="531" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="531" width="126.5" height="18" rx="4" fill="#34d399" />
-  <text x="1160" y="544" font-size="12" font-weight="600" fill="#f1f1f4">84.3%</text>
+  <text x="890" y="544" font-size="12.5" font-weight="500" fill="#9a9aa3">Instruction</text>
+  <rect x="995" y="531" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="531" width="130.7" height="18" rx="4" fill="#34d399" />
+  <text x="1160" y="544" font-size="12" font-weight="600" fill="#f1f1f4">87.1%</text>
 
   <text x="890" y="588" font-size="12.5" font-weight="500" fill="#9a9aa3">Temporal</text>
-  <rect x="995" y="575" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="575" width="102.9" height="18" rx="4" fill="#34d399" opacity="0.85" />
-  <text x="1160" y="588" font-size="12" font-weight="600" fill="#f1f1f4">68.6%</text>
+  <rect x="995" y="575" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="575" width="98.6" height="18" rx="4" fill="#34d399" opacity="0.85" />
+  <text x="1160" y="588" font-size="12" font-weight="600" fill="#f1f1f4">65.7%</text>
 
   <text x="890" y="632" font-size="12.5" font-weight="500" fill="#9a9aa3">Summarize</text>
-  <rect x="995" y="619" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="619" width="60.0" height="18" rx="4" fill="#34d399" opacity="0.55" />
-  <text x="1160" y="632" font-size="12" font-weight="600" fill="#f1f1f4">40.0%</text>
+  <rect x="995" y="619" width="150" height="18" rx="4" fill="#1a1a20" /><rect x="995" y="619" width="87.9" height="18" rx="4" fill="#34d399" opacity="0.7" />
+  <text x="1160" y="632" font-size="12" font-weight="600" fill="#f1f1f4">58.6%</text>
 
   <!-- Footer -->
   <line x1="70" y1="688" x2="1210" y2="688" stroke="#1c1c24" stroke-width="1" />
-  <text x="640" y="722" text-anchor="middle" font-size="10.5" font-weight="600" fill="#55555f" letter-spacing="3" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">COMPOSER &amp; JUDGE: CLAUDE-SONNET-4-6 · ON-DEVICE EMBEDDINGS · REPRODUCIBLE IN benchmark/</text>
+  <text x="640" y="722" text-anchor="middle" font-size="10.5" font-weight="600" fill="#55555f" letter-spacing="3" font-family="'SF Mono',SFMono-Regular,Menlo,Consolas,monospace">COMPOSER CLAUDE-SONNET-4-6 · JUDGE CLAUDE-OPUS-4-8 · ON-DEVICE EMBEDDINGS · REPRODUCIBLE IN benchmark/</text>
 </svg>

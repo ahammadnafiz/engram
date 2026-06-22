@@ -21,17 +21,17 @@
 
 Engram is evaluated on three long-term memory benchmarks. All runs use on-device embeddings (`all-MiniLM-L6-v2`, 384-d, free) with **no LLM calls at ingestion** — raw episodic turns stored verbatim via `add_batch()`, all reasoning deferred to query time via hybrid search + cross-encoder rerank + `recall()`.
 
-**Honest caveats**: composer and judge are the same model family (`claude-sonnet-4-6`) across all three runs, which is a known leniency bias. `add_batch()` bypasses Engram's LLM-based extraction pipeline — these are floor numbers. `add_conversation()` is expected to score higher on structured fact types.
+**Honest caveats**: the composer (`claude-sonnet-4-6`) and judge (`claude-opus-4-8`) are different models but share a vendor, so the grading is stricter than self-judging without being fully independent. `add_batch()` bypasses Engram's LLM-based extraction pipeline, so these are floor numbers; `add_conversation()` is expected to score higher on structured fact types.
 
-![Engram benchmark results](docs/assets/engram-benchmark.svg)
+![Engram benchmarks at a glance — accuracy, cost, and context savings](docs/assets/engram-bento.svg)
 
-| Benchmark | Questions | Accuracy | Composer |
+| Benchmark | Questions | Accuracy | Composer / Judge |
 |---|---|---|---|
-| [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) (ICLR 2025) | 500 | **89.8%** | claude-sonnet-4-6 |
-| [LoCoMo-10](https://github.com/snap-research/locomo) (ACL 2024) | 1,540 | **85.2%** | claude-sonnet-4-6 |
-| [BEAM 1M](https://github.com/mohammadtavakoli78/BEAM) (ICLR 2026) | 700 | **77.4%** | claude-sonnet-4-6 |
+| [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) (ICLR 2025) | 500 | **90.6%** | sonnet-4-6 / opus-4-8 |
+| [LoCoMo-10](https://github.com/snap-research/locomo) (ACL 2024) | 1,540 | **93.6%** | sonnet-4-6 / opus-4-8 |
+| [BEAM 1M](https://github.com/mohammadtavakoli78/BEAM) (ICLR 2026) | 700 | **81.9%** | sonnet-4-6 / opus-4-8 |
 
-_Latest run set: **2026-06-21**. Full per-type breakdowns, latency, and reproduce commands: [docs/benchmarks.md](docs/benchmarks.md)._
+_Latest run set: **2026-06-22**. Full per-type breakdowns, latency, and reproduce commands: [docs/benchmarks.md](docs/benchmarks.md)._
 
 **LongMemEval-S breakdown** (500 questions):
 
@@ -39,37 +39,49 @@ _Latest run set: **2026-06-21**. Full per-type breakdowns, latency, and reproduc
 |---|---|
 | single-session-user | 98.6% |
 | abstention | 96.7% |
-| knowledge-update | 94.9% |
+| knowledge-update | 96.2% |
 | single-session-assistant | 94.6% |
 | single-session-preference | 93.3% |
-| temporal-reasoning | 88.7% |
-| multi-session | 80.5% |
+| temporal-reasoning | 88.0% |
+| multi-session | 83.5% |
 
 **LoCoMo-10 breakdown** (1,540 questions across 10 long conversations):
 
 | Category | Accuracy |
 |---|---|
-| multi-hop | 86.5% |
-| single-hop | 86.1% |
-| temporal | 86.0% |
-| open-domain | 70.8% |
+| single-hop | 95.1% |
+| temporal | 94.4% |
+| multi-hop | 93.6% |
+| open-domain | 78.1% |
 
 **BEAM 1M breakdown** (700 questions, 10 question types, nugget scoring):
 
 | Question type | Accuracy |
 |---|---|
-| abstention | 98.6% |
+| abstention | 97.1% |
+| contradiction_resolution | 91.4% |
 | preference_following | 90.0% |
-| instruction_following | 85.7% |
-| multi_session_reasoning | 84.3% |
-| event_ordering | 82.9% |
-| information_extraction | 78.6% |
-| contradiction_resolution | 75.7% |
-| knowledge_update | 70.0% |
-| temporal_reasoning | 68.6% |
-| summarization | 40.0% |
+| multi_session_reasoning | 88.6% |
+| instruction_following | 87.1% |
+| event_ordering | 84.3% |
+| information_extraction | 81.4% |
+| knowledge_update | 74.3% |
+| temporal_reasoning | 65.7% |
+| summarization | 58.6% |
 
-Summarization (40.0%) is a known architectural floor: relevance-ranked retrieval is precision-optimized, not coverage-maximizing. Full methodology, ablation table, and reproduce commands: [docs/benchmarks.md](docs/benchmarks.md).
+Summarization (58.6%) is the weakest type and a known architectural floor: relevance-ranked retrieval is precision-optimized, not coverage-maximizing. Full methodology, ablation table, and reproduce commands: [docs/benchmarks.md](docs/benchmarks.md).
+
+**Cost savings**
+
+The composer reads only the reranked evidence block, never the full conversation. Per-question composer cost vs the no-retrieval baseline (sending the whole conversation as context every time), at Anthropic list prices:
+
+| Benchmark | Compression | Composer $/q | Full-context $/q | Cheaper by |
+|---|---|---|---|---|
+| LongMemEval-S | 88.8% | $0.052 | $0.323 | 6.2× |
+| LoCoMo-10 | 74.2% | $0.026 | $0.066 | 2.5× |
+| BEAM 1M | 96.3% | $0.141 | $3.13 | 22.1× |
+
+Savings scale with history length: on BEAM's 1M-token conversations retrieval is 22× cheaper; on LoCoMo's short ones it's 2.5×. Ingest is free — embeddings run on-device, no LLM at write. Per-question figures are composer-only; the judge runs for scoring, not in production. Details in [docs/benchmarks.md](docs/benchmarks.md#cost-savings).
 
 ---
 
@@ -277,20 +289,7 @@ async with Engram(memory_policy=sales_policy) as engram:
 
 Engram handles messy, unstructured streams of information and distills them into a pristine 2nd Brain. It uses a converged architecture where all operations run in PostgreSQL:
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                            ENGRAM                                   │
-├─────────────────────────────────────────────────────────────────────┤
-│   Embedding Service          │          LLM Service                 │
-│   (OpenAI, Local, etc.)      │          (OpenAI, Anthropic, etc.)   │
-├──────────────────────────────┴──────────────────────────────────────┤
-│                       PostgreSQL + pgvector                         │
-│   ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐    │
-│   │  Vectors   │  │  Full-text │  │   Graph    │  │   JSONB    │    │
-│   │   (HNSW)   │  │   (GIN)    │  │ Relations  │  │  Metadata  │    │
-│   └────────────┘  └────────────┘  └────────────┘  └────────────┘    │
-└─────────────────────────────────────────────────────────────────────┘
-```
+![Engram architecture](docs/assets/engram-architecture.svg)
 
 ### Episodic vs. Semantic Separation
 
@@ -302,11 +301,15 @@ Engram refuses to pick between raw transcripts and derived summaries. It separat
 | `content` | Yes | Backward-compatible alias of `fact` in the API |
 | `main_content` | No | Full conversation context (cost-effective storage) |
 
+![Two-Column Cost Model](docs/assets/engram-two-column.svg)
+
 ### Lineages & `supersedes`
 
 When a user updates a fact, Engram does *not* destructively overwrite the old fact. Instead, it inserts the new fact, changes the old fact's status to `superseded`, and draws a physical `supersedes` graph edge between them.
 * Active searches only retrieve the active head, eliminating **Stale Context Dominance**.
 * The old fact is perfectly preserved for auditing or historical lineage queries (`get_lineage()`), eliminating **Derivation Drift**.
+
+![Memory lineage and supersession](docs/assets/engram-lineage.svg)
 
 ![Single-pass write path — infer type, embed on-device, dedup, supersede, persist; no LLM required](docs/assets/engram-write-path.svg)
 
@@ -321,6 +324,8 @@ stores task memory separately from extracted facts:
 | `agent_events` | Raw append-only ledger of user, assistant, agent, tool, artifact, and error events |
 | `agent_checkpoints` | Compact summaries of current state, decisions, blockers, and artifacts |
 | `memory_jobs` | Durable background queue for deriving facts/checkpoints from raw turns |
+
+![Task flow](docs/assets/engram-task-flow.svg)
 
 ```python
 task = await engram.start_task("Investigate a production incident", "sre-agent")
@@ -359,8 +364,6 @@ print(trace.superseded_memory_ids)
 ### Hybrid Search
 
 Search combines multiple signals using Reciprocal Rank Fusion:
-
-```
 
 ![Multi-surface retrieval — every recall fans out across four surfaces and fuses them over one PostgreSQL store](docs/assets/engram-retrieval.svg)
 
@@ -422,8 +425,8 @@ python examples/chatbot.py
 ```
 
 The chatbot runs the benchmark pipeline live: each turn is stored verbatim via
-`add_batch()` (on-device embeddings, no LLM at ingest), retrieved over 4 surfaces
-(hybrid search + rerank, `recall()`, `get_lineage()`, graph traversal), and
+`add_batch()` (on-device embeddings, no LLM at ingest), retrieved over 3 surfaces
+(hybrid search + rerank, `recall()`, `get_lineage()`), and
 answered by a single composer call. Reranking defaults to
 `ENGRAM_CHATBOT_RERANK=auto`; set `ENGRAM_CHATBOT_RERANK=true` to force the
 cross-encoder or `false` to disable it. It does **not** use `add_conversation()`

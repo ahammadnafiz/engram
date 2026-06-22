@@ -73,7 +73,7 @@ superseded.
 
 - :material-chart-bar: **[Benchmarks](benchmarks.md)**
 
-    77.4% on BEAM 1M (ICLR 2026), 89.8% on LongMemEval-S (ICLR 2025), 85.2% on LoCoMo-10 (ACL 2024). All three runs use `add_batch()` (no LLM at ingest) and are reproducible with the scripts in `benchmark/`.
+    81.9% on BEAM 1M (ICLR 2026), 90.6% on LongMemEval-S (ICLR 2025), 93.6% on LoCoMo-10 (ACL 2024). All three runs use `add_batch()` (no LLM at ingest) and are reproducible with the scripts in `benchmark/`.
 
 </div>
 
@@ -150,17 +150,23 @@ When `Engram.connect()` is called, it automatically creates the database schema,
 
 ## Benchmark results
 
-Engram is evaluated on three standard long-term memory benchmarks. All runs use on-device embeddings (`all-MiniLM-L6-v2`, free, no API cost at ingest) and `add_batch()` — raw episodic turns stored verbatim, with all reasoning deferred to query time via `search()` + `recall()` + `get_lineage()`. Same model is used for both composer and judge (`claude-sonnet-4-6`), which is a known leniency bias worth disclosing. These are floor numbers: `add_conversation()` (full LLM extraction at ingest) is expected to score higher.
+Engram is evaluated on three standard long-term memory benchmarks. All runs use on-device embeddings (`all-MiniLM-L6-v2`, free, no API cost at ingest) and `add_batch()` — raw episodic turns stored verbatim, with all reasoning deferred to query time via `search()` + `recall()` + `get_lineage()`. The composer (`claude-sonnet-4-6`) and judge (`claude-opus-4-8`) are different models from the same vendor, so the grading is stricter than self-judging but not fully independent. These are floor numbers: `add_conversation()` (full LLM extraction at ingest) is expected to score higher.
 
-![Engram benchmark results](assets/engram-benchmark.svg)
+![Engram benchmarks at a glance — accuracy, cost, and context savings](assets/engram-bento.svg)
 
-| Benchmark | Questions | Accuracy | Composer |
+| Benchmark | Questions | Accuracy | Composer / Judge |
 |---|---|---|---|
-| [LongMemEval-S](benchmarks.md#longmemeval-s-898) (ICLR 2025) | 500 | **89.8%** | claude-sonnet-4-6 |
-| [LoCoMo-10](benchmarks.md#locomo-10-852) (ACL 2024) | 1,540 | **85.2%** | claude-sonnet-4-6 |
-| [BEAM 1M](benchmarks.md#beam-1m-774) (ICLR 2026) | 700 | **77.4%** | claude-sonnet-4-6 |
+| [LongMemEval-S](benchmarks.md#longmemeval-s-906) (ICLR 2025) | 500 | **90.6%** | sonnet-4-6 / opus-4-8 |
+| [LoCoMo-10](benchmarks.md#locomo-10-936) (ACL 2024) | 1,540 | **93.6%** | sonnet-4-6 / opus-4-8 |
+| [BEAM 1M](benchmarks.md#beam-1m-819) (ICLR 2026) | 700 | **81.9%** | sonnet-4-6 / opus-4-8 |
 
-All three benchmark scripts are in `benchmark/` and can be run against your own database. See [Benchmarks](benchmarks.md) for full per-type breakdowns, honest caveats, ablation table, and reproduce commands.
+Per-type accuracy across all three benchmarks:
+
+![Engram per-type benchmark accuracy](assets/engram-benchmark.svg)
+
+**Cost savings.** The composer reads only the reranked evidence block, never the full conversation. Against the no-retrieval baseline (whole conversation as context every time), that is 22× cheaper on BEAM 1M ($0.14 vs $3.13 per question), 6.2× on LongMemEval-S, and 2.5× on LoCoMo-10. Savings scale with history length, and ingest is free because embeddings run on-device.
+
+All three benchmark scripts are in `benchmark/` and can be run against your own database. See [Benchmarks](benchmarks.md) for full per-type breakdowns, honest caveats, the cost table, ablation, and reproduce commands.
 
 ## Included Examples
 

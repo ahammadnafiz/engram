@@ -1,0 +1,214 @@
+{
+  "benchmark": "BEAM (ICLR 2026)",
+  "pipeline": "add_batch(turns) -> search(hybrid, rerank) + recall(compose=False) + get_lineage -> composer LLM -> nugget judge (0/0.5/1.0)",
+  "judge_model": "claude-opus-4-8",
+  "answer_model": "claude-sonnet-4-6",
+  "memory_policy": "default",
+  "embedding_provider": "sentence-transformers",
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "search_limit": 100,
+  "candidate_limit": 500,
+  "rerank": true,
+  "graph_depth": 0,
+  "answer_max_tokens": 4000,
+  "cutoffs": [
+    100
+  ],
+  "chat_sizes": [
+    "1M"
+  ],
+  "conversations": null,
+  "question_types": [
+    "abstention",
+    "contradiction_resolution",
+    "event_ordering",
+    "information_extraction",
+    "instruction_following",
+    "knowledge_update",
+    "multi_session_reasoning",
+    "preference_following",
+    "summarization",
+    "temporal_reasoning"
+  ],
+  "total_questions": 700,
+  "errored": 0,
+  "pass_threshold": 0.5,
+  "primary_cutoff": "top100",
+  "accuracy": 81.9,
+  "avg_score": 0.735,
+  "metrics_by_cutoff": {
+    "top100": {
+      "overall": {
+        "total": 700,
+        "correct": 573,
+        "errors": 0,
+        "accuracy": 81.9,
+        "avg_score": 0.735
+      },
+      "by_question_type": {
+        "abstention": {
+          "total": 70,
+          "correct": 68,
+          "accuracy": 97.1,
+          "avg_score": 0.9679
+        },
+        "contradiction_resolution": {
+          "total": 70,
+          "correct": 64,
+          "accuracy": 91.4,
+          "avg_score": 0.6321
+        },
+        "event_ordering": {
+          "total": 70,
+          "correct": 59,
+          "accuracy": 84.3,
+          "avg_score": 0.7001
+        },
+        "information_extraction": {
+          "total": 70,
+          "correct": 57,
+          "accuracy": 81.4,
+          "avg_score": 0.7878
+        },
+        "instruction_following": {
+          "total": 70,
+          "correct": 61,
+          "accuracy": 87.1,
+          "avg_score": 0.8101
+        },
+        "knowledge_update": {
+          "total": 70,
+          "correct": 52,
+          "accuracy": 74.3,
+          "avg_score": 0.725
+        },
+        "multi_session_reasoning": {
+          "total": 70,
+          "correct": 62,
+          "accuracy": 88.6,
+          "avg_score": 0.7812
+        },
+        "preference_following": {
+          "total": 70,
+          "correct": 63,
+          "accuracy": 90.0,
+          "avg_score": 0.8095
+        },
+        "summarization": {
+          "total": 70,
+          "correct": 41,
+          "accuracy": 58.6,
+          "avg_score": 0.5183
+        },
+        "temporal_reasoning": {
+          "total": 70,
+          "correct": 46,
+          "accuracy": 65.7,
+          "avg_score": 0.6179
+        }
+      }
+    }
+  },
+  "failed_ids": [
+    "1M_c0_q17_summarization",
+    "1M_c0_q3_contradiction_resolution",
+    "1M_c0_q5_event_ordering",
+    "1M_c0_q9_instruction_following",
+    "1M_c10_q10_knowledge_update",
+    "1M_c10_q11_knowledge_update",
+    "1M_c10_q15_preference_following",
+    "1M_c10_q19_temporal_reasoning",
+    "1M_c10_q7_information_extraction",
+    "1M_c11_q14_preference_following",
+    "1M_c11_q15_preference_following",
+    "1M_c11_q16_summarization",
+    "1M_c11_q5_event_ordering",
+    "1M_c11_q7_information_extraction",
+    "1M_c12_q18_temporal_reasoning",
+    "1M_c12_q19_temporal_reasoning",
+    "1M_c12_q1_abstention",
+    "1M_c13_q11_knowledge_update",
+    "1M_c13_q12_multi_session_reasoning",
+    "1M_c13_q13_multi_session_reasoning",
+    "1M_c14_q16_summarization",
+    "1M_c14_q5_event_ordering",
+    "1M_c14_q7_information_extraction",
+    "1M_c15_q16_summarization",
+    "1M_c15_q17_summarization",
+    "1M_c15_q18_temporal_reasoning",
+    "1M_c16_q17_summarization",
+    "1M_c18_q18_temporal_reasoning",
+    "1M_c19_q16_summarization",
+    "1M_c19_q6_information_extraction",
+    "1M_c1_q16_summarization",
+    "1M_c1_q17_summarization",
+    "1M_c1_q19_temporal_reasoning",
+    "1M_c1_q4_event_ordering",
+    "1M_c1_q5_event_ordering",
+    "1M_c1_q7_information_extraction",
+    "1M_c21_q12_multi_session_reasoning",
+    "1M_c21_q17_summarization",
+    "1M_c21_q18_temporal_reasoning",
+    "1M_c21_q4_event_ordering",
+    "1M_c21_q5_event_ordering",
+    "1M_c21_q7_information_extraction",
+    "1M_c22_q16_summarization",
+    "1M_c22_q17_summarization",
+    "1M_c22_q7_information_extraction",
+    "1M_c23_q10_knowledge_update",
+    "1M_c23_q11_knowledge_update",
+    "1M_c23_q12_multi_session_reasoning",
+    "1M_c23_q7_information_extraction",
+    "1M_c23_q8_instruction_following"
+  ],
+  "latency": {
+    "avg_total_s": 27.173,
+    "p50_total_s": 19.569,
+    "p95_total_s": 75.899,
+    "avg_retrieval_s": 3.472,
+    "avg_ingest_s": 26.739,
+    "avg_generation_s": 23.702
+  },
+  "cost": {
+    "pricing_source": "Anthropic public pricing (base input/output USD per MTok)",
+    "token_counter": "tiktoken/o200k_base (compression baseline); provider usage (billed)",
+    "api_calls": {
+      "composer": 700,
+      "judge": 2903,
+      "total": 3603
+    },
+    "billed_tokens": {
+      "composer_input": 31135545,
+      "composer_output": 371564,
+      "judge_input": 4955087,
+      "judge_output": 245048,
+      "total": 36707244
+    },
+    "real_cost_usd": {
+      "composer": 98.9801,
+      "judge": 30.9016,
+      "total": 129.8817,
+      "per_question": 0.185545
+    },
+    "context_compression": {
+      "avg_evidence_tokens": 38719,
+      "avg_full_context_tokens": 1033243,
+      "compression_pct": 96.3
+    },
+    "full_context_baseline": {
+      "note": "Projected cost if the entire conversation were sent as context for every question (no retrieval), composer only.",
+      "projected_composer_cost_usd": 2188.08,
+      "our_composer_cost_usd": 98.9801,
+      "savings_pct": 95.5,
+      "cost_multiplier": 22.1
+    }
+  },
+  "context_efficiency": {
+    "avg_evidence_tokens": 38719,
+    "avg_full_context_tokens": 1033243,
+    "compression_pct": 96.3,
+    "avg_search_hits": 80.0,
+    "avg_graph_hits": 0.0,
+    "token_counter": "tiktoken/o200k_base"
+  }
+}
