@@ -12,13 +12,13 @@ LoCoMo, BEAM), end to end:
      ~2x LLM cost per turn for no lineage benefit — the floor + composer
      answers temporal/overwrite questions correctly on its own.)
 
-  2. RETRIEVE — 4-surface evidence gathering, per turn:
+  2. RETRIEVE — 3-surface evidence gathering, per turn:
        a) search(mode="hybrid", rerank=True) — vector + full-text, RRF-fused,
           cross-encoder reranked, session-diversified.
        b) recall(compose_answer=False) — structured current/previous/conflict
           lineage evidence.
        c) get_lineage() — superseded predecessors of retrieved active facts.
-       d) traverse_many() — multi-hop graph relations from top search hits.
+       (Graph traversal is omitted: add_batch() ingest creates no edges.)
 
   3. GENERATE — one composer LLM call answers from the assembled evidence
      block, using a warm "second brain" prompt (conversational, grounded).
@@ -130,10 +130,9 @@ USER_ID = os.environ.get("ENGRAM_CHATBOT_USER_ID", "default-user")
 HISTORY_LIMIT = 8
 
 # Retrieval knobs — mirror the benchmark defaults (search-limit 60, max 4
-# turns/session, graph depth 1, rerank on). All overridable via env.
+# turns/session, rerank on). All overridable via env.
 SEARCH_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_SEARCH_LIMIT", "60"))
 MAX_PER_SESSION = int(os.environ.get("ENGRAM_CHATBOT_MAX_PER_SESSION", "4"))
-GRAPH_DEPTH = int(os.environ.get("ENGRAM_CHATBOT_GRAPH_DEPTH", "1"))
 RERANK_MODE = os.environ.get("ENGRAM_CHATBOT_RERANK", "true").lower()
 VALID_RERANK_MODES = {"true", "false"}
 
@@ -519,15 +518,14 @@ def diversify_by_session(
 def _build_evidence_block(
     search_results: list[Any],
     recall_answer: Any | None,
-    graph_context: str,
     lineage_superseded: list[Any] | None = None,
 ) -> str:
     """Assemble the evidence block from Engram's retrieval surfaces.
 
     Identical structure to the benchmark `_build_evidence_block`: recall's
     structured lineage first, then superseded predecessors, then the hybrid
-    search hits grouped by date and tagged [ACTIVE]/[SUPERSEDED], then graph
-    relations.
+    search hits grouped by date and tagged [ACTIVE]/[SUPERSEDED].
+    Graph traversal is excluded: add_batch() ingest creates no edges.
     """
     lines: list[str] = []
     seen: set[str] = set()
@@ -542,6 +540,12 @@ def _build_evidence_block(
             stamp = when.date().isoformat() if when else "unknown"
             seen.add(mem.memory_id)
             lines.append(f"SUPERSEDED (until {stamp}): {mem.fact or mem.content}")
+        # Include temporal_chain and other evidence-intent items (BEAM pipeline pattern).
+        for mem in getattr(recall_answer, "evidence", []) or []:
+            if mem.memory_id in seen:
+                continue
+            seen.add(mem.memory_id)
+            lines.append(f"RECALL: {mem.fact or mem.content}")
         if getattr(recall_answer, "conflict_note", None):
             lines.append(f"CONFLICT: {recall_answer.conflict_note}")
         if getattr(recall_answer, "answer_text", "").strip():
@@ -569,9 +573,6 @@ def _build_evidence_block(
         status = getattr(mem, "status", None) or mem.metadata.get("status", "active")
         tag = "[SUPERSEDED]" if status == "superseded" else "[ACTIVE]"
         lines.append(f"- {tag} {mem.content}")
-
-    if graph_context:
-        lines.append(f"\n{graph_context}")
 
     return "\n".join(lines) if lines else "(no matching memory)"
 
@@ -644,7 +645,7 @@ class MemoryChatbot:
                     f"{os.environ.get('ENGRAM_LLM_PROVIDER')} / "
                     f"{os.environ.get('ENGRAM_LLM_MODEL')}",
                 ),
-                ("pipeline", "add_batch -> search+recall+lineage+graph -> composer"),
+                ("pipeline", "add_batch -> search+recall+lineage -> composer"),
                 ("rerank", self._rerank_enabled()),
                 ("search_limit", SEARCH_LIMIT),
             ]
@@ -761,19 +762,21 @@ class MemoryChatbot:
         evidence, _trace = await self._retrieve_evidence(message)
         self._last_evidence = evidence
 
-        # 2. GENERATE — second-brain composer over the evidence block.
+        # 2. GENERATE — benchmark-aligned: evidence in user turn, <mem_thinking> primer.
+        user_content = (
+            f"<engram_memory_evidence>\n{evidence}\n</engram_memory_evidence>\n\n"
+            f"{message}\n\n"
+            "IMPORTANT: You MUST provide your full thinking in <mem_thinking> tags "
+            "BEFORE giving your answer."
+        )
         messages = [
             {"role": "system", "content": build_system_prompt()},
-            {
-                "role": "system",
-                "content": (f"<engram_memories>\n{evidence}\n</engram_memories>"),
-            },
             *self.history[-HISTORY_LIMIT:],
-            {"role": "user", "content": message},
+            {"role": "user", "content": user_content},
         ]
         llm_response = await self.engram.llm.complete_full(
             messages,
-            max_tokens=1200,
+            max_tokens=2000,
             temperature=0.4,
         )
         response = strip_thinking(llm_response.content.strip())
@@ -791,7 +794,7 @@ class MemoryChatbot:
         """4-surface retrieval, identical to the benchmark `retrieve_evidence`."""
         assert self.engram is not None
         rerank = self._rerank_enabled()
-        n_search = n_graph = n_lineage = 0
+        n_search = n_lineage = 0
         recall_intent = ""
         evidence = ""
 
@@ -859,36 +862,14 @@ class MemoryChatbot:
                         pass
             n_lineage = len(lineage_superseded)
 
-            # d) Graph traversal from the top active search hits.
-            graph_context = ""
-            seed_ids = [
-                r.memory.memory_id
-                for r in search_results
-                if r.memory.metadata.get("status") != "superseded"
-            ][:5]
-            if seed_ids and GRAPH_DEPTH > 0:
-                try:
-                    graph_results = await self.engram.traverse_many(
-                        start_memory_ids=seed_ids,
-                        max_depth=GRAPH_DEPTH,
-                        direction="any",
-                        skip_missing=True,
-                    )
-                    if graph_results:
-                        graph_context = self.engram.render_graph_context(graph_results)
-                        n_graph = len(graph_results)
-                except Exception:
-                    pass
-
             evidence = _build_evidence_block(
-                search_results, recall_answer, graph_context, lineage_superseded
+                search_results, recall_answer, lineage_superseded
             )
         except Exception as exc:
             evidence = f"(retrieval error: {type(exc).__name__}: {exc})"
 
         return evidence, {
             "search_hits": n_search,
-            "graph_hits": n_graph,
             "lineage_superseded": n_lineage,
             "recall_intent": recall_intent,
         }
@@ -976,7 +957,6 @@ class MemoryChatbot:
             rule(
                 f"evidence [search={trace['search_hits']} "
                 f"lineage={trace['lineage_superseded']} "
-                f"graph={trace['graph_hits']} "
                 f"recall={trace['recall_intent']}]"
             )
         )
@@ -1163,7 +1143,7 @@ def print_help() -> None:
         group.append_text(Text.from_markup("\n"))
         footer = Text(
             "Plain text runs the benchmark pipeline: "
-            "retrieve (search + recall + lineage + graph) → compose → "
+            "retrieve (search + recall + lineage) → compose → "
             "store the turn via add_batch.",
             style="dim italic",
         )
@@ -1189,7 +1169,7 @@ def print_help() -> None:
     print(
         dim(
             "Plain text runs the benchmark pipeline: "
-            "retrieve (search + recall + lineage + graph) -> compose -> "
+            "retrieve (search + recall + lineage) -> compose -> "
             "store the turn via add_batch."
         )
     )
