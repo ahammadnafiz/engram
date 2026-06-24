@@ -758,7 +758,7 @@ class MemoryChatbot:
         """One turn: retrieve over past memory, compose, then store this turn."""
         assert self.engram is not None
 
-        # 1. RETRIEVE — 4 surfaces over everything stored BEFORE this turn.
+        # 1. RETRIEVE — 3 surfaces over everything stored BEFORE this turn.
         evidence, _trace = await self._retrieve_evidence(message)
         self._last_evidence = evidence
 
@@ -791,7 +791,7 @@ class MemoryChatbot:
         return response
 
     async def _retrieve_evidence(self, question: str) -> tuple[str, dict[str, Any]]:
-        """4-surface retrieval, identical to the benchmark `retrieve_evidence`."""
+        """3-surface retrieval, identical to the benchmark `retrieve_evidence`."""
         assert self.engram is not None
         rerank = self._rerank_enabled()
         n_search = n_lineage = 0
@@ -951,7 +951,7 @@ class MemoryChatbot:
             )
 
     async def evidence(self, query: str) -> None:
-        """Show the 4-surface evidence block the composer would see."""
+        """Show the 3-surface evidence block the composer would see."""
         block, trace = await self._retrieve_evidence(query)
         print(
             rule(
@@ -1116,7 +1116,7 @@ COMMANDS = [
     ("/memories", "list recent Engram memories"),
     ("/search <query>", "hybrid search over stored memories"),
     ("/recall <question>", "ask memory: current/historical/event/lineage answer"),
-    ("/evidence <query>", "show the 4-surface evidence block for a query"),
+    ("/evidence <query>", "show the 3-surface evidence block for a query"),
     ("/forget <memory_id>", "delete one memory"),
     ("/clear", "purge this chatbot user's memories"),
     ("/model <gemini|claude>", "switch the LLM model"),

@@ -813,7 +813,11 @@ class Engram:
         # cosine similarity for the duplicate check.
         async def _retrieve(fact: str) -> list[tuple[str, str, float, float]]:
             hits = await self.search(
-                query=fact, agent_id=agent_id, user_id=user_id, limit=search_limit
+                query=fact,
+                agent_id=agent_id,
+                user_id=user_id,
+                limit=search_limit,
+                mode="hybrid",
             )
             return [
                 (h.memory.memory_id, h.memory.content, h.score, h.semantic_score)
