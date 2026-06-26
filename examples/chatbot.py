@@ -129,12 +129,18 @@ USER_ID = os.environ.get("ENGRAM_CHATBOT_USER_ID", "default-user")
 # keeps the thread without re-retrieving. Separate from memory retrieval.
 HISTORY_LIMIT = 8
 
-# Retrieval knobs — mirror the benchmark defaults (search-limit 60, max 4
-# turns/session, rerank on). All overridable via env.
-SEARCH_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_SEARCH_LIMIT", "60"))
-MAX_PER_SESSION = int(os.environ.get("ENGRAM_CHATBOT_MAX_PER_SESSION", "4"))
+# Retrieval knobs — tuned for Chonkie-chunked ingestion.
+# SEARCH_LIMIT x CHUNK_TOKENS ≈ total tokens of evidence injected per turn.
+# 10 x 500 ≈ 5 000 tokens: denser than the old 1 500-token ceiling because
+# nothing is truncated. CANDIDATE_LIMIT stays wide so the reranker has room.
+SEARCH_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_SEARCH_LIMIT", "10"))
+MAX_PER_SESSION = int(os.environ.get("ENGRAM_CHATBOT_MAX_PER_SESSION", "3"))
 RERANK_MODE = os.environ.get("ENGRAM_CHATBOT_RERANK", "true").lower()
 VALID_RERANK_MODES = {"true", "false"}
+
+# Chonkie chunking: token budget per stored chunk.  Long turns are split into
+# boundary-aware chunks so retrieval can surface the most relevant portion.
+CHUNK_TOKENS = int(os.environ.get("ENGRAM_CHATBOT_CHUNK_TOKENS", "500"))
 
 # Store the assistant's reply as a memory too (role-tagged). The composer prompt
 # treats user turns as authoritative; assistant turns help answer "what did you
@@ -577,6 +583,22 @@ def _build_evidence_block(
     return "\n".join(lines) if lines else "(no matching memory)"
 
 
+def _chunk_text(text: str) -> list[str]:
+    """Split ``text`` into Chonkie chunks bounded at CHUNK_TOKENS.
+
+    Falls back to a single-item list when chonkie is not installed or chunking
+    fails, so ingestion is never blocked by a missing optional dependency."""
+    try:
+        from engram.chunking import chonkie_recursive_spans
+
+        spans = chonkie_recursive_spans(text, max_chunk_tokens=CHUNK_TOKENS)
+        if spans:
+            return [body for (_, body, _, _) in spans]
+    except Exception:
+        pass
+    return [text]
+
+
 class MemoryChatbot:
     def __init__(self) -> None:
         self.engram = None
@@ -875,7 +897,12 @@ class MemoryChatbot:
         }
 
     async def _ingest_turn(self, user_message: str, assistant_response: str) -> None:
-        """Store the turn verbatim as date-anchored episodic rows (add_batch).
+        """Store the turn as date-anchored episodic rows via add_batch.
+
+        Long texts are split into boundary-aware Chonkie chunks; each chunk
+        becomes its own memory row tagged with chunk_index / chunk_count.
+        Short texts (or when chonkie is unavailable) produce a single row.
+        No content is ever truncated and discarded.
 
         No LLM extraction, no supersession decisioning — the benchmark floor
         behaviour. The user turn is authoritative; the assistant turn is stored
@@ -887,26 +914,37 @@ class MemoryChatbot:
         turn = self._turn_index
         self._turn_index += 1
 
-        def _row(role_label: str, role: str, text: str) -> dict[str, Any]:
-            content = f"[{human_date}] {role_label}: {text}"
-            return {
-                "content": content,
-                "main_content": content,
-                "agent_id": AGENT_ID,
-                "user_id": USER_ID,
-                "memory_type": "episodic",
-                "metadata": {
+        def _rows_for(role_label: str, role: str, text: str) -> list[dict[str, Any]]:
+            chunks = _chunk_text(text)
+            total = len(chunks)
+            rows: list[dict[str, Any]] = []
+            for idx, body in enumerate(chunks):
+                content = f"[{human_date}] {role_label}: {body}"
+                meta: dict[str, Any] = {
                     "source": "chatbot",
                     "original_session_id": str(self.session_id),
                     "chat_date": chat_date,
                     "turn_index": turn,
                     "turn_role": role,
-                },
-            }
+                }
+                if total > 1:
+                    meta["chunk_index"] = idx
+                    meta["chunk_count"] = total
+                rows.append(
+                    {
+                        "content": content,
+                        "main_content": content,
+                        "agent_id": AGENT_ID,
+                        "user_id": USER_ID,
+                        "memory_type": "episodic",
+                        "metadata": meta,
+                    }
+                )
+            return rows
 
-        rows = [_row("USER", "user", user_message)]
+        rows = _rows_for("USER", "user", user_message)
         if STORE_ASSISTANT_TURNS and assistant_response.strip():
-            rows.append(_row("ASSISTANT", "assistant", assistant_response))
+            rows.extend(_rows_for("ASSISTANT", "assistant", assistant_response))
 
         try:
             await self.engram.add_batch(rows)
