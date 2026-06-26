@@ -70,8 +70,12 @@ if TYPE_CHECKING:
 # --- identity + retrieval knobs (mirror the benchmark/chatbot defaults) ------
 AGENT_ID = os.environ.get("ENGRAM_CHATBOT_AGENT_ID", "engram-chatbot")
 USER_ID = os.environ.get("ENGRAM_CHATBOT_USER_ID", "default-user")
-SEARCH_LIMIT = int(os.environ.get("ENGRAM_MCP_SEARCH_LIMIT", "60"))
-MAX_PER_SESSION = int(os.environ.get("ENGRAM_MCP_MAX_PER_SESSION", "4"))
+# Tuned for Chonkie-chunked ingestion: each stored item is already bounded at
+# CHUNK_TOKENS, so SEARCH_LIMIT x CHUNK_TOKENS ≈ total tokens returned to the
+# host LLM.  10 x 500 ≈ 5000 tokens — denser and more accurate than the old
+# 1500-token ceiling because nothing is truncated mid-sentence.
+SEARCH_LIMIT = int(os.environ.get("ENGRAM_MCP_SEARCH_LIMIT", "10"))
+MAX_PER_SESSION = int(os.environ.get("ENGRAM_MCP_MAX_PER_SESSION", "3"))
 CANDIDATE_LIMIT = int(os.environ.get("ENGRAM_MCP_CANDIDATE_LIMIT", "100"))
 RERANK = os.environ.get("ENGRAM_MCP_RERANK", "true").lower() != "false"
 
@@ -89,8 +93,12 @@ TOKEN_SKIP = "#nomem"
 TOKEN_OFF = "#mem-off"
 TOKEN_ON = "#mem-on"
 
-# --- turn capture: how much of each tool result to keep, what to strip --------
-TOOL_RESULT_CAP = int(os.environ.get("ENGRAM_MCP_TOOL_RESULT_CAP", "1500"))
+# --- Chonkie chunking: token budget per ingested chunk -----------------------
+# Long user/assistant turns are split into boundary-aware Chonkie chunks before
+# storage.  Each chunk is stored as its own memory row so retrieval can surface
+# the most relevant portion without crude mid-sentence truncation.
+CHUNK_TOKENS = int(os.environ.get("ENGRAM_MCP_CHUNK_TOKENS", "500"))
+
 _RECALL_HINT = "recall_memory"  # drop our own lookups so recall never feeds itself
 _SYSREMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 _CAVEAT_RE = re.compile(r"<local-command-caveat>.*?</local-command-caveat>", re.DOTALL)
@@ -197,10 +205,14 @@ def diversify_by_session(
 
 
 def _build_evidence_block(
-    search_results: list[Any], lineage_superseded: list[Any]
+    search_results: list[Any],
+    lineage_superseded: list[Any],
 ) -> str:
     """Assemble the evidence block: superseded predecessors first, then the
-    hybrid hits grouped by date and tagged [ACTIVE]/[SUPERSEDED]."""
+    hybrid hits grouped by date and tagged [ACTIVE]/[SUPERSEDED].
+
+    No truncation is applied here — stored memories are already Chonkie-chunked
+    to CHUNK_TOKENS during ingestion, so each item is already bounded."""
     lines: list[str] = []
     seen: set[str] = set()
 
@@ -332,36 +344,66 @@ async def _session_id(engram: Any) -> str:
     return str(session.session_id)
 
 
+def _chunk_text(text: str) -> list[str]:
+    """Split ``text`` into Chonkie chunks.  Falls back to a single-item list
+    when chonkie is not installed or chunking fails, so ingestion is never
+    blocked by a missing optional dependency."""
+    try:
+        from engram.chunking import chonkie_recursive_spans
+
+        spans = chonkie_recursive_spans(text, max_chunk_tokens=CHUNK_TOKENS)
+        if spans:
+            return [body for (_, body, _, _) in spans]
+    except Exception:
+        pass
+    return [text]
+
+
 async def save_turn(engram: Any, user_message: str, assistant_response: str) -> int:
-    """Store one exchange verbatim as date-anchored episodic rows (add_batch)."""
+    """Store one exchange as date-anchored episodic rows via add_batch.
+
+    Long texts are split into boundary-aware Chonkie chunks; each chunk
+    becomes its own memory row with a ``chunk_index`` / ``chunk_count`` tag.
+    Short texts (or when chonkie is unavailable) produce a single row as
+    before.  No content is ever truncated and discarded."""
     sid = await _session_id(engram)
     chat_date = datetime.now().date().isoformat()
     human_date = _to_human_date(chat_date)
-    # Monotonic, O(1) ordering marker. turn_index is informational only —
-    # retrieval orders by chat_date / created_at, never by this — so a cheap
-    # millisecond stamp beats an O(n) scan of the session's existing rows.
+    # Monotonic, O(1) ordering marker — retrieval orders by chat_date /
+    # created_at, not this, so a millisecond stamp is sufficient.
     turn = int(datetime.now().timestamp() * 1000)
 
-    def _row(role_label: str, role: str, text: str) -> dict[str, Any]:
-        content = f"[{human_date}] {role_label}: {text}"
-        return {
-            "content": content,
-            "main_content": content,
-            "agent_id": AGENT_ID,
-            "user_id": USER_ID,
-            "memory_type": "episodic",
-            "metadata": {
+    def _rows_for(role_label: str, role: str, text: str) -> list[dict[str, Any]]:
+        chunks = _chunk_text(text)
+        total = len(chunks)
+        rows: list[dict[str, Any]] = []
+        for idx, body in enumerate(chunks):
+            content = f"[{human_date}] {role_label}: {body}"
+            meta: dict[str, Any] = {
                 "source": "engram-mcp",
                 "original_session_id": sid,
                 "chat_date": chat_date,
                 "turn_index": turn,
                 "turn_role": role,
-            },
-        }
+            }
+            if total > 1:
+                meta["chunk_index"] = idx
+                meta["chunk_count"] = total
+            rows.append(
+                {
+                    "content": content,
+                    "main_content": content,
+                    "agent_id": AGENT_ID,
+                    "user_id": USER_ID,
+                    "memory_type": "episodic",
+                    "metadata": meta,
+                }
+            )
+        return rows
 
-    rows = [_row("USER", "user", user_message)]
+    rows = _rows_for("USER", "user", user_message)
     if assistant_response.strip():
-        rows.append(_row("ASSISTANT", "assistant", assistant_response))
+        rows.extend(_rows_for("ASSISTANT", "assistant", assistant_response))
     memories = await engram.add_batch(rows)
     return len(memories)
 
@@ -409,20 +451,37 @@ NEVER invent names, numbers, dates, or details that aren't in the evidence. If
 it genuinely isn't there, say you don't have it yet."""
 
 _engram: Any = None
+_connect_lock: asyncio.Lock | None = None
+
+
+async def _ensure_connected() -> Any:
+    """Connect lazily on first use so the server can respond to MCP initialize
+    immediately, without blocking on model/DB startup (~3-15 s)."""
+    global _engram, _connect_lock
+    if _engram is not None:
+        return _engram
+    if _connect_lock is None:
+        _connect_lock = asyncio.Lock()
+    async with _connect_lock:
+        if _engram is None:
+            _engram = await _connect()
+            with contextlib.suppress(Exception):
+                await _engram.warmup()
+    return _engram
 
 
 @contextlib.asynccontextmanager
 async def _lifespan(_server: FastMCP):  # type: ignore[no-untyped-def]
-    global _engram
-    _engram = await _connect()
-    with contextlib.suppress(Exception):
-        await _engram.warmup()  # preload the reranker off the request path
+    global _connect_lock
+    _connect_lock = asyncio.Lock()
     try:
         yield
     finally:
-        with contextlib.suppress(Exception):
-            await _engram.close()
-        _engram = None
+        global _engram
+        if _engram is not None:
+            with contextlib.suppress(Exception):
+                await _engram.close()
+            _engram = None
 
 
 async def recall_memory(query: str, extra_queries: list[str] | None = None) -> str:
@@ -439,10 +498,9 @@ async def recall_memory(query: str, extra_queries: list[str] | None = None) -> s
             events of a "how long between X and Y" question). Results are fused
             for higher recall. Use it when one query won't capture everything.
     """
-    if _engram is None:
-        return "(memory unavailable: server not connected)"
+    engram = await _ensure_connected()
     queries = [query, *(q for q in (extra_queries or []) if q.strip())]
-    return await _retrieve(_engram, queries)
+    return await _retrieve(engram, queries)
 
 
 def build_server() -> FastMCP:
@@ -464,8 +522,6 @@ def build_server() -> FastMCP:
     async def ingest(request: Request) -> JSONResponse:
         """Fast warm-process save used by the Stop hook. The daemon owns the
         namespace, so ingest and recall can never target different buckets."""
-        if _engram is None:
-            return JSONResponse({"error": "not ready"}, status_code=503)
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError):
@@ -475,7 +531,8 @@ def build_server() -> FastMCP:
         if not user.strip():
             return JSONResponse({"saved": 0})
         try:
-            n = await save_turn(_engram, user, assistant)
+            eng = await _ensure_connected()
+            n = await save_turn(eng, user, assistant)
         except Exception as exc:  # surface, but never crash the daemon
             return JSONResponse({"error": str(exc)}, status_code=500)
         return JSONResponse({"saved": n})
@@ -529,17 +586,17 @@ def _format_args(inp: Any) -> str:
 
 
 def _result_text(content: Any) -> str:
-    """Flatten a tool_result's content (str or text-block list) and cap its length."""
+    """Flatten a tool_result's content (str or text-block list).
+
+    Full content is preserved here; Chonkie chunking in save_turn() handles
+    boundary-aware splitting before anything goes to the database."""
     if isinstance(content, list):
         content = "\n".join(
             b.get("text", "")
             for b in content
             if isinstance(b, dict) and b.get("type") == "text"
         )
-    text = str(content).strip()
-    if len(text) > TOOL_RESULT_CAP:
-        text = text[:TOOL_RESULT_CAP] + " …(truncated)"
-    return text
+    return str(content).strip()
 
 
 def _iter_events(transcript_path: str) -> list[tuple[str, Any]]:
