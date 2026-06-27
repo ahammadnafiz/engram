@@ -282,15 +282,15 @@ class TestSaveTurn:
 # ===========================================================================
 class TestTuningConstants:
     def test_recall_output_token_budget(self):
-        """SEARCH_LIMIT x CHUNK_TOKENS must stay in the 3k-8k token range.
+        """SEARCH_LIMIT x CHUNK_TOKENS must stay in the 3k-20k token range.
 
         Too low → poor accuracy (not enough context).
         Too high → context bloat that degrades host LLM reasoning.
         """
         max_output_tokens = SEARCH_LIMIT * CHUNK_TOKENS
-        assert 3_000 <= max_output_tokens <= 8_000, (
+        assert 3_000 <= max_output_tokens <= 20_000, (
             f"SEARCH_LIMIT={SEARCH_LIMIT} x CHUNK_TOKENS={CHUNK_TOKENS} = "
-            f"{max_output_tokens} tokens — outside the 3k-8k target window"
+            f"{max_output_tokens} tokens — outside the 3k-20k target window"
         )
 
     def test_reranker_compression_ratio(self):

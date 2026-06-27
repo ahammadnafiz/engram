@@ -72,11 +72,10 @@ AGENT_ID = os.environ.get("ENGRAM_CHATBOT_AGENT_ID", "engram-chatbot")
 USER_ID = os.environ.get("ENGRAM_CHATBOT_USER_ID", "default-user")
 # Tuned for Chonkie-chunked ingestion: each stored item is already bounded at
 # CHUNK_TOKENS, so SEARCH_LIMIT x CHUNK_TOKENS ≈ total tokens returned to the
-# host LLM.  10 x 500 ≈ 5000 tokens — denser and more accurate than the old
-# 1500-token ceiling because nothing is truncated mid-sentence.
-SEARCH_LIMIT = int(os.environ.get("ENGRAM_MCP_SEARCH_LIMIT", "10"))
+# host LLM.  30 x 500 ≈ 15000 tokens — wider recall window for richer context.
+SEARCH_LIMIT = int(os.environ.get("ENGRAM_MCP_SEARCH_LIMIT", "30"))
 MAX_PER_SESSION = int(os.environ.get("ENGRAM_MCP_MAX_PER_SESSION", "3"))
-CANDIDATE_LIMIT = int(os.environ.get("ENGRAM_MCP_CANDIDATE_LIMIT", "100"))
+CANDIDATE_LIMIT = int(os.environ.get("ENGRAM_MCP_CANDIDATE_LIMIT", "120"))
 RERANK = os.environ.get("ENGRAM_MCP_RERANK", "true").lower() != "false"
 
 # --- daemon address (shared by `serve` and the Stop hook's fast path) --------

@@ -131,9 +131,9 @@ HISTORY_LIMIT = 8
 
 # Retrieval knobs — tuned for Chonkie-chunked ingestion.
 # SEARCH_LIMIT x CHUNK_TOKENS ≈ total tokens of evidence injected per turn.
-# 10 x 500 ≈ 5 000 tokens: denser than the old 1 500-token ceiling because
-# nothing is truncated. CANDIDATE_LIMIT stays wide so the reranker has room.
-SEARCH_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_SEARCH_LIMIT", "10"))
+# 30 x 500 ≈ 15 000 tokens: wider recall window for richer context.
+# CANDIDATE_LIMIT stays wide so the reranker has room.
+SEARCH_LIMIT = int(os.environ.get("ENGRAM_CHATBOT_SEARCH_LIMIT", "30"))
 MAX_PER_SESSION = int(os.environ.get("ENGRAM_CHATBOT_MAX_PER_SESSION", "3"))
 RERANK_MODE = os.environ.get("ENGRAM_CHATBOT_RERANK", "true").lower()
 VALID_RERANK_MODES = {"true", "false"}
